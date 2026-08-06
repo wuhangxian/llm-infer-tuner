@@ -1,0 +1,32 @@
+{
+"workload_id": "qa-chat-3.5k-1k",
+"type": "chat",
+"modality": "text",
+
+"input_tokens": {
+    "distribution": "fixed",
+    "value": 3500
+},
+
+"output_tokens": {
+    "distribution": "fixed",
+    "value": 1000
+},
+
+"traffic": {
+    "mode": "concurrency",
+    "values": [1, 2, 4, 8, 16, 32]
+},
+
+"request": {
+    "stream": true,
+    "sampling": {
+    "temperature": 0.7,
+    "top_p": 0.8,
+    "top_k": 20,
+    "max_new_tokens": 1000
+    }
+},
+
+"notes": "文本问答场景，固定约3500输入token和1000输出token"
+}

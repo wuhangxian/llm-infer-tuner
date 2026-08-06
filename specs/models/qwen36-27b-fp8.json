@@ -1,0 +1,63 @@
+{
+  "model_id": "qwen36-27b-fp8",
+  "hf_model_id": "Qwen/Qwen3.6-27B-FP8",
+  "family": "qwen3.6",
+  "parameter_count_b": 27,
+
+  "modalities": {
+    "input": ["text", "image"],
+    "output": ["text"]
+  },
+
+  "quantization": {
+    "method": "fp8",
+    "scheme": "fine-grained",
+    "block_size": 128,
+    "weight_dtype": "fp8",
+    "activation_dtype": "bf16"
+  },
+
+  "architecture": {
+    "num_hidden_layers": 64,
+    "hidden_size": 5120,
+    "vocab_size": 248320,
+    "is_moe": false,
+    "attention": {
+      "type": "hybrid",
+      "gated_attention": {
+        "num_query_heads": 24,
+        "num_key_value_heads": 4,
+        "head_dim": 256,
+        "rope_dim": 64
+      },
+      "gated_deltanet": {
+        "num_value_heads": 48,
+        "num_query_key_heads": 16,
+        "head_dim": 128
+      }
+    },
+    "intermediate_size": 17408
+  },
+
+  "context": {
+    "native_context_length": 262144,
+    "maximum_context_length": 1010000,
+    "recommended_initial_context_length": 131072
+  },
+
+  "capabilities": {
+    "supports_reasoning": true,
+    "supports_chat_template": true,
+    "supports_tool_call": true,
+    "supports_mtp": true
+  },
+
+  "deployment": {
+    "model_format": "huggingface",
+    "weight_size_gb": null,
+    "model_path": null
+  },
+
+  "source": "https://huggingface.co/Qwen/Qwen3.6-27B-FP8",
+  "notes": "Qwen3.6 采用 Gated DeltaNet 与 Gated Attention 混合结构。"
+}
