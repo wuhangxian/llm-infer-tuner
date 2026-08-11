@@ -47,6 +47,34 @@ SLA 过滤和性能排序
 
 当前开发阶段进一步收窄为：先完成 SGLang + NVIDIA 的离线测试范围生成器。固定 JSON JobSpec 作为输入，由 Claude Code CLI 渐进式读取 `specs/` 和 `references/` 并分析生成 SearchPlan，再由本地程序校验并输出候选参数和 server/benchmark 命令；不启动服务、不执行 benchmark。初期直接在宿主机调试，稳定后再封装 LLMOptAgent Agent 容器。详细实施计划见 [`docs/development-plan.md`](docs/development-plan.md)。
 
+当前已有一个 Pro5000 离线验收示例：
+
+```bash
+cd /data/LLMOptAgent
+uv run llmopt validate-job examples/jobs/qwen36_pro5000_random_v1.json
+uv run llmopt plan examples/jobs/qwen36_pro5000_random_v1.json \
+  --search-plan tests/fixtures/search_plan_qwen36_pro5000.json \
+  --output outputs/qwen36_pro5000_random_v1
+uv run llmopt render outputs/qwen36_pro5000_random_v1/search_plan.json \
+  --job examples/jobs/qwen36_pro5000_random_v1.json \
+  --model-path /data1/model/Qwen3.6-27B-FP8/ \
+  --dataset-path ShareGPT_V3_unfiltered_cleaned_split.json \
+  --output outputs/qwen36_pro5000_random_v1/rendered
+```
+
+上述命令只生成 `candidates.jsonl`、`commands.sh` 和报告，不会启动 SGLang 服务或执行压测。
+如果已经从目标镜像保存了帮助文本，可以额外进行参数名校验：
+
+```bash
+uv run llmopt render outputs/qwen36_pro5000_random_v1/search_plan.json \
+  --job examples/jobs/qwen36_pro5000_random_v1.json \
+  --model-path /data1/model/Qwen3.6-27B-FP8/ \
+  --dataset-path ShareGPT_V3_unfiltered_cleaned_split.json \
+  --output outputs/qwen36_pro5000_random_v1/rendered \
+  --server-help references/sglang/snapshots/<version>/launch_server_help.txt \
+  --benchmark-help references/sglang/snapshots/<version>/bench_serving_help.txt
+```
+
 ### 2.2 长期目标
 
 未来扩展到：
@@ -355,21 +383,32 @@ sla_failed
 
 #### 0.3 Engine References
 
-在 `references/sglang/` 和后续的 `references/vllm/` 中记录：
+`references/sglang/` 不复制整篇官方参数文档。经常更新的官方资料通过链接引用，Agent 在生成 SearchPlan 时按目标 SGLang 版本检索；项目自己的搜索策略和约束则固定保存在本地。
 
-- 镜像版本和 CLI 参数；
-- 参数作用、适用场景和互斥关系；
-- attention backend、KV Cache、调度、Prefill、CUDA Graph 等参数；
-- 官方 Cookbook 和团队实测 recipe；
-- 常见 OOM、CUDA、NCCL 和错误参数问题。
+当前采用“官方来源 + 项目策略 + 目标环境校验”的方式：
 
-参数知识建议分成两类：
+- `sources.json`：官方文档、SGLang 源码和外部参考项目的链接；
+- `parameter_policy.json`：哪些参数第一轮允许搜索、哪些参数默认固定，以及证据要求；
+- `tuning_principles.md`：TP、上下文长度等调优经验、反模式和证据要求；
+- 目标镜像中的 `python -m sglang.launch_server --help`：确认当前参数名、别名和可用性的最终依据。
+
+不维护一份脱离版本的完整 SGLang 参数字典，也不把最新网页参数直接当作目标镜像一定支持的参数。
+
+当前重要调优原则是：在显存、KV Pool 和 SLA 都满足的前提下优先使用最少卡数；
+PCIe 多卡优先评估 PP 以减少通信，NVLink 多卡重点评估 TP 的延迟收益。互联拓扑
+只决定候选优先级，不直接决定最终最优方案，最终结果必须来自相同 workload 下的实测。
+
+SearchPlan 中 `pinned` 和 `search_space` 只能放 SGLang 参数名；基线说明、经验备注
+应放到 `constraints`、`axes.*.reason`、`axes.*.source` 或顶层 `notes`，不能伪装成
+`baseline_tp_size` 等参数。
+
+后续如果需要保存版本化证据，只保存目标镜像的 CLI 快照：
 
 ```text
-parameters.yaml       机器可读的参数名、类型、取值和约束
-compatibility.yaml    版本、GPU、模型和后端兼容性
-tuning-guide.md       Agent 可阅读的调优经验
-failure-modes.md      常见失败现象和处理建议
+references/sglang/sources.json
+references/sglang/parameter_policy.json
+references/sglang/tuning_principles.md
+references/sglang/snapshots/<sglang-version>/launch_server_help.txt
 ```
 
 #### 0.4 Workload 知识
@@ -423,7 +462,7 @@ failure-modes.md      常见失败现象和处理建议
 - `max_running_requests`；
 - `max_total_tokens`；
 - CUDA Graph 相关开关；
-- 模型专属 parser 和 speculative decoding 参数。
+- 模型需要的 reasoning/tool parser 应固定启用；speculative decoding 只有在模型和运行时均支持时才纳入搜索。
 
 不建议第一轮同时搜索所有参数。模型路径、精度、必要 parser、拓扑相关参数等应优先固定。
 
@@ -523,11 +562,14 @@ LLMOptAgent/
 │   ├── models/
 │   └── workloads/
 ├── references/
-│   └── sglang/
-│       ├── parameters.yaml
-│       ├── compatibility.yaml
-│       ├── tuning-guide.md
-│       └── failure-modes.md
+│   ├── sglang/
+│   └── parallelism/
+│       ├── principles.md
+│       ├── topology.md
+│       └── memory-and-kv-pool.md
+├── skills/
+│   └── parallelism-search/
+│       └── SKILL.md
 ├── jobs/
 ├── outputs/
 ├── planner/

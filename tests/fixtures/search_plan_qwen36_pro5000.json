@@ -1,0 +1,30 @@
+{
+  "job_id": "qwen36_pro5000_random_v1",
+  "pinned": {
+    "tp_size": 8,
+    "context_length": 262144,
+    "reasoning_parser": "qwen3"
+  },
+  "search_space": {
+    "attention_backend": ["flashinfer"],
+    "chunked_prefill_size": [4096, 8192]
+  },
+  "axes": {
+    "attention_backend": {
+      "values": ["flashinfer"],
+      "source": "sglang-server-arguments",
+      "reason": "first-pass backend candidate",
+      "risk": "high"
+    },
+    "chunked_prefill_size": {
+      "values": [4096, 8192],
+      "source": "sglang-server-arguments",
+      "reason": "long-context prefill candidate",
+      "risk": "medium"
+    }
+  },
+  "search_policy": {
+    "strategy": "baseline_first_bounded_product",
+    "max_candidates": 4
+  }
+}

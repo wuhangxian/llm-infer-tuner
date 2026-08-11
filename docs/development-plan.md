@@ -70,11 +70,17 @@
 │   ├── models/
 │   └── workloads/
 ├── references/
-│   └── sglang/
-│       ├── parameters.yaml
-│       ├── compatibility.yaml
-│       ├── tuning-guide.md
-│       └── failure-modes.md
+│   ├── sglang/
+│   │   ├── sources.json
+│   │   ├── parameter_policy.json
+│   │   └── tuning_principles.md
+│   └── parallelism/
+│       ├── principles.md
+│       ├── topology.md
+│       └── memory-and-kv-pool.md
+├── skills/
+│   └── parallelism-search/
+│       └── SKILL.md
 ├── jobs/
 ├── outputs/
 ├── planner/
@@ -102,6 +108,37 @@
 ```
 
 第一阶段暂时不新增 `agent/`、`runners/`、`resolved/` 的业务代码。保留这些目录作为后续执行阶段的扩展位置即可。
+
+## 2.1 推荐开发顺序
+
+虽然最终链路包含 Claude Code，但开发时不先接 AI。先用固定 fixture 模拟一份合法的 SearchPlan，把本地校验、候选生成和命令渲染跑通，再接入 Claude Code。这样可以把“AI 是否正确理解 references”和“本地程序是否能安全生成命令”分开验证。
+
+推荐顺序如下：
+
+```text
+项目基础
+  → 数据模型
+  → specs/references 加载
+  → 硬约束检查
+  → fixture SearchPlan
+  → 候选生成
+  → SGLang 命令渲染
+  → Claude Code Search Planner
+  → CLI 串联
+  → 端到端离线验收
+```
+
+每一步都应形成一个可运行的小闭环：
+
+1. **项目基础**：建立 Python 包、依赖、测试和 CLI 空入口。
+2. **数据模型**：用 Pydantic 固化 JobSpec、SearchPlan 和 Candidate 的 JSON 契约。
+3. **加载层**：按 ID 加载 HardwareSpec、ModelSpec、WorkloadSpec、benchmark method 和 SGLang policy。
+4. **规则层**：检查引用、TP、上下文长度、参数类别和硬件/模型约束，并保留排除理由。
+5. **本地规划链路**：使用 fixture SearchPlan 验证候选上限、baseline-first 和命令渲染，不依赖 Claude Code。
+6. **Claude Code 接入**：让 Claude 只负责分析资料并输出 SearchPlan，禁止直接输出最终 Shell 命令。
+7. **CLI 和验收**：串联 `validate-job`、`plan`、`render`，确认全流程不启动服务、不访问 GPU。
+
+其中第 5 步是关键里程碑。完成后，即使暂时没有 Claude Code，也应能用人工编写的 SearchPlan 生成合法候选；完成第 6 步后，才实现自动分析能力。
 
 ## 3. 数据契约
 
@@ -182,6 +219,10 @@ Candidate 是一个可以交给未来执行器的命令描述，但第一阶段�
   },
   "server_command": ["python", "-m", "sglang.launch_server", "..."],
   "benchmark_command": ["python", "-m", "sglang.bench_serving", "..."],
+  "benchmark_commands": [
+    ["python", "-m", "sglang.bench_serving", "..."],
+    ["python", "-m", "sglang.bench_serving", "..."]
+  ],
   "reasons": ["..."],
   "expected_risk": "medium"
 }
@@ -199,11 +240,11 @@ Candidate 是一个可以交给未来执行器的命令描述，但第一阶段�
 - Create: `cli/main.py`
 - Create: `tests/test_smoke.py`
 
-- [ ] 创建 Python package 和 `llmopt` CLI 入口；
-- [ ] 配置 Python 版本、Pydantic、Typer、PyYAML、packaging；
-- [ ] 配置 Ruff、Pyright 和 pytest；
-- [ ] 增加 `llmopt --help` smoke test；
-- [ ] 运行 `uv run pytest`、`uv run ruff check .`、`uv run pyright`。
+- [x] 创建 Python package 和 `llmopt` CLI 入口；
+- [x] 配置 Python 版本、Pydantic、Typer、PyYAML、packaging；
+- [x] 配置 Ruff、Pyright 和 pytest；
+- [x] 增加 `llmopt --help` smoke test；
+- [x] 运行 `uv run pytest`、`uv run ruff check .`、`uv run pyright`。
 
 ### Task 2：定义 Pydantic 数据模型
 
@@ -214,12 +255,12 @@ Candidate 是一个可以交给未来执行器的命令描述，但第一阶段�
 - Create: `schemas/candidate.py`
 - Create: `tests/test_schemas.py`
 
-- [ ] 定义 `JobSpec`、SLA、SearchBudget；
-- [ ] 定义 Hardware/Model/Workload 引用字段；
-- [ ] 定义 `SearchPlan`、ParameterAxis、Constraint；
-- [ ] 定义 `Candidate` 和命令字段；
-- [ ] 为非法字段、非法数值和缺失引用编写失败测试；
-- [ ] 保证模型可以导出 JSON Schema。
+- [x] 定义 `JobSpec`、SLA、SearchBudget；
+- [x] 定义 Hardware/Model/Workload 引用字段；
+- [x] 定义 `SearchPlan`、ParameterAxis、Constraint；
+- [x] 定义 `Candidate` 和命令字段；
+- [x] 为非法字段、非法数值和缺失引用编写失败测试；
+- [x] 保证模型可以导出 JSON Schema。
 
 ### Task 3：实现 specs 加载
 
@@ -229,30 +270,30 @@ Candidate 是一个可以交给未来执行器的命令描述，但第一阶段�
 - Create: `tests/test_spec_loader.py`
 - Add fixtures: `tests/fixtures/specs/`
 
-- [ ] 实现按 ID 查找 hardware/model/workload spec；
-- [ ] 统一处理 JSON 和 YAML；
-- [ ] 对不存在、重复和格式错误的 spec 给出明确错误；
-- [ ] 将加载结果转换为内部 Pydantic 对象；
-- [ ] 测试示例 JobSpec 可以加载三类 spec。
+- [x] 实现按 ID 查找 hardware/model/workload spec；
+- [x] 统一处理 JSON 和 YAML；
+- [x] 对不存在、重复和格式错误的 spec 给出明确错误；
+- [x] 将加载结果转换为内部 Pydantic 对象；
+- [x] 测试示例 JobSpec 可以加载三类 spec。
 
 ### Task 4：实现 SGLang references 加载
 
 **Files:**
 
 - Create: `planner/reference_loader.py`
-- Add: `references/sglang/parameters.yaml`
-- Add: `references/sglang/compatibility.yaml`
-- Add: `references/sglang/tuning-guide.md`
-- Add: `references/sglang/failure-modes.md`
+- Add: `references/sglang/sources.json`
+- Add: `references/sglang/parameter_policy.json`
+- Add: `references/sglang/tuning_principles.md`
 - Create: `tests/test_reference_loader.py`
 
-- [ ] 定义参数 reference 的 YAML 结构；
-- [ ] 支持 CLI flag、类型、候选值、版本和 GPU 约束；
-- [ ] 支持参数来源和风险字段；
-- [ ] 支持 compatibility rule 加载；
-- [ ] 用少量 NVIDIA/SGLang 参数建立最小可用规则集。
+- [x] 定义来源链接和参数策略的 JSON 结构；
+- [x] 支持加载官方来源链接和外部参考链接；
+- [x] 支持加载搜索参数、固定参数和条件搜索参数；
+- [x] 将调优经验和判断原则使用 Markdown 保存，避免与机器可校验策略混杂；
+- [x] 要求候选参数通过目标镜像 `launch_server --help` 校验；
+- [x] 用少量 NVIDIA/SGLang 参数建立最小可用策略集。
 
-第一版不要求一次性录入所有 SGLang 参数，优先支持 TP、attention backend、KV cache、chunked prefill、并发和 parser。
+第一版不要求一次性录入所有 SGLang 参数，也不复制官方文档。优先支持 TP、attention backend、KV cache、chunked prefill、并发和 parser；官方文档只保存链接，版本事实以后由目标镜像的 `--help` 快照提供。
 
 ### Task 5：实现规则检查器
 
@@ -261,13 +302,13 @@ Candidate 是一个可以交给未来执行器的命令描述，但第一阶段�
 - Create: `planner/rule_checker.py`
 - Create: `tests/test_rule_checker.py`
 
-- [ ] 检查 TP 不超过硬件 GPU 数；
-- [ ] 检查 context length 覆盖 workload 长度；
-- [ ] 根据 GPU/版本过滤 attention backend；
-- [ ] 检查参数是否存在、类型是否正确；
-- [ ] 检查互斥参数和组合约束；
-- [ ] 将每个排除项记录为 `constraint + reason + source`；
-- [ ] 区分 hard constraint 和 heuristic warning。
+- [x] 检查 TP 不超过硬件 GPU 数；
+- [x] 检查 context length 覆盖 workload 长度；
+- [x] 检查并标记 attention backend 的 GPU/版本兼容性；缺少目标环境事实时输出 warning，不静默猜测或过滤；
+- [x] 检查参数是否存在、类型是否正确；
+- [x] 校验当前策略已定义的参数分类和组合约束；未定义的版本/模型互斥关系保留为后续 reference 扩展；
+- [x] 将每个排除项记录为 `constraint + reason + source`；
+- [x] 区分 hard constraint 和 heuristic warning。
 
 ### Task 6：实现 Claude Code Search Planner
 
@@ -280,17 +321,17 @@ Candidate 是一个可以交给未来执行器的命令描述，但第一阶段�
 - Create: `tests/test_search_planner.py`
 - Create: `tests/test_claude_code_client.py`
 
-- [ ] 用 `claude -p` 启动非交互式 Claude Code；
-- [ ] 通过 `--add-dir` 暴露 LLMOptAgent、specs、references 和可选源码目录；
-- [ ] 通过 `--output-format json` 和 `--json-schema` 要求结构化 SearchPlan；
-- [ ] 初期调试支持在受控目录使用 `--dangerously-skip-permissions`；正式运行提供只读工具白名单模式；
-- [ ] prompt 明确不启动服务、不修改 specs/references、不执行 benchmark；
-- [ ] 在 prompt 中明确当前只生成 SearchPlan，不执行 benchmark；
-- [ ] 固定模型路径、精度和模型专属 parser；
-- [ ] 由 Claude Code 根据硬件和模型分析 TP、attention backend、KV cache、chunked prefill 和并发范围；
-- [ ] 由 `plan_validator.py` 校验 Claude 输出，拒绝非法参数和超预算候选；
-- [ ] 输出参数选择理由、来源和风险；
-- [ ] 对 Claude CLI 超时、非零退出码和非法 JSON 做明确错误处理。
+- [x] 用 `claude -p` 启动非交互式 Claude Code；
+- [x] 通过 `--add-dir` 暴露 LLMOptAgent、specs、references 和可选源码目录；
+- [x] 通过 `--output-format json` 和 `--json-schema` 要求结构化 SearchPlan；
+- [x] 初期调试支持在受控目录使用 `--dangerously-skip-permissions`；正式运行提供只读工具白名单模式；
+- [x] prompt 明确不启动服务、不修改 specs/references、不执行 benchmark；
+- [x] 在 prompt 中明确当前只生成 SearchPlan，不执行 benchmark；
+- [x] 固定模型路径、精度和模型专属 parser；
+- [x] 由 Claude Code 根据硬件和模型分析 TP、attention backend、KV cache、chunked prefill 和并发范围；
+- [x] 由 `plan_validator.py` 校验 Claude 输出，拒绝非法参数和超预算候选；
+- [x] 输出参数选择理由、来源和风险；
+- [x] 对 Claude CLI 超时、非零退出码和非法 JSON 做明确错误处理。
 
 第一版采用 `baseline_first_bounded_product`，不引入 Bayesian Optimization 或 Optuna；LLM 只负责分析 references 和生成 SearchPlan，不直接生成最终命令。
 
@@ -301,12 +342,12 @@ Candidate 是一个可以交给未来执行器的命令描述，但第一阶段�
 - Create: `planner/candidate_generator.py`
 - Create: `tests/test_candidate_generator.py`
 
-- [ ] 生成 baseline candidate；
-- [ ] 根据 `search_space` 生成有界组合；
-- [ ] 应用 rule checker 的排除结果；
-- [ ] 为候选生成稳定 ID；
-- [ ] 保留每个候选的坐标、来源和风险；
-- [ ] 测试候选数量上限和组合顺序。
+- [x] 生成 baseline candidate；
+- [x] 根据 `search_space` 生成有界组合；
+- [x] 支持应用上游 rule checker 提供的 candidate filter 排除结果；
+- [x] 为候选生成稳定 ID；
+- [x] 保留每个候选的坐标、来源和风险；
+- [x] 测试候选数量上限和组合顺序。
 
 ### Task 8：实现 SGLang 命令渲染器
 
@@ -315,13 +356,13 @@ Candidate 是一个可以交给未来执行器的命令描述，但第一阶段�
 - Create: `planner/command_renderer.py`
 - Create: `tests/test_command_renderer.py`
 
-- [ ] 将固定参数和候选参数转换为 argv list；
-- [ ] 生成 `python -m sglang.launch_server` 命令；
-- [ ] 生成 `python -m sglang.bench_serving` 命令；
-- [ ] 根据 workload 生成输入/输出长度、请求数和并发参数；
-- [ ] 使用目标镜像 help snapshot 校验参数；
-- [ ] 避免 shell 字符串拼接，优先输出 argv list；
-- [ ] 同时提供 shell 渲染格式供人工复制。
+- [x] 将固定参数和候选参数转换为 argv list；
+- [x] 生成 `python -m sglang.launch_server` 命令；
+- [x] 生成 `python -m sglang.bench_serving` 命令；
+- [x] 根据 workload 生成输入/输出长度、请求数和并发参数；
+- [x] 支持使用目标镜像 help snapshot 校验参数；
+- [x] 避免 shell 字符串拼接，优先输出 argv list；
+- [x] 同时提供 shell 渲染格式供人工复制。
 
 这里的 Adapter 只负责离线命令转换，不启动服务。
 
@@ -340,27 +381,73 @@ llmopt plan jobs/example.json --output outputs/example
 llmopt render outputs/example/search_plan.json
 ```
 
-- [ ] `validate-job` 只做 JobSpec 和引用校验；
-- [ ] `plan` 生成 `search_plan.json` 和 `candidates.jsonl`；
-- [ ] `render` 输出 `commands.sh` 和 `plan_report.md`；
-- [ ] 输出目录包含输入 JobSpec 的副本；
-- [ ] 失败时返回非零 exit code 和可读错误；
-- [ ] 不启动任何服务，不调用 GPU。
+- [x] `validate-job` 只做 JobSpec 和引用校验；
+- [x] `plan` 生成 `search_plan.json` 和 `candidates.jsonl`；
+- [x] `render` 输出 `commands.sh` 和 `plan_report.md`；
+- [x] 输出目录包含输入 JobSpec 的副本；
+- [x] 失败时返回非零 exit code 和可读错误；
+- [x] 不启动任何服务，不调用 GPU。
 
 ### Task 10：端到端离线验收
 
 **Files:**
 
-- Add: `examples/jobs/qwen3_hccpk1_qa_v1.json`
+- Add: `examples/jobs/qwen36_pro5000_random_v1.json`
 - Add: `tests/test_end_to_end_plan.py`
 - Modify: `README.md`
 
-- [ ] 使用示例 JobSpec 完成全流程；
-- [ ] 输出固定数量的候选；
-- [ ] 每个候选包含 server/benchmark 命令；
-- [ ] 非法 GPU、模型、workload 引用能够失败；
-- [ ] 不支持的 backend 能被排除并说明原因；
-- [ ] 记录当前第一阶段验收结果和已知限制。
+- [x] 使用示例 JobSpec 完成全流程；
+- [x] 输出固定数量的候选；
+- [x] 每个候选包含 server/benchmark 命令；
+- [x] 非法 GPU、模型、workload 引用能够失败；
+- [x] 不支持的 backend 能被排除并说明原因；
+- [x] 记录当前第一阶段验收结果和已知限制。
+
+Task 10 的离线验收使用 Pro5000、Qwen3.6-27B-FP8 和 `random-32k-1k` 示例，
+通过 SearchPlan fixture 生成 2 个候选，并渲染每个候选的 SGLang server 命令和
+`bench_serving` 命令。测试只检查 JSON、规则和命令产物，不启动服务、不访问 GPU。
+当前限制是 SearchPlan fixture 仍由人工提供；Claude Code 规划链路已有单元测试，
+但真实 Claude 调用和 benchmark 执行留到后续阶段。
+
+### Task 11：接入目标镜像 help 快照校验
+
+**Files:**
+
+- Add: `planner/help_snapshot.py`
+- Add: `tests/test_help_snapshot.py`
+- Modify: `cli/main.py`
+- Modify: `tests/test_cli.py`
+
+- [x] 从 `launch_server --help` 和 `bench_serving --help` 文本中提取长参数名；
+- [x] `render` 支持 `--server-help` 和 `--benchmark-help`；
+- [x] 目标快照缺少候选参数时，在渲染阶段返回明确错误；
+- [x] 空快照或不存在的快照返回明确错误；
+- [x] 不执行任何外部命令，只读取用户显式提供的文本快照。
+
+快照校验只确认参数名是否存在，不从帮助文本推断参数类型、默认值或硬件兼容性。
+这些信息仍由目标镜像实际行为、references 和后续运行结果共同确认。
+
+上下文长度有特殊语义：WorkloadSpec 的输入/输出长度只描述本轮压测请求，
+不等于服务应该暴露的上下文窗口。若 ModelSpec 提供 `native_context_length`，
+SearchPlan 默认应保留该能力；只有 JobSpec 显式要求服务 cap，或已有实测证据证明
+目标硬件/运行时无法承载时，才允许缩短 `context_length`，并且必须说明依据。
+
+### Task 12：并行策略候选生成
+
+**Files:**
+
+- Add: `references/parallelism/*.md`
+- Add: `skills/parallelism-search/SKILL.md`
+- Modify: `schemas/search_plan.py`
+- Modify: `planner/candidate_generator.py`
+- Modify: `planner/rule_checker.py`
+
+- [x] 用 `parallelism_candidates` 表达完整 TP/PP 部署方案；
+- [x] 强制校验 `gpu_count = tp_size * pp_size`；
+- [x] 强制校验候选总卡数不超过硬件 GPU 数；
+- [x] 禁止在存在并行方案时把 TP/PP 作为独立搜索轴；
+- [x] 将并行部署方案与 backend/prefill 等运行参数分层生成；
+- [x] 建立 PCIe/NVLink、KV Pool 和最小可行卡数知识文档。
 
 ## 5. 后续阶段，不纳入当前实现
 
