@@ -68,7 +68,9 @@ class CommandRenderer:
         context: CommandRenderContext,
     ) -> list[str]:
         params = dict(candidate.params)
-        params.setdefault("model_path", context.model_path)
+        # The logical model ID may be discussed by the planner, but the concrete
+        # weights path is supplied at render time for the target host.
+        params["model_path"] = context.model_path
         command = ["python", "-m", "sglang.launch_server"]
         for parameter, value in params.items():
             flag = method.server_argument_mapping.get(parameter)

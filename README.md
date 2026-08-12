@@ -49,6 +49,18 @@ SLA 过滤和性能排序
 
 当前已有一个 Pro5000 离线验收示例：
 
+Claude Code 的第三方 API 配置可以放在用户级私密文件中，不需要每次手动 `export`：
+
+```bash
+mkdir -p ~/.config/llmopt-agent
+cp .env.example ~/.config/llmopt-agent/claude.env
+chmod 600 ~/.config/llmopt-agent/claude.env
+vim ~/.config/llmopt-agent/claude.env
+```
+
+`llmopt plan` 会自动读取该文件；也可以显式指定 `--claude-env-file PATH`。Shell 中已经
+存在的环境变量优先级更高。不要把真实 token 写入 Git，已暴露的 token 应立即轮换。
+
 ```bash
 cd /data/LLMOptAgent
 uv run llmopt validate-job examples/jobs/qwen36_pro5000_random_v1.json

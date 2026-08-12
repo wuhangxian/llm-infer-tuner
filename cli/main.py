@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from planner.candidate_generator import CandidateGenerator
 from planner.claude_code_client import ClaudeCodeClient
+from planner.claude_env import default_env_file, load_env_file
 from planner.command_renderer import (
     BenchmarkMethod,
     CommandRenderContext,
@@ -132,12 +133,25 @@ def plan(
         bool,
         typer.Option("--dangerously-skip-permissions"),
     ] = False,
+    claude_env_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--claude-env-file",
+            help=(
+                "Private Claude Code env file; defaults to .env or "
+                "~/.config/llmopt-agent/claude.env."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Generate a SearchPlan and candidates without executing any command."""
     try:
         job = _load_job(job_path)
         hardware, model, workload, references, _ = _validate_references(job, project_root)
         if search_plan is None:
+            env_file = claude_env_file or default_env_file(project_root)
+            if env_file is not None:
+                load_env_file(env_file)
             planner = SearchPlanner(ClaudeCodeClient())
             plan_model = planner.generate(
                 job,

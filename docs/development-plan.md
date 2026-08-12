@@ -449,6 +449,23 @@ SearchPlan 默认应保留该能力；只有 JobSpec 显式要求服务 cap，�
 - [x] 将并行部署方案与 backend/prefill 等运行参数分层生成；
 - [x] 建立 PCIe/NVLink、KV Pool 和最小可行卡数知识文档。
 
+### Task 13：Claude Code 第三方 API 配置
+
+- [x] 支持用户级私密 dotenv 文件；
+- [x] 支持项目 `.env` 和 `--claude-env-file`；
+- [x] Shell 显式环境变量优先于配置文件；
+- [x] 校验配置文件权限，拒绝可被其他用户读取的 token 文件；
+- [x] 提供不含真实凭据的 `.env.example`。
+
+进入 Phase 2 前的验收要求：
+
+- [x] 使用最新 AI SearchPlan fixture 完成本地规则校验；
+- [x] 使用最新 AI SearchPlan 完成离线命令渲染；
+- [x] 渲染时以目标机器实际 `--model-path` 覆盖 AI 讨论中的逻辑模型路径；
+- [x] 提供目标镜像 help 快照保存说明；
+- [ ] 在真实 SGLang 镜像中采集并提交 `launch_server --help` 和 `bench_serving --help` 快照；
+- [ ] 人工确认 Qwen3.6 parser、attention backend、dtype/quantization 参数名和语义。
+
 ## 5. 后续阶段，不纳入当前实现
 
 ### Phase 2：SGLang 执行器

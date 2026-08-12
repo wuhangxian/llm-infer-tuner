@@ -12,6 +12,10 @@
 
   "server_argument_mapping": {
     "model_path": "--model-path",
+    "dtype": "--dtype",
+    "quantization": "--quantization",
+    "host": "--host",
+    "port": "--port",
     "tp_size": "--tp-size",
     "pp_size": "--pp-size",
     "context_length": "--context-length",

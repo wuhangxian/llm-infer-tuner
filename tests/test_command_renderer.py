@@ -50,3 +50,67 @@ def test_renderer_builds_server_and_all_benchmark_commands() -> None:
     assert "32" in rendered.benchmark_commands[-1]
     assert "--num-prompts" in rendered.benchmark_commands[-1]
     assert "128" in rendered.benchmark_commands[-1]
+
+
+def test_renderer_supports_common_pinned_server_parameters() -> None:
+    specs = SpecLoader(PROJECT_ROOT / "specs")
+    workload = specs.load_workload("random-32k-1k")
+    method_payload = json.loads(
+        (PROJECT_ROOT / "references/benchmark_methods/sglang_bench_serving.json").read_text()
+    )
+    method = BenchmarkMethod.model_validate(method_payload)
+    candidate = Candidate(
+        candidate_id="sglang-c001",
+        params={
+            "dtype": "bfloat16",
+            "quantization": "fp8",
+            "host": "0.0.0.0",
+            "port": 30000,
+            "tp_size": 1,
+            "pp_size": 2,
+        },
+    )
+
+    rendered = CommandRenderer().render(
+        candidate,
+        workload,
+        method,
+        CommandRenderContext(
+            model_path="/models/qwen36",
+            dataset_path="ShareGPT.json",
+            output_file="result.jsonl",
+        ),
+    )
+
+    assert "--dtype" in rendered.server_command
+    assert "--quantization" in rendered.server_command
+    assert "--host" in rendered.server_command
+    assert "--port" in rendered.server_command
+    assert "--pp-size" in rendered.server_command
+
+
+def test_renderer_uses_runtime_model_path_over_planner_metadata() -> None:
+    specs = SpecLoader(PROJECT_ROOT / "specs")
+    workload = specs.load_workload("random-32k-1k")
+    method_payload = json.loads(
+        (PROJECT_ROOT / "references/benchmark_methods/sglang_bench_serving.json").read_text()
+    )
+    method = BenchmarkMethod.model_validate(method_payload)
+    candidate = Candidate(
+        candidate_id="sglang-c001",
+        params={"model_path": "Qwen/Qwen3.6-27B-FP8", "tp_size": 1, "pp_size": 1},
+    )
+
+    rendered = CommandRenderer().render(
+        candidate,
+        workload,
+        method,
+        CommandRenderContext(
+            model_path="/data1/model/Qwen3.6-27B-FP8/",
+            dataset_path="ShareGPT.json",
+            output_file="result.jsonl",
+        ),
+    )
+
+    assert "/data1/model/Qwen3.6-27B-FP8/" in rendered.server_command
+    assert "Qwen/Qwen3.6-27B-FP8" not in rendered.server_command
