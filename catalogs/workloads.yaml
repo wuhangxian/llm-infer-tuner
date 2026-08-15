@@ -1,0 +1,47 @@
+# ============ 负载目录(测试场景)============
+#
+# key = JobSpec.workload。一个测试场景一条。负载不是「实体」,是你设计的测试场景,
+# 本质是 input/output 长度 + 并发梯度 + 采样参数。命名后跨实验(换卡/换模型)复用同一
+# 场景 → 保证「不同硬件跑的是同一个 workload」,结果可比。
+#
+# ⚠️ 关键:压测 = 复刻生产。context 配置绝不写(见 knowledge.md 红线),这里只给
+# 「要测多长的输入输出、打多大并发」,不给上下文窗口。
+#
+# 加新场景 = 在这里加一条,不改任何代码。
+
+version: 1
+updated: 2026-08-12
+
+workloads:
+
+  qa-chat-3.5k-1k:
+    type: chat
+    modality: text
+    input_tokens:  {distribution: fixed, value: 3500}    # 固定约 3500 输入 token
+    output_tokens: {distribution: fixed, value: 1000}    # 固定约 1000 输出 token
+    # 并发梯度:执行器逐档压测,二分找 SLA 饱和点。第一轮贴 SLA 边界,别拍一个数。
+    traffic:
+      mode: concurrency
+      values: [1, 2, 4, 8, 16, 32]
+    request:
+      stream: true
+      sampling: {temperature: 0.7, top_p: 0.8, top_k: 20, max_new_tokens: 1000}
+    notes: 文本问答场景,固定约 3500 输入 token 和 1000 输出 token。
+
+  # 长上下文样例(旧 spec 迁入,备用):32k 输入触发长 prefill 主轴与混合架构双池权衡。
+  random-32k-1k:
+    type: serving_benchmark
+    modality: text
+    dataset:
+      name: random
+      path: ShareGPT_V3_unfiltered_cleaned_split.json
+      random_range_ratio: 1.0
+    input_tokens:  {distribution: fixed, value: 32768}
+    output_tokens: {distribution: fixed, value: 1024}
+    traffic:
+      mode: max_concurrency
+      values: [1, 2, 4, 8, 16, 32]
+      num_prompts_multiplier: 4       # 每档请求数 = 并发度 × 4
+    request:
+      stream: true
+    notes: 随机生成约 32K 输入 token 和 1K 输出 token;每个并发档位的请求数为并发度的 4 倍。

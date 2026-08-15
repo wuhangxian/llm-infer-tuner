@@ -1,0 +1,78 @@
+{
+  "method_id": "sglang-bench-serving",
+  "engine": "sglang",
+  "entrypoint": "python -m sglang.bench_serving",
+  "endpoint_protocol": "sglang-native",
+
+  "fixed_args": {
+    "backend": "sglang",
+    "dataset_name": "random-ids",
+    "random_range_ratio": 1.0
+  },
+
+  "server_argument_mapping": {
+    "model_path": "--model-path",
+    "dtype": "--dtype",
+    "quantization": "--quantization",
+    "host": "--host",
+    "port": "--port",
+    "tp_size": "--tp-size",
+    "pp_size": "--pp-size",
+    "context_length": "--context-length",
+    "attention_backend": "--attention-backend",
+    "prefill_attention_backend": "--prefill-attention-backend",
+    "decode_attention_backend": "--decode-attention-backend",
+    "chunked_prefill_size": "--chunked-prefill-size",
+    "max_running_requests": "--max-running-requests",
+    "max_total_tokens": "--max-total-tokens",
+    "mem_fraction_static": "--mem-fraction-static",
+    "schedule_policy": "--schedule-policy",
+    "kv_cache_dtype": "--kv-cache-dtype",
+    "reasoning_parser": "--reasoning-parser",
+    "tool_call_parser": "--tool-call-parser",
+    "trust_remote_code": "--trust-remote-code"
+  },
+
+  "runtime_args": {
+    "host": "${BENCHMARK_HOST}",
+    "port": "${BENCHMARK_PORT}",
+    "model": "${MODEL_PATH}",
+    "dataset_path": "${DATASET_PATH}"
+  },
+
+  "traffic": {
+    "mode": "max_concurrency",
+    "concurrency_values": [1, 2, 4, 8, 16, 32],
+    "num_prompts_multiplier": 4
+  },
+
+  "argument_mapping": {
+    "fixed_args.backend": "--backend",
+    "fixed_args.dataset_name": "--dataset-name",
+    "fixed_args.random_range_ratio": "--random-range-ratio",
+    "runtime_args.host": "--host",
+    "runtime_args.port": "--port",
+    "runtime_args.model": "--model",
+    "runtime_args.dataset_path": "--dataset-path",
+    "traffic.concurrency": "--max-concurrency",
+    "workload.input_tokens.value": "--random-input-len",
+    "workload.output_tokens.value": "--random-output-len",
+    "result.output_file": "--output-file",
+    "derived.num_prompts": "--num-prompts"
+  },
+
+  "derived_args": {
+    "num_prompts": "traffic.concurrency * traffic.num_prompts_multiplier"
+  },
+
+  "result": {
+    "output_file_template": "result_{job_id}_{timestamp}.jsonl",
+    "append_all_concurrency_runs": true
+  },
+
+  "notes": [
+    "每个并发档位执行一次 bench_serving。",
+    "结果文件汇总所有并发档位，渲染器应保证不同任务的文件名不冲突。",
+    "Shell 中续行反斜杠后不能有空格。"
+  ]
+}

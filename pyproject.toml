@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "llmopt-agent"
+version = "0.1.0"
+description = "LLM inference parameter optimization planning agent"
+requires-python = ">=3.11"
+dependencies = [
+  "packaging>=24.0",
+  "pydantic>=2.7",
+  "pyyaml>=6.0",
+  "typer>=0.12"
+]
+
+[project.scripts]
+llmopt = "cli.main:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["planner", "cli", "schemas"]
+
+[dependency-groups]
+dev = [
+  "pyright>=1.1.350",
+  "pytest>=8.0",
+  "ruff>=0.5.0"
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.pyright]
+include = ["cli", "planner", "tests"]
+exclude = [".venv"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"
