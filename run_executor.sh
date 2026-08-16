@@ -6,7 +6,7 @@
 # 用法(方案 A:机器信息全在 target.json,路径自动推):
 #   ./run_executor.sh <job.json> <target.json> [configs.jsonl] [results_dir]
 # 例:
-#   ./run_executor.sh input/jobs/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2.json input/targets/pro5000_s3.json
+#   ./run_executor.sh input/jobs/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2.json input/targets/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2__s3.json
 #   # configs 默认 outputs/<job_id>/configs.jsonl,results 默认 outputs/<job_id>/results
 #
 # 说明:targets.json 只存「非机密的部署事实」(IP/模型路径/镜像/端口)—— 换机器只换这个文件。
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 JOB="${1:?用法: ./run_executor.sh <job.json> <target.json> [configs.jsonl] [results_dir]}"
-TARGET="${2:?缺 target.json,例 input/targets/pro5000_s3.json}"
+TARGET="${2:?缺 target.json,例 input/targets/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2__s3.json}"
 
 command -v jq >/dev/null || { echo "❌ 需要 jq" >&2; exit 1; }
 [ -f "$JOB" ]     || { echo "❌ job 不存在: $JOB" >&2; exit 1; }
@@ -33,6 +33,9 @@ MODEL_CONTAINER_PATH="$(jq -r '.model_container_path' "$TARGET")"
 IMAGE_REF="$(jq -r '.image_ref' "$TARGET")"
 PORT="$(jq -r '.port // 30000' "$TARGET")"
 REMOTE_OUTPUTS_DIR="$(jq -r '.remote_outputs_dir // ""' "$TARGET")"
+TARGET_GPU_MODEL="$(jq -r '.gpu_model // "" "$TARGET")"
+TARGET_GPU_COUNT="$(jq -r '.gpu_count // 0' "$TARGET")"
+TARGET_GPU_MEM="$(jq -r '.gpu_memory_gb // 0' "$TARGET")"
 
 # 容器名按 job 命名(llm-infer-tuner-<job_id>),不同 job 各起各的容器,永不撞名。
 CONTAINER_NAME="llm-infer-tuner-${JOB_ID}"
@@ -59,4 +62,7 @@ exec uv run python -m runners.executor \
   --container-name "$CONTAINER_NAME" \
   --port "$PORT" \
   --max-candidates "$MAX_CAND" \
-  --remote-outputs-dir "$REMOTE_OUTPUTS_DIR"
+  --remote-outputs-dir "$REMOTE_OUTPUTS_DIR" \
+  --target-gpu-model "$TARGET_GPU_MODEL" \
+  --target-gpu-count "$TARGET_GPU_COUNT" \
+  --target-gpu-memory-gb "$TARGET_GPU_MEM"

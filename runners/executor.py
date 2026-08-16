@@ -67,6 +67,9 @@ class ExecutorConfig:
     port: int = 30000
     container_name: str = "llm-infer-tuner-exec"
     remote_outputs_dir: str = ""  # abs path on the remote host; default $HOME/llm-infer-tuner-outputs/<job>
+    target_gpu_model: str = ""
+    target_gpu_count: int = 0
+    target_gpu_memory_gb: float = 0.0
     top_k: int = DEFAULT_TOP_K    # round-2 refines only the top-K candidates by round-1 goodput
     max_cap: int = DEFAULT_MAX_CAP  # upper bound on concurrency the search will probe
 
@@ -376,6 +379,37 @@ def _outcome_diag(outcome: SearchOutcome) -> dict[str, Any]:
     }
 
 
+def _check_hardware_match(job: JobSpec, config: ExecutorConfig) -> None:
+    """Verify target.json GPU fields match job.json requirements before any remote work.
+
+    Catches mismatched hardware early (e.g. job wants 8x72G but target only has 4x72G)
+    instead of failing during container start or benchmark.
+    """
+    if not config.target_gpu_model:
+        _log("⚠️  target.json 缺少 gpu_model 字段,跳过硬件校验")
+        return
+    if config.target_gpu_model != job.gpu_model:
+        raise SystemExit(
+            f"❌ GPU 型号不匹配: job 要求 {job.gpu_model}, "
+            f"target 提供 {config.target_gpu_model}"
+        )
+    if config.target_gpu_count < job.gpu_count:
+        raise SystemExit(
+            f"❌ GPU 卡数不足: job 要求 {job.gpu_count} 张, "
+            f"target 只有 {config.target_gpu_count} 张"
+        )
+    if config.target_gpu_memory_gb < job.gpu_memory_gb:
+        raise SystemExit(
+            f"❌ 单卡显存不足: job 要求 {job.gpu_memory_gb}GB/卡, "
+            f"target 只有 {config.target_gpu_memory_gb}GB/卡"
+        )
+    _log(
+        f"✅ 硬件校验通过: {job.gpu_model} "
+        f"{job.gpu_count}x{job.gpu_memory_gb}GB (target: "
+        f"{config.target_gpu_count}x{config.target_gpu_memory_gb}GB)"
+    )
+
+
 def run_executor(
     config: ExecutorConfig,
     *,
@@ -395,6 +429,7 @@ def run_executor(
         job.benchmark_method, project_root=config.project_root
     )
     candidates = _load_candidates(config.configs_path, config.max_candidates)
+    _check_hardware_match(job, config)
 
     remote = remote or RemoteRunner(config.ssh_target)
     client = client or ClaudeCodeClient()
@@ -606,6 +641,9 @@ def main(argv: list[str] | None = None) -> int:
         remote_outputs_dir=args.remote_outputs_dir,
         top_k=args.top_k,
         max_cap=args.max_cap,
+        target_gpu_model=args.target_gpu_model,
+        target_gpu_count=args.target_gpu_count,
+        target_gpu_memory_gb=args.target_gpu_memory_gb,
     )
     summary = run_executor(config)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -614,3 +652,6 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+    parser.add_argument("--target-gpu-model", default="")
+    parser.add_argument("--target-gpu-count", type=int, default=0)
+    parser.add_argument("--target-gpu-memory-gb", type=float, default=0.0)

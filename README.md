@@ -89,10 +89,16 @@ chmod 600 .env
 > `.claude/skills/sglang-server-config-gen/images.yaml` 里查到;查不到就先去对应文件补一张卡
 > (每个文件底部都有「缺了怎么补、去哪查」的注释)。
 
-**`input/targets/<machine>.json` —— 在哪测**:
+**`input/targets/<job_id>__<server_tag>.json` —— 在哪测**:
+
+> 文件名规则:`{job_id}__{server_tag}.json`,job_id 段与 `input/jobs/` 对齐,server_tag 区分同型号不同机器。
+> GPU 字段(`gpu_model`/`gpu_count`/`gpu_memory_gb`)用于和 job.json 校验硬件匹配,防止跑错机器。
 
 ```json
 {
+  "gpu_model": "pro5000",
+  "gpu_count": 8,
+  "gpu_memory_gb": 72,
   "ssh_target": "ubuntu@122.51.115.16",
   "model_host_dir": "/data/autotune/models/Qwen3.6-35B-A3B-FP8",
   "model_container_path": "/data/autotune/models/Qwen3.6-35B-A3B-FP8",
@@ -110,7 +116,7 @@ chmod 600 .env
 ./gen_configs.sh input/jobs/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2.json
 
 # 阶段二:真机压测 + 排名 → outputs/<job>/results/ranking.json
-./run_executor.sh input/jobs/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2.json input/targets/pro5000_s3.json
+./run_executor.sh input/jobs/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2.json input/targets/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2__s3.json
 ```
 
 ### 4. 看结果
