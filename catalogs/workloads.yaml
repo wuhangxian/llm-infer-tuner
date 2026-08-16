@@ -26,7 +26,19 @@ workloads:
     request:
       stream: true
       sampling: {temperature: 0.7, top_p: 0.8, top_k: 20, max_new_tokens: 1000}
-    notes: 文本问答场景,固定约 3500 输入 token 和 1000 输出 token。
+   notes: 文本问答场景,固定约 3500 输入 token 和 1000 输出 token。
+  qa-chat-8k-1k:
+    type: chat
+    modality: text
+    input_tokens:  {distribution: fixed, value: 8000}    # 固定约 8000 输入 token
+    output_tokens: {distribution: fixed, value: 1000}    # 固定约 1000 输出 token
+    traffic:
+      mode: concurrency
+      values: [1, 2, 4, 8, 16, 32]
+    request:
+      stream: true
+      sampling: {temperature: 0.7, top_p: 0.8, top_k: 20, max_new_tokens: 1000}
+    notes: 文本问答场景,固定约 8000 输入 token 和 1000 输出 token。
 
   # 长上下文样例(旧 spec 迁入,备用):32k 输入触发长 prefill 主轴与混合架构双池权衡。
   random-32k-1k:
