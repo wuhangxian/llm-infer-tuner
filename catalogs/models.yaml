@@ -162,6 +162,72 @@ models:
       Qwen3.6-35B-A3B 是 MoE(256 专家/token 激活 8)+ Gated DeltaNet 混合架构。
       是本知识库里 EP 轴的唯一样例:dense 的 qwen36-27b 不生成 ep,只有本卡会走 EP 派生。
 
+  deepseek-v4-flash-0731-fp8:
+    hf_model_id: DeepSeek/DeepSeek-V4-Flash-0731
+    aliases: [deepseek-v4-flash, dsv4-flash, deepseek-v4-flash-0731]
+    family: deepseek-v4
+    parameter_count_b: 230          # MoE 总参数(256 专家 + 1 共享专家 + attention)
+    arch: moe                        # MoE(n_routed_experts=256)→ 生成 ep 轴
+    hybrid_mamba: false             # 标准 Transformer,非 GDN 混合
+    default_precision: fp8
+    quantization:
+      method: fp8
+      scheme: fine-grained           # 块量化(block-wise),block_size=128
+      block_size: 128                # source: config.json weight_block_size=[128,128]
+      weight_dtype: fp8
+      activation_dtype: bf16
+      expert_dtype: fp4              # 专家权重用 FP4(原生,非 nvfp4 量化)
+    weight_gb: {fp8: 156, bf16: 312}  # source: 上机 du -sh 实测 156G
+    # TP 准入:TP1=156G>72G ✗, TP2=78G>72G ✗, TP4=39G<72G ✓, TP8=19.5G<72G ✓
+    # 块量化整除:moe_intermediate_size=2048, block_size=128 → tp_max=16,TP4/8 均整除 ✓
+
+    num_experts: 256                 # source: config.json n_routed_experts=256
+    num_experts_per_tok: 6           # source: config.json num_experts_per_tok=6
+    num_experts_source: official     # HF config.json 已核对
+    nvfp4_requires_sm: 10            # 专家已原生 fp4,无需额外 nvfp4 gate
+
+    architecture:
+      is_moe: true
+      num_experts: 256
+      num_experts_per_tok: 6
+      moe_intermediate_size: 2048    # source: config.json
+      num_hidden_layers: 43
+      hidden_size: 4096
+      vocab_size: 129280
+      num_attention_heads: 64
+      num_key_value_heads: 1         # MLA 结构(q_lora_rank=1024, head_dim=512)
+      head_dim: 512
+
+    kv_gb_per_token: 0.00012         # 稠密标准估算(MLA 实际 KV 更小,此处取上界)
+    kv_gb_per_token_source: reference
+
+    context:
+      native_context_length: 1048576 # config.json max_position_embeddings
+      maximum_context_length: 1048576
+      recommended_initial_context_length: 131072
+
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true             # config.json 有 dspark/n_mtp_layers 参数
+
+    default_flags:
+      trust-remote-code: true        # 自定义 tokenizer(encoding_dsv4.py)
+    # ⚠️ 投机解码(dspark)参数需查 SGLang cookbook DeepSeek-V4 页确认,SGLang v0.5.16 可能不支持 V4 架构
+
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 156            # 上机 du -sh 实测
+      model_path: /data/autotune/models/DeepSeek-V4-Flash-0731/DeepSeek-V4-Flash-0731
+
+    source: https://huggingface.co/DeepSeek/DeepSeek-V4-Flash-0731
+    notes: >
+      DeepSeek-V4-Flash 是 MoE(256 专家/token 激活 6)+ MLA 注意力架构。
+      权重 156G(fp8 + fp4 专家),TP2 放不下(78G>72G),最小 TP=4。
+      自定义 tokenizer 需 trust-remote-code。⚠️ SGLang v0.5.16 可能不支持
+      DeepseekV4ForCausalLM 架构,若启动失败需升级 sglang 镜像。
+
 # ---- 缺模型时怎么补(权威来源)----
 # arch/is_moe/num_experts: 权重目录或 HF 的 config.json(有 num_experts 即 MoE)
 # weight_gb:               du -sh 权重目录 / SGLang cookbook 模型页 Hardware requirements 表
