@@ -197,7 +197,9 @@ def _write_job(tmp_path: Path) -> Path:
     job = {
         "job_id": "dryrun-job",
         "engine": "sglang",
-        "instance_type": "pro5000",
+         "gpu_model": "pro5000",
+         "gpu_count": 8,
+         "gpu_memory_gb": 72,
         "model": "qwen36-35b",
         "image": "sglang-test",
         "workload": "chat_1k_1k",

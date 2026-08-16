@@ -1,4 +1,4 @@
-# sglang-tuner — 大模型推理参数寻优 Agent
+# llm-infer-tuner — 大模型推理参数寻优 Agent
 
 在**指定模型 / 卡型 / 工作负载 / SLA** 下,自动生成一批 SGLang 启动配置候选,拿到目标机器上真机压测,
 在 SLA 约束内按 **goodput(有效吞吐)** 排名,输出可复现的最佳部署配置。
@@ -71,9 +71,11 @@ chmod 600 .env
 
 ```json
 {
-  "job_id": "qwen36_35b_pro5000_0814",
+  "job_id": "qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2",
   "engine": "sglang",
-  "instance_type": "GC50s.192XLARGE2304",
+  "gpu_model": "pro5000",
+  "gpu_count": 8,
+  "gpu_memory_gb": 72,,
   "model": "qwen36-35b-a3b-fp8",
   "image": "sglang-v0.5.16",
   "workload": "qa-chat-3.5k-1k",
@@ -83,7 +85,7 @@ chmod 600 .env
 }
 ```
 
-> `instance_type / model / workload` 三个 ID 必须能在 `catalogs/*.yaml` 里查到,`image` 能在
+> `gpu_model / model / workload` 三个 ID 必须能在 `catalogs/*.yaml` 里查到,`image` 能在
 > `.claude/skills/sglang-server-config-gen/images.yaml` 里查到;查不到就先去对应文件补一张卡
 > (每个文件底部都有「缺了怎么补、去哪查」的注释)。
 
@@ -105,17 +107,17 @@ chmod 600 .env
 
 ```bash
 # 阶段一:AI 生成候选 → outputs/<job>/configs.jsonl
-./gen_configs.sh input/jobs/qwen36_35b_pro5000_0814.json
+./gen_configs.sh input/jobs/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2.json
 
 # 阶段二:真机压测 + 排名 → outputs/<job>/results/ranking.json
-./run_executor.sh input/jobs/qwen36_35b_pro5000_0814.json input/targets/pro5000_s3.json
+./run_executor.sh input/jobs/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2.json input/targets/pro5000_s3.json
 ```
 
 ### 4. 看结果
 
 ```bash
-jq . outputs/qwen36_35b_pro5000_0814/configs.jsonl          # 阶段一:AI 生成的候选
-jq . outputs/qwen36_35b_pro5000_0814/results/ranking.json   # 阶段二:goodput 排名
+jq . outputs/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2/configs.jsonl          # 阶段一:AI 生成的候选
+jq . outputs/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2/results/ranking.json   # 阶段二:goodput 排名
 ```
 
 ---
@@ -135,7 +137,7 @@ run_executor.sh         # 阶段二入口:读 target → 拼参数 → 跑 runne
     SKILL.md  knowledge.md
 
 catalogs/               # 引擎无关的共享事实(vllm skill 也复用)
-  gpu.yaml              #   机型 → GPU 型号/卡数/显存/算力(sm)/NVLink
+  gpu.yaml              #   显卡型号 → 算力(sm)/NVLink(显存/卡数在 JobSpec)
   models.yaml           #   模型 → 架构/是否 MoE/专家数/量化块/权重大小/专属 flag
   workloads.yaml        #   负载 → 输入输出长度/并发梯度/采样参数
 

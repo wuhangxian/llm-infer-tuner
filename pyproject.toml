@@ -3,7 +3,7 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "llmopt-agent"
+name = "llm-infer-tuner"
 version = "0.1.0"
 description = "LLM inference parameter optimization planning agent"
 requires-python = ">=3.11"
@@ -15,10 +15,10 @@ dependencies = [
 ]
 
 [project.scripts]
-llmopt = "cli.main:app"
+llm-infer-tuner = "cli.main:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["planner", "cli", "schemas"]
+packages = ["planner", "cli", "schemas", "runners"]
 
 [dependency-groups]
 dev = [

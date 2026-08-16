@@ -6,7 +6,7 @@
 # 用法(方案 A:机器信息全在 target.json,路径自动推):
 #   ./run_executor.sh <job.json> <target.json> [configs.jsonl] [results_dir]
 # 例:
-#   ./run_executor.sh input/jobs/qwen36_35b_pro5000_0814.json input/targets/pro5000_s3.json
+#   ./run_executor.sh input/jobs/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2.json input/targets/pro5000_s3.json
 #   # configs 默认 outputs/<job_id>/configs.jsonl,results 默认 outputs/<job_id>/results
 #
 # 说明:targets.json 只存「非机密的部署事实」(IP/模型路径/镜像/端口)—— 换机器只换这个文件。
@@ -34,8 +34,8 @@ IMAGE_REF="$(jq -r '.image_ref' "$TARGET")"
 PORT="$(jq -r '.port // 30000' "$TARGET")"
 REMOTE_OUTPUTS_DIR="$(jq -r '.remote_outputs_dir // ""' "$TARGET")"
 
-# 容器名按 job 命名(llmopt-<job_id>),不同 job 各起各的容器,永不撞名。
-CONTAINER_NAME="llmopt-${JOB_ID}"
+# 容器名按 job 命名(llm-infer-tuner-<job_id>),不同 job 各起各的容器,永不撞名。
+CONTAINER_NAME="llm-infer-tuner-${JOB_ID}"
 # 候选数从 job.json 的 search.max_candidates 读
 MAX_CAND="$(jq -r '.search.max_candidates // 1' "$JOB")"
 

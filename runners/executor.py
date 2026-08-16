@@ -65,8 +65,8 @@ class ExecutorConfig:
     max_candidates: int = 1
     concurrencies: list[int] | None = None  # deprecated: adaptive search now chooses probes
     port: int = 30000
-    container_name: str = "llmopt-exec"
-    remote_outputs_dir: str = ""  # abs path on the remote host; default $HOME/llmopt-outputs/<job>
+    container_name: str = "llm-infer-tuner-exec"
+    remote_outputs_dir: str = ""  # abs path on the remote host; default $HOME/llm-infer-tuner-outputs/<job>
     top_k: int = DEFAULT_TOP_K    # round-2 refines only the top-K candidates by round-1 goodput
     max_cap: int = DEFAULT_MAX_CAP  # upper bound on concurrency the search will probe
 
@@ -421,7 +421,7 @@ def run_executor(
     outputs_host_dir = config.remote_outputs_dir
     if not outputs_host_dir:
         home = remote.run("echo $HOME").stdout.strip() or "/root"
-        outputs_host_dir = f"{home}/llmopt-outputs/{job.job_id}"
+        outputs_host_dir = f"{home}/llm-infer-tuner-outputs/{job.job_id}"
     mkdir = remote.run(f"mkdir -p {shlex.quote(outputs_host_dir)}")
     if not mkdir.ok:
         raise RuntimeError(
@@ -586,7 +586,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-cap", type=int, default=DEFAULT_MAX_CAP,
                         help="upper bound on concurrency the search will probe")
     parser.add_argument("--port", type=int, default=30000)
-    parser.add_argument("--container-name", default="llmopt-exec")
+    parser.add_argument("--container-name", default="llm-infer-tuner-exec")
     parser.add_argument("--remote-outputs-dir", default="")
     args = parser.parse_args(argv)
 

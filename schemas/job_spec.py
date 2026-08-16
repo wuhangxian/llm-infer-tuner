@@ -1,4 +1,4 @@
-"""Input contract for one sglang-tuner tuning job."""
+"""Input contract for one llm-infer-tuner tuning job."""
 
 from typing import Annotated, Literal
 
@@ -25,7 +25,9 @@ class SearchBudget(StrictModel):
 class JobSpec(StrictModel):
     job_id: Identifier
     engine: Literal["sglang"]
-    instance_type: Identifier
+    gpu_model: Identifier
+    gpu_count: int = Field(gt=0)
+    gpu_memory_gb: float = Field(gt=0)
     model: Identifier
     image: Identifier
     workload: Identifier

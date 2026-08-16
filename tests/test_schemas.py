@@ -7,9 +7,11 @@ from schemas.job_spec import JobSpec
 def test_job_spec_accepts_minimal_valid_job() -> None:
     job = JobSpec.model_validate(
         {
-            "job_id": "qwen36_pro5000_random_v1",
+            "job_id": "qwen36-27b-fp8_pro5000_8x72g_qa-chat-3.5k-1k",
             "engine": "sglang",
-            "instance_type": "GC50s.192XLARGE2304",
+             "gpu_model": "pro5000",
+             "gpu_count": 8,
+             "gpu_memory_gb": 72,
             "model": "qwen36-27b-fp8",
             "image": "sglang-v0.5.10",
             "workload": "random-32k-1k",
@@ -33,7 +35,9 @@ def test_job_spec_rejects_unsupported_engine_and_unknown_fields() -> None:
     payload = {
         "job_id": "job-1",
         "engine": "vllm",
-        "instance_type": "gpu-1",
+         "gpu_model": "gpu-1",
+         "gpu_count": 1,
+         "gpu_memory_gb": 16,
         "model": "model-1",
         "workload": "workload-1",
         "benchmark_method": "method-1",

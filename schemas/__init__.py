@@ -1,2 +1,2 @@
-"""Pydantic data contracts used by sglang-tuner."""
+"""Pydantic data contracts used by llm-infer-tuner."""
 

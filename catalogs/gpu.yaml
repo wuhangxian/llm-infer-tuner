@@ -1,69 +1,36 @@
-# ============ GPU / 机型目录(引擎无关的物理事实)============
+# ============ GPU 目录(引擎无关的物理事实)============
 #
-# key = JobSpec.instance_type。一个机型一条,只记「这台机器/这张卡的固定事实」。
+# 只剩一层:gpu_catalog。key = JobSpec.gpu_model(显卡型号)。
+#
+# 为什么只有一层:
+#   旧设计有 instances(机型级)+ gpu_catalog(显卡级)两层,但 instances 的字段
+#   (count / memory_gb)现在直接写在 job.json 里(gpu_count / gpu_memory_gb),
+#   因为它们是调优决策输入(TP 准入判据),不是被引用的静态事实。
+#   host_memory_gb 不影响调优决策,不放了。
+#
 # 这份是引擎中性的:同一张卡换 vllm 也照用这些物理数;
 # 「sm120 该铺哪些 attention 后端」是 sglang 特有知识,不在这里,在
 # .claude/skills/sglang-server-config-gen/knowledge.md。
 #
-# 加新机型 = 在这里加一条,不改任何代码。
+# 加新显卡型号 = 在 gpu_catalog 下加一条,不改任何代码。
 #
-# 字段:
-#   gpu.model            显卡型号(字符串)
-#   gpu.count            整机可用卡数【上限】。TP/PP/EP 在 ≤count 内挑,不保证用满。
-#   gpu.memory_gb        单卡显存 GB —— 每台机不同,决定权重能否放下(→TP 准入)。
-#   gpu.compute_capability  完整算力 "12.0";sm_major = 取整,给 attention 分桶用。
-#   gpu.nvlink           有无 NVLink;只影响 TP 排序提示,不排除任何 TP。
-#   compute_cap_source   算力可信度:measured=实测 / official=官方表 / reference=按同架构推(最可疑)
-
-version: 1
-updated: 2026-08-12
-
-instances:
-
-  GC50s.192XLARGE2304:
-    gpu:
-      vendor: nvidia
-      model: Pro5000                 # RTX PRO 5000 Blackwell
-      count: 8                        # 整机 8 卡(上限,非强制用满)
-      memory_gb: 72                   # 单卡 72G GDDR7
-      memory_type: GDDR7
-      memory_bandwidth_gbps: 1344
-      compute_capability: "12.0"      # Blackwell SM120
-      sm_major: 12                    # = int(12.0);attention 分桶键
-      nvlink: false                   # PCIe Gen5 x16,无 NVLink → TP 通信走 PCIe(只作排序提示)
-      fp16_tflops: 258
-      bf16_tflops: 258
-      fp8_tflops: 516
-      fp4_tflops: 1032
-    compute_cap_source: measured      # 实测 nvidia-smi compute_cap=12.0
-    host_memory_gb: 2304
-    topology:
-      interconnect: PCIe Gen5 x16
-    notes: >
-      ⚠️ SM120 ≠ SM100。大量 sglang Blackwell 优化 gate 写在 is_sm100_supported(),
-      SM120 静默不生效 —— 照抄 B200(SM100)配方会起不来。attention 短名单见
-      .claude/skills/sglang-server-config-gen/knowledge.md 的「按算力查后端」表。
-
-# ============ 显卡型号 → 算力查表(gpu_catalog)============
-#
-# 两层设计:
-#   instances     = 机型 → 物理事实(卡数 count / 单卡显存 memory_gb)。每台机不同。
-#   gpu_catalog   = 显卡型号 → 固定算力(compute_cap / sm_major / nvlink / source)。只随卡本身,与机型无关。
-#
-# 用法:新加一个 instance_type 时,gpu.model 在这里查到 sm_major / nvlink / compute_capability 填进 instances,
-#       不必每台机重查官方表。上面 GC50s 的 Pro5000 值即取自本表 pro5000 条。
-#
-# ⚠️ 这里只放「引擎中性的物理算力」。「某 sm_major 铺哪些 attention 后端」是 sglang 特有知识,
-#    不在这份,在 .claude/skills/sglang-server-config-gen/knowledge.md §1 的按算力查后端表。
-#
-# 每张卡四个字段:
+# 每张卡字段:
 #   compute_cap  完整算力,如 "8.6"(查官方 https://developer.nvidia.com/cuda-gpus)
-#   sm_major     compute_cap 取整,如 8(attention 分桶键)
+#   sm_major    compute_cap 取整,如 8(attention 分桶键)
 #   nvlink       有无 NVLink(只影响 TP 排序提示,不排除任何 TP)
 #   source       算力可信度:official=官方表 / measured=实测 / reference=按同架构推(最可疑)
 #
 # key 按显卡名小写匹配(精确优先,再取最长命中)。sm_major 相同的算力共用一档:
 #   7.0/7.5→7、8.x/8.9→8、9.0→9、10.x→10、12.0→12。
+#
+# ⚠️ 这里只放「引擎中性的物理算力」。「某 sm_major 铺哪些 attention 后端」是 sglang 特有知识,
+#    不在这份,在 .claude/skills/sglang-server-config-gen/knowledge.md §1 的按算力查后端表。
+#
+# ⚠️ 单卡显存不写在这里(同型号有不同 SKU,如 A100 40GB/80GB)。显存直接写在
+#    job.json 的 gpu_memory_gb 里,是 TP 准入判据(weight_gb/tp ≤ gpu_memory_gb)的输入。
+
+version: 1
+updated: 2026-08-12
 
 gpu_catalog:
 
@@ -248,9 +215,9 @@ gpu_catalog:
     nvlink: false
     source: official
 
-# ---- 缺机型时怎么补 ----
-# 在 instances 下加一条,gpu.count/memory_gb 由运维/nvidia-smi 给;算力字段先查上面 gpu_catalog:
-#   gpu.model 在 gpu_catalog 命中 → 抄 compute_cap/sm_major/nvlink 进 instances
-#   查不到该卡 → 在 gpu_catalog 先加一条(下面两条命令取真值),再回填 instances
-#   nvidia-smi --query-gpu=compute_cap --format=csv   → compute_capability
-#   nvidia-smi topo -m                                 → 有 NV# 链路=nvlink true,只见 PIX/PHB=false
+# ---- 缺显卡型号时怎么补 ----
+# 在 gpu_catalog 下加一条(只记算力事实,不记显存/卡数 —— 那两个在 job.json 里写):
+#   compute_cap / sm_major:  查官方 https://developer.nvidia.com/cuda-gpus 或实测:
+#     nvidia-smi --query-gpu=compute_cap --format=csv   → compute_capability
+#   nvlink:                   nvidia-smi topo -m → 有 NV# 链路=true,只见 PIX/PHB=false
+#   source:                   official=官方表 / measured=实测 / reference=按同架构推(最可疑)

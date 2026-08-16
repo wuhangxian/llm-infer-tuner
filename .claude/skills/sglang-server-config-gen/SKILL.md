@@ -33,7 +33,9 @@ description: 输入一个固定 JSON(JobSpec:机型/模型/镜像/负载/SLA/预
 {
   "job_id": "qwen36_pro5000_random_v1",
   "engine": "sglang",
-  "instance_type": "GC50s.192XLARGE2304",
+  "gpu_model": "pro5000",
+  "gpu_count": 8,
+  "gpu_memory_gb": 72,
   "model": "qwen36-27b-fp8",
   "image": "sglang-v0.5.10",
   "workload": "qa-chat-3.5k-1k",
@@ -44,7 +46,8 @@ description: 输入一个固定 JSON(JobSpec:机型/模型/镜像/负载/SLA/预
 
 | 字段 | 指向 | 提供什么 |
 |---|---|---|
-| `instance_type` | `catalogs/gpu.yaml` | GPU 型号 / 卡数 / 单卡显存 / 算力(sm_major) / NVLink |
+ | `gpu_model` | `catalogs/gpu.yaml` | 算力(sm_major) / NVLink |
+ | `gpu_count` / `gpu_memory_gb` | inline (JobSpec) | 卡数(TP/EP 上限) / 单卡显存(TP 准入判据) |
 | `model` | `catalogs/models.yaml` | 架构 / 是否 MoE / 权重大小 / parser 名 / KV 粗估 |
 | `image` | `images.yaml`(本 skill 内) | CUDA 版本 / attention 菜单 / flag 别名 / valid_flags 白名单 |
 | `workload` | `catalogs/workloads.yaml` | 输入/输出长度 / 并发梯度 / 采样参数 |
@@ -63,10 +66,10 @@ description: 输入一个固定 JSON(JobSpec:机型/模型/镜像/负载/SLA/预
 **步骤**:
 
 1. **解析 JobSpec** → 取出 5 张卡片(gpu / model / workload / image + inline sla/search)。
-2. **定 attention 轴**:`knowledge.md §1` 短名单[gpu.sm_major] ∩ image.attention_backends ∩ CUDA 达标。
+2. **定 attention 轴**:`knowledge.md §1` 短名单[gpu_model 查表得 sm_major] ∩ image.attention_backends ∩ CUDA 达标。
    - SM120 → 只有 `flashinfer / triton`;**prefill 永不用 trtllm_mha**(会 raise);fa3 排除。
 3. **定并行度**(`knowledge.md §2`):
-   - TP 候选 = 权重放得下的 2 的幂(≤ gpu.count);默认全保留。长输入把 TP1 排末尾。
+   - TP 候选 = 权重放得下的 2 的幂(≤ gpu_count);默认全保留。长输入把 TP1 排末尾。
    - PP 恒 1(单机排除 pp>1)。
    - EP:仅 MoE 生成;dense 模型(如 qwen36-27b)**不生成 ep 轴**。
 4. **铺搜索轴**(`knowledge.md §3`):mem-fraction / chunked-prefill / max-running-requests / kv-cache-dtype / schedule-conservativeness,按默认档;按算力/CUDA 过滤搜不了的值。

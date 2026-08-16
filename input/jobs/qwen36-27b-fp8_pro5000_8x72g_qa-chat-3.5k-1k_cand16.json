@@ -1,9 +1,11 @@
 {
-  "job_id": "qwen36_35b_pro5000_0814",
+  "job_id": "qwen36-27b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand16",
   "engine": "sglang",
-  "instance_type": "GC50s.192XLARGE2304",
-  "model": "qwen36-35b-a3b-fp8",
-  "image": "sglang-v0.5.16",
+  "gpu_model": "pro5000",
+  "gpu_count": 8,
+  "gpu_memory_gb": 72,
+  "model": "qwen36-27b-fp8",
+  "image": "sglang-v0.5.10",
   "workload": "qa-chat-3.5k-1k",
   "benchmark_method": "sglang-bench-serving",
   "sla": {
@@ -12,7 +14,7 @@
     "min_success_rate": 0.99
   },
   "search": {
-    "max_candidates": 2,
+    "max_candidates": 16,
     "max_runtime_minutes": 180
   }
 }

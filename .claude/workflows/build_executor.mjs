@@ -9,7 +9,7 @@ export const meta = {
   ],
 }
 
-const ROOT = '/data/home/dorianwu/aaawhx-study/sglang-tuner'
+const ROOT = '/data/home/dorianwu/aaawhx-study/llm-infer-tuner'
 
 // ---------------------------------------------------------------------------
 // Shared context handed to EVERY agent so parallel-written modules line up.
@@ -184,7 +184,7 @@ class ExecutorConfig:
     max_candidates: int = 1       # 骨架:1
     concurrencies: list[int] | None = None   # 骨架:[1]
     port: int = 30000
-    container_name: str = "llmopt-exec"
+    container_name: str = "llm-infer-tuner-exec"
 
 def run_executor(config: ExecutorConfig, *, remote=None, client=None) -> dict: ...
     # 1) 读 job(JobSpec)+ workload(catalogs/workloads.yaml 取 output_tokens.value 做体检 output_len)
@@ -204,7 +204,7 @@ if __name__ == "__main__": raise SystemExit(main())
 `
 
 async function writeModule(file, responsibilities, phase) {
-  const prompt = `你在为 sglang-tuner 写第二阶段执行器的一个模块。**只写这一个文件,严格按契约,写完用 Write 工具落盘。**
+  const prompt = `你在为 llm-infer-tuner 写第二阶段执行器的一个模块。**只写这一个文件,严格按契约,写完用 Write 工具落盘。**
 
 目标文件:\`${ROOT}/${file}\`
 
@@ -250,7 +250,7 @@ await writeModule('runners/executor.py',
 
 phase('Verify')
 const verify = await agent(
-  `验证 sglang-tuner 第二阶段执行器骨架的一致性与可用性(不连 SSH/docker/网络,纯离线校验)。
+  `验证 llm-infer-tuner 第二阶段执行器骨架的一致性与可用性(不连 SSH/docker/网络,纯离线校验)。
 
 工作目录:${ROOT}
 

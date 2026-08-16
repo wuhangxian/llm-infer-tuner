@@ -1,2 +1,2 @@
-"""Planning components for sglang-tuner."""
+"""Planning components for llm-infer-tuner."""
 

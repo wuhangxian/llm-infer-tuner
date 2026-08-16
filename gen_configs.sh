@@ -32,7 +32,7 @@ JOB_JSON="$(cat "$JOB")"
 SCHEMA='{"type":"object","required":["candidates"],"properties":{"candidates":{"type":"array","items":{"type":"object","required":["id","params","cmd","reasons"],"properties":{"id":{"type":"string"},"params":{"type":"object"},"cmd":{"type":"string"},"reasons":{"type":"array","items":{"type":"string"}}}}}}}'
 
 read -r -d '' PROMPT <<EOF || true
-# sglang-tuner 一步出 SGLang 启动配置(JSONL)
+# llm-infer-tuner 一步出 SGLang 启动配置(JSONL)
 
 你要为下面这个 job 生成一组**可直接执行**的 SGLang 启动配置候选。
 
@@ -44,7 +44,7 @@ ${JOB_JSON}
 ## 权威知识库(必须按顺序读,再产出任何参数)
 1. \`${SKILL_DIR}/SKILL.md\` —— 流程入口:该读什么、推导步骤、输出契约、3 道硬闸。
 2. \`${SKILL_DIR}/knowledge.md\` —— **所有调优判断都在这**(§0 绝不写 context-length;§1 按算力选 attention;§2 TP/PP/EP 推导,**含块量化×TP 整除硬约束**;§3 搜索空间;§4 pin;§5 排除项;§6 阶段顺序;§7 混合 mamba;§8 调度;§9 并发)。每条 reason 里注明你依据的章节。
-3. \`catalogs/*.yaml\` —— 按 JobSpec 点名的卡:gpu.yaml(instance_type→sm/nvlink/count/memory)、models.yaml(model→arch/is_moe/num_experts/moe_intermediate_size/quantization.block_size/weight_gb/default_flags)、workloads.yaml(workload→输入输出长度/并发梯度)。
+3. \`catalogs/*.yaml\` —— 按 JobSpec 点名的卡:gpu.yaml(gpu_model→sm/nvlink;gpu_count/gpu_memory_gb 在 JobSpec 里)、models.yaml(model→arch/is_moe/num_experts/moe_intermediate_size/quantization.block_size/weight_gb/default_flags)、workloads.yaml(workload→输入输出长度/并发梯度)。
 4. \`${SKILL_DIR}/images.yaml\` —— JobSpec.image 点名的镜像卡(CUDA、attention 菜单、valid_flags 白名单)。
 
 ## 硬要求

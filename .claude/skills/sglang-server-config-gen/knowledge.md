@@ -58,7 +58,7 @@
 ## 2. 并行度推导(TP / PP / EP)
 
 ### TP 推导 — `judgment`
-候选 TP = 所有满足「**单卡权重 ≤ 单卡显存**」**且**「**块量化整除**」的 2 的幂,上限 `gpu.count`。
+候选 TP = 所有满足「**单卡权重 ≤ 单卡显存**」**且**「**块量化整除**」的 2 的幂,上限 `gpu_count`。
 
 - **准入门槛只看「权重放得下」**(`weight_gb[precision] / tp ≤ memory_gb`)。KV 余量**不参与准入删除**——「并发多高、要不要逐出」交压测 + SLA 兜底。
 - **块量化 × TP 整除硬约束(`measured` v0.5.10,不满足直接不生成该 TP 候选)**
@@ -84,9 +84,9 @@
   - 计算 `tp_max = floor(moe_intermediate_size / block_size)`(dense 用 `intermediate_size`)。
   - **只保留 `tp ∈ {2 的幂} 且 tp ≤ tp_max 且 moe_intermediate_size % (block_size × tp) == 0`** 的候选;其余 TP **直接不生成**(不是降优先级,是删)。
   - 连带:该 TP 下所有 `--attention-backend`、`--mem-fraction-static` 等组合**一并不生成**(它们再合法也起不来,是 TP 先崩)。避免像本次那样白跑 4 次启动(c001–c004 四条 tp=8 组合全崩在同一个错)。
-  - **实例**:qwen36-35b-a3b-fp8,`moe_intermediate_size=512`、`block_size=128` → `tp_max=4`。**合法 TP={1,2,4}**(每卡 512/256/128,整除);**排除 TP=8**(64<128)。故 8 卡机上此模型最多切 4 路,`gpu.count=8` **不等于** tp 可取 8。
+  - **实例**:qwen36-35b-a3b-fp8,`moe_intermediate_size=512`、`block_size=128` → `tp_max=4`。**合法 TP={1,2,4}**(每卡 512/256/128,整除);**排除 TP=8**(64<128)。故 8 卡机上此模型最多切 4 路,`gpu_count=8` **不等于** tp 可取 8。
 
-  **④ 卡片缺字段时的保守兜底**:`moe_intermediate_size`(或 `intermediate_size`)或 `quantization.block_size` 任一缺失 → **不得假设可切到 `tp=gpu.count`**;按已知能起的最小安全档(如 tp≤4)生成,并在候选 `reasons` 明确标注「未核对块量化整除性,TP 上限存疑,需上机核 config.json」。**宁可少生成,不生成注定崩的候选。**
+  **④ 卡片缺字段时的保守兜底**:`moe_intermediate_size`(或 `intermediate_size`)或 `quantization.block_size` 任一缺失 → **不得假设可切到 `tp=gpu_count`**;按已知能起的最小安全档(如 tp≤4)生成,并在候选 `reasons` 明确标注「未核对块量化整除性,TP 上限存疑,需上机核 config.json」。**宁可少生成,不生成注定崩的候选。**
 
   **⑤ 不要为跑满卡去改量化方式**:换 per-tensor 能绕过约束但掉精度、破坏候选可比性;且本模型实测 tp=4 已是吞吐最优(2346 tok/s,tp 越小越低),tp=8 即便能起也因 all-reduce 更重而更慢。**正解永远是砍掉非法 TP,不是改 checkpoint。**
 - KV 估算(`kv_gb_per_token`)仍算、仍进 notes,但**只作候选排序/展示**,不删任何能放下权重的 TP。真值以启动日志 `max_total_num_tokens` 为准。
@@ -122,7 +122,7 @@
 不是每种精度都能端到端真跑通。**只在「端到端诚实集」内出候选,越界的精度要么拒绝、要么降级并标注**,绝不假装某精度能跑而生成注定失败/静默降级的候选。
 
 - **端到端诚实集 = `{none, bf16, fp8}`**:这几种在本项目目标环境(NVIDIA + SGLang)上是真跑得通的权重精度。
-- **`nvfp4`(fp4)有算力门槛**:仅当 `gpu.sm_major ≥ model.nvfp4_requires_sm`(qwen3.6 系列 = 10,即 B200/B300 SM100+)才允许。**SM120(Pro5000)< 不满足** → 生成期直接**拒绝** nvfp4 候选,不降级(降级会偷改精度、破坏可比性)。
+- **`nvfp4`(fp4)有算力门槛**:仅当 `gpu_model 查表得 sm_major ≥ model.nvfp4_requires_sm`(qwen3.6 系列 = 10,即 B200/B300 SM100+)才允许。**SM120(Pro5000)< 不满足** → 生成期直接**拒绝** nvfp4 候选,不降级(降级会偷改精度、破坏可比性)。
 - **其它未列入诚实集的格式**(如 gptq/awq/int4 等本项目未验证的):**降级到 `fp8`(模型有 fp8 权重)或 `bf16`,并在候选 `reasons` 里明确标注「原请求精度 X 未验证,已降级到 Y」**,让下游知道这不是用户原意。
 - 精度决定用哪份 `weight_gb[precision]` 去过本节 TP 推导的权重门槛(单卡权重 ≤ 显存)—— 降级后必须用降级后精度的 weight_gb 重算准入。
 - 出处:诚实集来自旧 sglang-param-search 的实测边界(`_QUANT_END_TO_END`);nvfp4 算力门来自 cookbook「NVFP4 仅 B200/B300」并由 `model.nvfp4_requires_sm` 承载(见 catalogs/models.yaml)。
