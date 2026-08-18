@@ -48,6 +48,14 @@ class _FakeRemote:
     def run(self, command: str, *, timeout=None) -> _FakeResult:
         if command.startswith("echo $HOME"):
             return _FakeResult(stdout="/home/fake\n")
+        if command == "echo ok":
+            return _FakeResult(stdout="ok\n")
+        if command.startswith("test -d"):
+            return _FakeResult(stdout="config.json\nsafetensors\n")
+        if command.startswith("docker image inspect"):
+            return _FakeResult(stdout="sha256:abcdef\n")
+        if command.startswith("docker pull"):
+            return _FakeResult(stdout="\n")
         return _FakeResult(stdout="")
 
 

@@ -380,6 +380,47 @@ def _outcome_diag(outcome: SearchOutcome) -> dict[str, Any]:
     }
 
 
+
+def _preflight_checks(config: ExecutorConfig, remote: RemoteRunner) -> None:
+    """Verify remote connectivity, model directory, and image availability before container start."""
+    # 1. SSH
+    probe = remote.run("echo ok")
+    if not probe.ok or probe.stdout.strip() != "ok":
+        detail = probe.stderr.strip()
+        raise SystemExit(
+            f"SSH connection failed: {config.ssh_target}\n{detail}"
+        )
+    _log(f"SSH OK: {config.ssh_target}")
+
+    # 2. Model dir
+    q = shlex.quote(config.model_host_dir)
+    check_dir = remote.run(f"test -d {q} && ls {q} | head -5")
+    if not check_dir.ok:
+        detail = check_dir.stderr.strip()
+        raise SystemExit(
+            f"Model dir not found: {config.model_host_dir}\n{detail}"
+        )
+    n = len(check_dir.stdout.strip().splitlines())
+    _log(f"Model dir OK: {config.model_host_dir} ({n} files)")
+
+    # 3. Image
+    iq = shlex.quote(config.image_ref)
+    image_check = remote.run(
+        f"docker image inspect {iq} --format {{{{.Id}}}} 2>/dev/null || echo NOT_LOCAL"
+    )
+    if image_check.stdout.strip() == "NOT_LOCAL":
+        _log(f"Image not cached, pulling: {config.image_ref}")
+        pull = remote.run(f"docker pull {iq}", timeout=600)
+        if not pull.ok:
+            detail = pull.stderr.strip()
+            raise SystemExit(
+                f"Image pull failed: {config.image_ref}\n{detail}"
+            )
+        _log(f"Image pulled: {config.image_ref}")
+    else:
+        _log(f"Image local: {config.image_ref}")
+
+
 def _check_hardware_match(job: JobSpec, config: ExecutorConfig) -> None:
     """Verify target.json GPU fields match job.json requirements before any remote work.
 
@@ -433,6 +474,7 @@ def run_executor(
     _check_hardware_match(job, config)
 
     remote = remote or RemoteRunner(config.ssh_target, ssh_password=config.ssh_password)
+    _preflight_checks(config, remote)
     client = client or ClaudeCodeClient()
 
     # FAIRNESS: the client skill (an LLM) is called EXACTLY ONCE per job to get a
