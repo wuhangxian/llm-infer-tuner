@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -9,12 +10,23 @@ from dataclasses import dataclass
 CompletedProcess = subprocess.CompletedProcess[str]
 Runner = Callable[..., CompletedProcess]
 
-DEFAULT_SSH_OPTIONS: tuple[str, ...] = (
+# Key-based (passwordless) SSH: disable password auth entirely so failures are
+# immediate instead of hanging on a prompt.
+KEY_SSH_OPTIONS: tuple[str, ...] = (
     "-o",
     "BatchMode=yes",
     "-o",
     "StrictHostKeyChecking=accept-new",
 )
+
+# Password-based SSH: allow password auth, still no strict host check.
+PASSWORD_SSH_OPTIONS: tuple[str, ...] = (
+    "-o",
+    "StrictHostKeyChecking=accept-new",
+)
+
+# Kept for backward compat with tests/external callers that import it.
+DEFAULT_SSH_OPTIONS = KEY_SSH_OPTIONS
 
 
 @dataclass
@@ -31,22 +43,39 @@ class CommandResult:
 
 
 class RemoteRunner:
-    """Execute commands on a remote host via ssh, or locally via a raw argv."""
+    """Execute commands on a remote host via ssh, or locally via a raw argv.
+
+    If *ssh_password* is provided, uses ``sshpass`` to feed the password to
+    ssh (requires the ``sshpass`` binary on PATH).  Otherwise falls back to
+    key-based passwordless SSH with ``BatchMode=yes``.
+    """
 
     def __init__(
         self,
         ssh_target: str,
         *,
-        ssh_options: Sequence[str] = DEFAULT_SSH_OPTIONS,
+        ssh_password: str = "",
+        ssh_options: Sequence[str] | None = None,
         runner: Runner = subprocess.run,
         default_timeout: int = 600,
     ) -> None:
         self.ssh_target = ssh_target
-        self.ssh_options = tuple(ssh_options)
+        self.ssh_password = ssh_password
+        if ssh_options is not None:
+            self.ssh_options = tuple(ssh_options)
+        elif ssh_password:
+            self.ssh_options = PASSWORD_SSH_OPTIONS
+        else:
+            self.ssh_options = KEY_SSH_OPTIONS
         self.runner = runner
         self.default_timeout = default_timeout
 
     def build_ssh_argv(self, command: str) -> list[str]:
+        if self.ssh_password:
+            return [
+                "sshpass", "-p", self.ssh_password,
+                "ssh", *self.ssh_options, self.ssh_target, command,
+            ]
         return ["ssh", *self.ssh_options, self.ssh_target, command]
 
     def run(self, command: str, *, timeout: int | None = None) -> CommandResult:

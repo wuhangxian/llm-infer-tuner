@@ -72,6 +72,7 @@ class ExecutorConfig:
     target_gpu_memory_gb: float = 0.0
     top_k: int = DEFAULT_TOP_K    # round-2 refines only the top-K candidates by round-1 goodput
     max_cap: int = DEFAULT_MAX_CAP  # upper bound on concurrency the search will probe
+    ssh_password: str = ""  # optional; empty = key-based SSH
 
 
 def _load_job(job_path: Path) -> JobSpec:
@@ -431,7 +432,7 @@ def run_executor(
     candidates = _load_candidates(config.configs_path, config.max_candidates)
     _check_hardware_match(job, config)
 
-    remote = remote or RemoteRunner(config.ssh_target)
+    remote = remote or RemoteRunner(config.ssh_target, ssh_password=config.ssh_password)
     client = client or ClaudeCodeClient()
 
     # FAIRNESS: the client skill (an LLM) is called EXACTLY ONCE per job to get a
@@ -609,6 +610,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--configs", required=True, type=Path)
     parser.add_argument("--results", required=True, type=Path)
     parser.add_argument("--ssh-target", required=True)
+    parser.add_argument("--ssh-password", default="", help="SSH password (empty=key-based)")
     parser.add_argument("--image-ref", required=True)
     parser.add_argument("--model-host-dir", required=True)
     parser.add_argument("--model-container-path", required=True)
@@ -633,6 +635,7 @@ def main(argv: list[str] | None = None) -> int:
         configs_path=args.configs,
         results_dir=args.results,
         ssh_target=args.ssh_target,
+        ssh_password=args.ssh_password,
         image_ref=args.image_ref,
         model_host_dir=args.model_host_dir,
         model_container_path=args.model_container_path,

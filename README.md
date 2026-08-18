@@ -100,6 +100,7 @@ chmod 600 .env
   "gpu_count": 8,
   "gpu_memory_gb": 72,
   "ssh_target": "ubuntu@122.51.115.16",
+  "ssh_password": "",                     // 选填: 密码登录(留空走 key 免密)
   "model_host_dir": "/data/autotune/models/Qwen3.6-35B-A3B-FP8",
   "model_container_path": "/data/autotune/models/Qwen3.6-35B-A3B-FP8",
   "image_ref": "hai-beijing.tencentcloudcr.com/ai/sglang:v0.5.16-cu129",
@@ -107,7 +108,7 @@ chmod 600 .env
 }
 ```
 
-> SSH 走 key 免密(`remote.py` 用 `BatchMode=yes`,不读密码),请先把公钥配到目标机。
+> SSH 默认走 key 免密(`remote.py` 用 `BatchMode=yes`);若 target.json 填了 `ssh_password`,则用 `sshpass` 走密码登录。
 
 ### 3. 跑两阶段
 

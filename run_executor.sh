@@ -10,7 +10,7 @@
 #   # configs 默认 outputs/<job_id>/configs.jsonl,results 默认 outputs/<job_id>/results
 #
 # 说明:targets.json 只存「非机密的部署事实」(IP/模型路径/镜像/端口)—— 换机器只换这个文件。
-#       SSH 走 key 免密(remote.py 用 BatchMode=yes,不读密码),所以这里不存密码。
+#       SSH 默认走 key 免密;target.json 填 ssh_password 时用 sshpass 走密码。
 set -euo pipefail
 
 JOB="${1:?用法: ./run_executor.sh <job.json> <target.json> [configs.jsonl] [results_dir]}"
@@ -28,6 +28,7 @@ RESULTS="${4:-outputs/${JOB_ID}/results}"
 
 # 从 target.json 取「机器事实」
 SSH_TARGET="$(jq -r '.ssh_target' "$TARGET")"
+SSH_PASSWORD="$(jq -r '.ssh_password // ""' "$TARGET")"
 MODEL_HOST_DIR="$(jq -r '.model_host_dir' "$TARGET")"
 MODEL_CONTAINER_PATH="$(jq -r '.model_container_path' "$TARGET")"
 IMAGE_REF="$(jq -r '.image_ref' "$TARGET")"
@@ -56,6 +57,7 @@ exec uv run python -m runners.executor \
   --configs "$CONFIGS" \
   --results "$RESULTS" \
   --ssh-target "$SSH_TARGET" \
+  --ssh-password "$SSH_PASSWORD" \
   --image-ref "$IMAGE_REF" \
   --model-host-dir "$MODEL_HOST_DIR" \
   --model-container-path "$MODEL_CONTAINER_PATH" \

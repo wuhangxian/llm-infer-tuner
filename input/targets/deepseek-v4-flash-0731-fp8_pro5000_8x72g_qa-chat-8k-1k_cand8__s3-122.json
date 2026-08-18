@@ -7,5 +7,6 @@
   "model_container_path": "/data/autotune/models/DeepSeek-V4-Flash-0731/DeepSeek-V4-Flash-0731",
   "image_ref": "hai-beijing.tencentcloudcr.com/ai/sglang:v0.5.16-cu129",
   "port": 30000,
-  "remote_outputs_dir": ""
+  "remote_outputs_dir": "",
+  "ssh_password": "whx5201314@"
 }
