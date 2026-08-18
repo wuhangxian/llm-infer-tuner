@@ -189,6 +189,7 @@ def _resolve_bench_template(
 def _health_check_failed_result(candidate_id: str, reason: str) -> RunResult:
     return RunResult(
         candidate_id=candidate_id,
+        tp_size=1,
         concurrency=0,
         num_prompts=0,
         completed=0,
@@ -208,7 +209,7 @@ def _health_check_failed_result(candidate_id: str, reason: str) -> RunResult:
     )
 
 
-def _make_evaluate(ctx: _CandidateContext, candidate_id: str, candidate_dir: Path):
+def _make_evaluate(ctx: _CandidateContext, candidate_id: str, candidate_dir: Path, tp_size: int = 1):
     """Build the evaluate(concurrency) -> RunResult closure the search calls.
 
     Each call rewrites the single template for this concurrency, runs one bench in
@@ -255,6 +256,7 @@ def _make_evaluate(ctx: _CandidateContext, candidate_id: str, candidate_dir: Pat
                 candidate_id=candidate_id,
                 concurrency=concurrency,
                 num_prompts=num_prompts,
+                tp_size=tp_size,
             )
             if run_result.status == "bad_args" and bench_run.returncode != 0:
                 tail = (bench_run.stderr or bench_run.stdout).strip().splitlines()[-3:]
@@ -339,7 +341,8 @@ def _run_candidate(
             )
         else:
             _log(f"[{round_label}] {candidate_id}: server ready, probing concurrency ...")
-            evaluate = _make_evaluate(ctx, candidate_id, candidate_dir)
+            tp_size = int(candidate.get("params", {}).get("tp_size", 1))
+            evaluate = _make_evaluate(ctx, candidate_id, candidate_dir, tp_size=tp_size)
             outcome = search_saturation(
                 evaluate,
                 qualifies,
@@ -571,10 +574,11 @@ def run_executor(
 
         # ---- pick top-K by round-1 goodput ------------------------------------
         round1_ranking = rank_candidates(
-            results_by_candidate, job.sla, output_len=output_len
+            results_by_candidate, job.sla, output_len=output_len,
+            gpu_count=job.gpu_count,
         )
         top_ids = [row["candidate_id"] for row in round1_ranking[: config.top_k]]
-        _log(f"round-1 done. ranking={[ (r['candidate_id'], r['goodput']) for r in round1_ranking ]}")
+        _log(f"round-1 done. ranking={[ (r['candidate_id'], r['goodput_per_gpu']) for r in round1_ranking ]}")
         _log(f"round-2 refining top-{config.top_k}: {top_ids}")
 
         # ---- ROUND 2: precise bisection on the top-K, reusing round-1 probes --
@@ -603,7 +607,10 @@ def run_executor(
         container.stop()
         container.remove()
 
-    ranking = rank_candidates(results_by_candidate, job.sla, output_len=output_len)
+    ranking = rank_candidates(
+        results_by_candidate, job.sla, output_len=output_len,
+        gpu_count=job.gpu_count,
+    )
     _write_json(config.results_dir / "ranking.json", ranking)
 
     return {

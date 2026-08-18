@@ -148,6 +148,27 @@ def test_candidate_goodput_takes_max_over_qualifying_runs() -> None:
     assert candidate_goodput(runs, sla, output_len=512) == 7000.0
 
 
+def test_candidate_goodput_normalizes_by_gpu_count_and_tp_size() -> None:
+    """Per-GPU goodput = raw_throughput * (gpu_count / tp_size).
+
+    A TP2 instance doing 1000 tok/s on an 8-GPU host -> 4 instances -> 4000
+    A TP8 instance doing 1000 tok/s on an 8-GPU host -> 1 instance -> 1000
+    """
+    sla = _sla()
+    # tp_size=2, raw=1000, gpu_count=8 -> per_gpu = 1000 * (8/2) = 4000
+    runs_tp2 = [_result(concurrency=16, total_throughput=1000.0, tp_size=2)]
+    assert candidate_goodput(runs_tp2, sla, output_len=512, gpu_count=8) == 4000.0
+
+    # tp_size=8, raw=1000, gpu_count=8 -> per_gpu = 1000 * (8/8) = 1000
+    runs_tp8 = [_result(concurrency=16, total_throughput=1000.0, tp_size=8)]
+    assert candidate_goodput(runs_tp8, sla, output_len=512, gpu_count=8) == 1000.0
+
+    # TP2 beats TP8 at same raw throughput (4000 > 1000)
+    assert candidate_goodput(runs_tp2, sla, output_len=512, gpu_count=8) > candidate_goodput(
+        runs_tp8, sla, output_len=512, gpu_count=8
+    )
+
+
 def test_candidate_goodput_zero_when_nothing_qualifies() -> None:
     sla = _sla()
     runs = [_result(success_rate=0.1), _result(avg_output_tokens=5.0)]

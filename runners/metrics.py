@@ -25,6 +25,7 @@ class RunResult:
     total_output_tokens: int
     avg_output_tokens: float
     duration: float
+    tp_size: int = 1
     status: str = "ok"
     failure_reason: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
@@ -50,6 +51,7 @@ def _as_int(value: Any) -> int:
 def _empty_result(candidate_id: str, concurrency: int, num_prompts: int) -> RunResult:
     return RunResult(
         candidate_id=candidate_id,
+        tp_size=1,
         concurrency=concurrency,
         num_prompts=num_prompts,
         completed=0,
@@ -89,7 +91,8 @@ def _select_record(text: str, concurrency: int) -> dict[str, Any] | None:
 
 
 def parse_bench_text(
-    text: str, *, candidate_id: str, concurrency: int, num_prompts: int
+    text: str, *, candidate_id: str, concurrency: int, num_prompts: int,
+    tp_size: int = 1,
 ) -> RunResult:
     record = _select_record(text or "", concurrency)
     if record is None:
@@ -102,6 +105,7 @@ def parse_bench_text(
 
     return RunResult(
         candidate_id=candidate_id,
+        tp_size=1,
         concurrency=concurrency,
         num_prompts=num_prompts,
         completed=completed,
@@ -123,12 +127,14 @@ def parse_bench_text(
 
 
 def parse_bench_file(
-    path: str | Path, *, candidate_id: str, concurrency: int, num_prompts: int
+    path: str | Path, *, candidate_id: str, concurrency: int, num_prompts: int,
+    tp_size: int = 1,
 ) -> RunResult:
     try:
         text = Path(path).read_text(encoding="utf-8")
     except OSError:
         return _empty_result(candidate_id, concurrency, num_prompts)
     return parse_bench_text(
-        text, candidate_id=candidate_id, concurrency=concurrency, num_prompts=num_prompts
+        text, candidate_id=candidate_id, concurrency=concurrency,
+        num_prompts=num_prompts, tp_size=tp_size
     )
