@@ -33,7 +33,7 @@ MODEL_CONTAINER_PATH="$(jq -r '.model_container_path' "$TARGET")"
 IMAGE_REF="$(jq -r '.image_ref' "$TARGET")"
 PORT="$(jq -r '.port // 30000' "$TARGET")"
 REMOTE_OUTPUTS_DIR="$(jq -r '.remote_outputs_dir // ""' "$TARGET")"
-TARGET_GPU_MODEL="$(jq -r '.gpu_model // "" "$TARGET")"
+TARGET_GPU_MODEL="$(jq -r '.gpu_model' "$TARGET")"
 TARGET_GPU_COUNT="$(jq -r '.gpu_count // 0' "$TARGET")"
 TARGET_GPU_MEM="$(jq -r '.gpu_memory_gb // 0' "$TARGET")"
 

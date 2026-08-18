@@ -26,7 +26,7 @@ workloads:
     request:
       stream: true
       sampling: {temperature: 0.7, top_p: 0.8, top_k: 20, max_new_tokens: 1000}
-   notes: 文本问答场景,固定约 3500 输入 token 和 1000 输出 token。
+    notes: 文本问答场景,固定约 3500 输入 token 和 1000 输出 token。
   qa-chat-8k-1k:
     type: chat
     modality: text

@@ -39,7 +39,7 @@ wheels = [
 ]
 
 [[package]]
-name = "llmopt-agent"
+name = "llm-infer-tuner"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

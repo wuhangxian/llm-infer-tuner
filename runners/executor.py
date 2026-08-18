@@ -623,6 +623,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=30000)
     parser.add_argument("--container-name", default="llm-infer-tuner-exec")
     parser.add_argument("--remote-outputs-dir", default="")
+    parser.add_argument("--target-gpu-model", default="")
+    parser.add_argument("--target-gpu-count", type=int, default=0)
+    parser.add_argument("--target-gpu-memory-gb", type=float, default=0.0)
     args = parser.parse_args(argv)
 
     config = ExecutorConfig(
@@ -652,6 +655,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-    parser.add_argument("--target-gpu-model", default="")
-    parser.add_argument("--target-gpu-count", type=int, default=0)
-    parser.add_argument("--target-gpu-memory-gb", type=float, default=0.0)
