@@ -295,7 +295,7 @@ def test_two_round_dryrun_ranks_by_true_goodput(tmp_path, workloads_output_len):
     assert ids_in_order == ["cand-b", "cand-d", "cand-a", "cand-c"]
     by_id = {row["candidate_id"]: row for row in ranking}
     for cid, expected_cstar in cstar.items():
-        assert by_id[cid]["goodput_per_gpu"] == expected_cstar * 100.0 * 8  # gpu_count=8, tp_size=1
+        assert by_id[cid]["goodput_per_host"] == expected_cstar * 100.0 * 8  # gpu_count=8, tp_size=1
         assert by_id[cid]["best_concurrency"] == expected_cstar
 
     # -- top-K wiring: only the two best (by round-1 goodput) get round 2 ------
@@ -368,7 +368,7 @@ def test_round2_reuses_round1_seeds_no_rebench(tmp_path, workloads_output_len):
     ranking = summary["ranking"]
     assert ranking[0]["candidate_id"] == "solo"
     assert ranking[0]["best_concurrency"] == 10
-    assert ranking[0]["goodput_per_gpu"] == 1000.0 * 8  # gpu_count=8, tp_size=1
+    assert ranking[0]["goodput_per_host"] == 1000.0 * 8  # gpu_count=8, tp_size=1
 
 
 def _index_of(summary: dict, candidate_id: str) -> int:

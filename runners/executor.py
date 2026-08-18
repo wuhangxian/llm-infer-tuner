@@ -578,7 +578,7 @@ def run_executor(
             gpu_count=job.gpu_count,
         )
         top_ids = [row["candidate_id"] for row in round1_ranking[: config.top_k]]
-        _log(f"round-1 done. ranking={[ (r['candidate_id'], r['goodput_per_gpu']) for r in round1_ranking ]}")
+        _log(f"round-1 done. ranking={[ (r['candidate_id'], r['goodput_per_host']) for r in round1_ranking ]}")
         _log(f"round-2 refining top-{config.top_k}: {top_ids}")
 
         # ---- ROUND 2: precise bisection on the top-K, reusing round-1 probes --

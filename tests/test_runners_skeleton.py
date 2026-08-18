@@ -155,11 +155,11 @@ def test_candidate_goodput_normalizes_by_gpu_count_and_tp_size() -> None:
     A TP8 instance doing 1000 tok/s on an 8-GPU host -> 1 instance -> 1000
     """
     sla = _sla()
-    # tp_size=2, raw=1000, gpu_count=8 -> per_gpu = 1000 * (8/2) = 4000
+    # tp_size=2, raw=1000, gpu_count=8 -> per_host = 1000 * (8/2) = 4000
     runs_tp2 = [_result(concurrency=16, total_throughput=1000.0, tp_size=2)]
     assert candidate_goodput(runs_tp2, sla, output_len=512, gpu_count=8) == 4000.0
 
-    # tp_size=8, raw=1000, gpu_count=8 -> per_gpu = 1000 * (8/8) = 1000
+    # tp_size=8, raw=1000, gpu_count=8 -> per_host = 1000 * (8/8) = 1000
     runs_tp8 = [_result(concurrency=16, total_throughput=1000.0, tp_size=8)]
     assert candidate_goodput(runs_tp8, sla, output_len=512, gpu_count=8) == 1000.0
 
