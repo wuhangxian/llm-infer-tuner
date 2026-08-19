@@ -4,20 +4,19 @@
 # 用法:  ./gen_configs.sh <job.json> [out.jsonl]
 #        默认输出 outputs/<job_id>/configs.jsonl。
 #
-# 脚本做 6 步确定性操作,其中只有第 3 步调 AI(claude)做调优决策:
-#   1. 前置检查  — 验证 jq/claude/job.json/SKILL.md 都就位
-#   2. 解析 job  — 用 jq 读 job_id,拼输出路径并建目录
-#   3. 拼接 prompt — 把 job.json 内容 + 硬约束 + 输出 schema 组装成 prompt
-#   4. 调 claude  — AI 读 skill/knowledge/catalogs,生成候选配置
-#   5. 拆 JSONL  — jq 把 claude 返回的 JSON 拆成一行一候选
-#   6. 预览输出  — 打印每条候选的 id/tp/attention/mem-fraction
-#
+# 脚本分 6 步,其中只有第 4 步调 AI(claude)做调优决策,其余全是确定性代码。
 # cmd 里的 --model-path 恒为占位符 ${MODEL_PATH}(路径是机器事实,非调优决策),
 # 第二步由 targets.json 填入。故 configs.jsonl 机器无关,可跨机搬运。
 set -euo pipefail
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 第 1 步:前置检查 — 验证依赖和输入文件都就位,缺一个就退出
+# 第 1 步:前置检查
+# ─────────────────────────────────────────────────────────────────────────
+# 脚本启动前先确认四样东西在不在,任何一个缺了就直接退出,不往下跑:
+#   • jq        — 命令行 JSON 处理工具,后面第 2/5/6 步都要用它读/写/解析 JSON
+#   • job.json  — 你传进来的参数路径对不对,文件在不在
+#   • SKILL.md  — AI 的流程说明书,在 .claude/skills/sglang-server-config-gen/ 下
+#   • claude    — AI CLI,第 4 步要用它生成配置,没装就跑不了
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 JOB="${1:?用法: ./gen_configs.sh <job.json> [out.jsonl]}"
 command -v jq >/dev/null || { echo "❌ 需要 jq" >&2; exit 1; }
@@ -31,14 +30,26 @@ command -v claude >/dev/null || { echo "❌ claude 不在 PATH" >&2; exit 1; }
 MODEL_PATH='${MODEL_PATH}'
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 第 2 步:解析 job.json — 用 jq 读 job_id,拼输出路径,建目录
+# 第 2 步:解析 job.json
+# ─────────────────────────────────────────────────────────────────────────
+# 用 jq 从 job.json 里读出 job_id 字段(如 qwen36-27b-...cand4),
+# 拼成输出路径 outputs/<job_id>/configs.jsonl,然后 mkdir -p 创建输出目录。
+# 如果用户传了第二个参数,就用那个路径覆盖默认路径。
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 JOB_ID="$(jq -r '.job_id' "$JOB")"
 OUT="${2:-outputs/${JOB_ID}/configs.jsonl}"
 mkdir -p "$(dirname "$OUT")"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 第 3 步:拼接 prompt — 组装 job.json 内容 + 调优硬约束 + 输出 JSON Schema
+# 第 3 步:拼接 prompt
+# ─────────────────────────────────────────────────────────────────────────
+# 把三部分组装成一段完整的 prompt,后面第 4 步把它喂给 claude:
+#   1. job.json 的完整内容(模型/卡型/负载/SLA/镜像)
+#   2. 调优硬约束(块量化×TP 整除、绝不写 context-length、模型 flag 原样取等)
+#   3. 输出 JSON Schema(约束 claude 返回 {candidates:[...]} 结构)
+# prompt 里还告诉 claude 该按顺序读 4 个知识库文件:
+#   SKILL.md → knowledge.md → catalogs/*.yaml → images.yaml
+# --model-path 在这里写死为 ${MODEL_PATH} 占位符,不绑定任何机器路径。
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 JOB_JSON="$(cat "$JOB")"
 
@@ -79,11 +90,15 @@ ${JOB_JSON}
 EOF
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 第 4 步:调 claude — AI 读 skill+knowledge+catalogs 生成配置(约 2 分钟)
-#   --add-dir .           让 claude 能读 catalogs/ 和整个项目
+# 第 4 步:调 claude(AI 决策,约 2 分钟)
+# ─────────────────────────────────────────────────────────────────────────
+# 用 claude -p "$PROMPT" 非交互模式调用 AI。关键参数:
+#   --add-dir .           让 claude 能读项目根下的 catalogs/ 等
 #   --add-dir $SKILL_DIR  让 claude 能读 SKILL.md/knowledge.md/images.yaml
-#   --json-schema          约束 claude 返回 {candidates:[...]} 结构
+#   --json-schema         约束 claude 返回 {candidates:[...]} 结构
 #   --output-format json  让 claude 输出 JSON(而非纯文本)
+# AI 读知识库 → 查表(gpu/model/workload/image)→ 推导 TP/attention/mem-fraction
+# → 生成一批候选,每条含 params + cmd + reasons。
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo "ℹ️  模型路径在命令里保留占位符 \${MODEL_PATH}(机器无关);第二步由 targets.json 填入实际路径。" >&2
 echo "ℹ️  输出 → $OUT" >&2
@@ -96,12 +111,15 @@ RAW="$(claude -p "$PROMPT" \
   --dangerously-skip-permissions)"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 第 5 步:拆 JSONL — jq 把 claude 返回的 {candidates:[...]} 拆成一行一候选
-#   claude --output-format json 把结果包在 .structured_output 或 .result 里:
-#     .result 可能是字符串(需 fromjson 解开),也可能是对象(直接用)
-#     .structured_output 是结构化输出(优先取)
-#   .candidates[] 遍历数组每个元素逐个输出,-c 压成一行
-#   -e 如果结果为 null/false 就报错退出(校验 claude 返回了有效数据)
+# 第 5 步:拆 JSONL
+# ─────────────────────────────────────────────────────────────────────────
+# claude 返回的是一整个 JSON 对象,需要 jq 拆成一行一候选(JSONL 格式):
+#   • claude --output-format json 把结果包在 .result 或 .structured_output 里
+#   • .result 可能是字符串(需 fromjson 解开),也可能是对象(直接用)
+#   • .structured_output 是结构化输出(优先取)
+#   • .candidates[] 遍历数组每个元素逐个输出,-c 压成一行
+#   • -e 如果结果为 null/false 就报错退出(校验 claude 返回了有效数据)
+# 最终写入 configs.jsonl,每行一个独立 JSON,方便第二步 executor 逐行读取。
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo "$RAW" | jq -e '
   ( .structured_output // (.result | if type=="string" then fromjson else . end) // . )
@@ -109,7 +127,11 @@ echo "$RAW" | jq -e '
 ' -c > "$OUT"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 第 6 步:预览输出 — 打印候选数 + 每条的 id/tp/attention/mem-fraction
+# 第 6 步:预览输出
+# ─────────────────────────────────────────────────────────────────────────
+# 用 wc -l 数生成了多少条候选,再用 jq 从每行里取 id/tp/attention/
+# mem-fraction 拼成一行预览打印到 stderr,让用户一眼看到结果概貌,
+# 不用手动 cat 文件。
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 N="$(wc -l < "$OUT" | tr -d ' ')"
 echo "✅ 已生成 $N 条候选 → $OUT" >&2
