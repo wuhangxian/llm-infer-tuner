@@ -140,7 +140,7 @@
 | `--max-running-requests` | `[8, 16, 32]` | judgment | 适用长输入(60k+);BBuf 的 [64,96,128] 是 8k dataset,不可直接迁 |
 | `--kv-cache-dtype` | `[auto, fp8_e4m3]` | measured | 长输入 KV 是主瓶颈,fp8 腰斩 kv/token;需配精度验证 |
 | `--schedule-conservativeness` | `[0.3, 1.0, 1.3]` | official | 官方唯一给出闭环判据的调度参数(见 §6) |
-| `--page-size` | `[1, 32, 64]` | official | 所有模型通用。1=默认;32=MoE 推荐(cookbook Qwen3-Coder);64=mamba V2 必须(`FLA_CHUNK_SIZE % page_size == 0`)。**条件生成**:mamba V2(`extra_buffer`)→ 只生成 64;MoE(`arch` 含 `moe`)→ 生成 [1, 32];其余 → [1] |
+| `--page-size` | `[1, 32, 64]` | official | KV cache 分页大小,调大减少页表管理开销(尤其 MoE 高并发)。**按 attention 后端联动生成,非独立铺**:flashinfer/triton → 只生成 [1](调大无收益,SGLang 不强制改写);mamba `no_buffer` → 只生成 [1](`no_buffer`+radix cache 强制 page_size=1);mamba `extra_buffer` → 只生成 [64](`FLA_CHUNK_SIZE(64) % page_size == 0` 硬约束);trtllm_mha → [16,32,64](但 SM120 用不了 trtllm_mha)。cookbook 证据:Qwen3-Coder MoE 推荐 32,DeepSeek-V3.2 用 64/128。⚠️ **版本核对**:换 SGLang 版本时需核对 `server_args.py` 中 `_handle_page_size` 及后端约束是否变化 |
 | `--mamba-radix-cache-strategy` | `[no_buffer, extra_buffer]` | official | **仅 `hybrid_mamba: true` 模型生成**。V1(`no_buffer`)默认,无 overlap,显存低;V2(`extra_buffer`)开 overlap+分支缓存,吞吐更好但显存更多。V2 必须配 `--page-size 64`。与投机解码有交互:投机解码+radix cache → 必须用 `extra_buffer`(见 §7) |
 | `--speculative-algorithm` | `[无, EAGLE]` | official | **仅 `capabilities.supports_mtp: true` 模型生成**。「无」是对照基线(不写这组 flag);EAGLE 从 `mtp_params` 取配套值(`num-steps`/`eagle-topk`/`num-draft-tokens`)。cookbook 5/7 Qwen 模型推荐,延迟可降 2-3 倍。放 §6 F 阶段搜,先跑通非投机基线 |
 
@@ -166,6 +166,8 @@
 | `--speculative-algorithm` + `supports_mtp: false` | official | 模型没有 MTP 权重(`mtp.safetensors`),启动直接报错 |
 | `--mamba-radix-cache-strategy` + `hybrid_mamba: false` | official | 非 GDN 模型没有 mamba 层,参数被忽略,等于白跑 |
 | `--mamba-radix-cache-strategy extra_buffer` + `--page-size != 64` | source | `FLA_CHUNK_SIZE(64) % page_size != 0` → 启动报错 |
+| `--mamba-radix-cache-strategy no_buffer` + `--page-size != 1` | source | `no_buffer`+radix cache 强制 `page_size=1`,写了别的会被忽略或报错 |
+| `--page-size` 值不在 attention 后端的允许集 | source | SGLang 不报错但自动改写并打 warning(如 flashinfer+page_size=64 不会报错但无收益;trtllm_mha+page_size=1 会被改成 64)。生成期只放后端认可的值,避免被改写后行为不可预期 |
 | `--speculative-algorithm` + `--mamba-radix-cache-strategy no_buffer` | source | 投机解码+radix cache 必须 `extra_buffer`(见 §7) |
 | `--chunked-prefill-size -1` | judgment | 关闭 chunked prefill,长输入峰值激活会爆(有生产用过,非普适,可手工 A/B 一次) |
 | `--tp-size N`(块量化下 `moe_intermediate_size/N` 或 `intermediate_size/N` 不是 `block_size` 整数倍) | measured | **启动即崩**(加载权重时 `ValueError: output_size not divisible by block_n`),非压测 OOM。细粒度 MoE 专家小最常撞;判据与算法见 §2「块量化 × TP 整除硬约束」。例:35B-A3B(moe_int=512/block=128)排除 tp=8 |
