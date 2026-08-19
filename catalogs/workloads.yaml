@@ -46,7 +46,7 @@ workloads:
     modality: text
     dataset:
       name: random
-      path: ShareGPT_V3_unfiltered_cleaned_split.json
+      path: ShareGPT_V3_unfiltered_cleaned_split.json  # 需提前下载到服务器：https://huggingface.co/datasets/anon8235895833/ShareGPT_V3_unfiltered_cleaned_split
       random_range_ratio: 1.0
     input_tokens:  {distribution: fixed, value: 32768}
     output_tokens: {distribution: fixed, value: 1024}

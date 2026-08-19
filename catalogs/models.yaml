@@ -27,6 +27,7 @@ models:
     default_precision: fp8
     weight_gb: {fp8: 27, bf16: 54, nvfp4: 22}
     # 单卡权重放得下即准入(fp8=27G < 72G,故 TP1/2/4 权重放得下)。⚠️ 块量化约束:moe_int=512/block=128 → tp_max=4,TP8 会崩(启动报错确认)。
+    # weight_gb source: cookbook Qwen3.6 "27B FP8: ~27GB for weights"
 
     modalities:
       input: [text, image]
@@ -155,7 +156,7 @@ models:
 
     deployment:
       model_format: huggingface
-      weight_size_gb: null           # 上机 du -sh 权重目录后回填
+      weight_size_gb: 35            # source: cookbook Qwen3.6 "35B-A3B FP8: ~35GB for weights"
       model_path: null               # 第二阶段 haihub 下载后回填实际路径
 
     source: https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8
@@ -211,11 +212,17 @@ models:
       supports_reasoning: true
       supports_chat_template: true
       supports_tool_call: true
-      supports_mtp: true             # config.json 有 dspark/n_mtp_layers 参数
+      supports_mtp: true             # source: cookbook DeepSeek-V4 DSpark;config.json 有 dspark/n_mtp_layers 参数
 
     default_flags:
+      reasoning-parser: deepseek-v4  # source: cookbook DeepSeek-V4 "enable the deepseek-v4 reasoning parser"
+      tool-call-parser: deepseekv4   # source: cookbook DeepSeek-V4 "enable the deepseekv4 tool-call parser"
       trust-remote-code: true        # 自定义 tokenizer(encoding_dsv4.py)
-    # ⚠️ 投机解码(dspark)参数需查 SGLang cookbook DeepSeek-V4 页确认,SGLang v0.5.16 可能不支持 V4 架构
+    # 投机解码(DSpark)参数 — cookbook DeepSeek-V4 Flash Official (0731) 原文
+    # DSpark 权重打包在主 checkpoint 里,不需单独 --speculative-draft-model-path
+    # 不设 num-steps/eagle-topk/num-draft-tokens,SGLang 从 checkpoint 读取
+    mtp_params:
+      speculative-algorithm: DSPARK  # source: cookbook "enable DSpark with --speculative-algorithm DSPARK"
 
     deployment:
       model_format: huggingface

@@ -885,9 +885,15 @@ images:
     - tokenspeed_mla
     - trtllm_mha
     startup_floor:
-      verified: null
-      source: null
-    flag_aliases: {}
+      verified: true              # same gate as v0.5.10/v0.5.13 (git diff confirmed empty)
+      force_fp16_when:
+        major_lt: 8
+      reject_when:
+        major_lt: 8
+        minor_lt: 5
+    flag_aliases:
+      mamba-radix-cache-strategy: mamba-scheduler-strategy  # same alias as v0.5.10
+      cuda-graph-max-bs-decode: cuda-graph-max-bs
     valid_flags:
     - abort-on-priority-when-disabled
     - admin-api-key
