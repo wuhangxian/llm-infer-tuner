@@ -4,31 +4,45 @@
 # 用法:  ./gen_configs.sh <job.json> [out.jsonl]
 #        默认输出 outputs/<job_id>/configs.jsonl。
 #
-# 脚本只做三件确定性的事:注入 job → 调 claude → jq 拆成一行一候选(JSONL)。
-# 调优决策全由 claude 完成;每条候选含 params + cmd + reasons。
+# 脚本做 6 步确定性操作,其中只有第 3 步调 AI(claude)做调优决策:
+#   1. 前置检查  — 验证 jq/claude/job.json/SKILL.md 都就位
+#   2. 解析 job  — 用 jq 读 job_id,拼输出路径并建目录
+#   3. 拼接 prompt — 把 job.json 内容 + 硬约束 + 输出 schema 组装成 prompt
+#   4. 调 claude  — AI 读 skill/knowledge/catalogs,生成候选配置
+#   5. 拆 JSONL  — jq 把 claude 返回的 JSON 拆成一行一候选
+#   6. 预览输出  — 打印每条候选的 id/tp/attention/mem-fraction
 #
 # cmd 里的 --model-path 恒为占位符 ${MODEL_PATH}(路径是机器事实,非调优决策),
 # 第二步由 targets.json 填入。故 configs.jsonl 机器无关,可跨机搬运。
 set -euo pipefail
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 第 1 步:前置检查 — 验证依赖和输入文件都就位,缺一个就退出
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 JOB="${1:?用法: ./gen_configs.sh <job.json> [out.jsonl]}"
 command -v jq >/dev/null || { echo "❌ 需要 jq" >&2; exit 1; }
 [ -f "$JOB" ] || { echo "❌ job 文件不存在: $JOB" >&2; exit 1; }
 
-# 模型路径恒为占位符 —— 第一步机器无关,不烤死任何机器的物理路径。
-MODEL_PATH='${MODEL_PATH}'
-# 输出路径:默认 outputs/<job_id>/configs.jsonl(从 job.json 读 job_id),第2参可覆盖。
-JOB_ID="$(jq -r '.job_id' "$JOB")"
-OUT="${2:-outputs/${JOB_ID}/configs.jsonl}"
-mkdir -p "$(dirname "$OUT")"
 SKILL_DIR=".claude/skills/sglang-server-config-gen"
-
 [ -f "$SKILL_DIR/SKILL.md" ] || { echo "❌ 找不到 skill: $SKILL_DIR/SKILL.md(请在 repo 根运行)" >&2; exit 1; }
 command -v claude >/dev/null || { echo "❌ claude 不在 PATH" >&2; exit 1; }
 
+# 模型路径恒为占位符 —— 第一步机器无关,不绑死任何机器的物理路径。
+MODEL_PATH='${MODEL_PATH}'
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 第 2 步:解析 job.json — 用 jq 读 job_id,拼输出路径,建目录
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+JOB_ID="$(jq -r '.job_id' "$JOB")"
+OUT="${2:-outputs/${JOB_ID}/configs.jsonl}"
+mkdir -p "$(dirname "$OUT")"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 第 3 步:拼接 prompt — 组装 job.json 内容 + 调优硬约束 + 输出 JSON Schema
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 JOB_JSON="$(cat "$JOB")"
 
-# 输出结构约束:一个 {candidates:[...]} 对象,jq 再拆成 jsonl
+# 输出结构约束:一个 {candidates:[...]} 对象,第 5 步 jq 再拆成 jsonl
 SCHEMA='{"type":"object","required":["candidates"],"properties":{"candidates":{"type":"array","items":{"type":"object","required":["id","params","cmd","reasons"],"properties":{"id":{"type":"string"},"params":{"type":"object"},"cmd":{"type":"string"},"reasons":{"type":"array","items":{"type":"string"}}}}}}}'
 
 read -r -d '' PROMPT <<EOF || true
@@ -64,6 +78,13 @@ ${JOB_JSON}
 - \`reasons\`:每条注明依据的 knowledge.md 章节(尤其 tp 为何是这些、为何砍掉更大的 tp)。
 EOF
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 第 4 步:调 claude — AI 读 skill+knowledge+catalogs 生成配置(约 2 分钟)
+#   --add-dir .           让 claude 能读 catalogs/ 和整个项目
+#   --add-dir $SKILL_DIR  让 claude 能读 SKILL.md/knowledge.md/images.yaml
+#   --json-schema          约束 claude 返回 {candidates:[...]} 结构
+#   --output-format json  让 claude 输出 JSON(而非纯文本)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo "ℹ️  模型路径在命令里保留占位符 \${MODEL_PATH}(机器无关);第二步由 targets.json 填入实际路径。" >&2
 echo "ℹ️  输出 → $OUT" >&2
 echo "▶ 调 claude 生成配置(读 skill+knowledge+catalogs,几分钟)…" >&2
@@ -74,12 +95,22 @@ RAW="$(claude -p "$PROMPT" \
   --add-dir "$SKILL_DIR" \
   --dangerously-skip-permissions)"
 
-# claude --output-format json 把结果包在 .structured_output 或 .result(可能是字符串)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 第 5 步:拆 JSONL — jq 把 claude 返回的 {candidates:[...]} 拆成一行一候选
+#   claude --output-format json 把结果包在 .structured_output 或 .result 里:
+#     .result 可能是字符串(需 fromjson 解开),也可能是对象(直接用)
+#     .structured_output 是结构化输出(优先取)
+#   .candidates[] 遍历数组每个元素逐个输出,-c 压成一行
+#   -e 如果结果为 null/false 就报错退出(校验 claude 返回了有效数据)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo "$RAW" | jq -e '
   ( .structured_output // (.result | if type=="string" then fromjson else . end) // . )
   | .candidates[]
 ' -c > "$OUT"
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 第 6 步:预览输出 — 打印候选数 + 每条的 id/tp/attention/mem-fraction
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 N="$(wc -l < "$OUT" | tr -d ' ')"
 echo "✅ 已生成 $N 条候选 → $OUT" >&2
 echo "── 预览(id / tp / attention / mem-fraction)──" >&2
