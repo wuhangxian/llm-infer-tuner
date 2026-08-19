@@ -83,14 +83,14 @@ description: 输入一个固定 JSON(JobSpec:机型/模型/镜像/负载/SLA/预
 
 ## 输出契约(OUTPUT)
 
-一个配置文件,`candidates` 数组装十几条(~10-16),每条(schema 见 `schemas/candidate.py`):
+一个配置文件,`candidates` 数组装十几条(~10-16),每条(schema 见 gen_configs.sh 内嵌的 JSON Schema):
 
 | 字段 | 内容 |
 |---|---|
 | `candidate_id` | 编号(如 `c001`) |
 | `params` | 这条改了哪些轴的结构化字典(如 `{attention_backend, chunked_prefill_size, ep_size, mem_fraction_static}`) |
 | `server_command` | 完整 `python -m sglang.launch_server ...`(**不带 `--context-length`**) |
-| `benchmark_commands` | 分并发压测命令已拆出到姊妹 skill `sglang-client-config-gen`,本 skill 输出可留空 `[]` 或仅给占位;真正的压测命令由客户端 skill 依据同一 JobSpec 的 workload+benchmark_method 生成(字段仍保留,`schemas/candidate.py` 向后兼容) |
+| `benchmark_commands` | 分并发压测命令已拆出到姊妹 skill `sglang-client-config-gen`,本 skill 输出可留空 `[]` 或仅给占位;真正的压测命令由客户端 skill 依据同一 JobSpec 的 workload+benchmark_method 生成(字段仍保留,向后兼容) |
 | `reasons` | AI 为什么给这条(可追溯到 knowledge.md 哪条经验) |
 | `expected_risk` | `low` / `medium` / `high` |
 
@@ -116,7 +116,7 @@ AI 负责分类+派生候选;代码在生成后只拦「一定起不来」的:
 catalogs/                          # 共享、引擎无关(vllm skill 也复用),在项目根
   gpu.yaml  models.yaml  workloads.yaml
 schemas/                           # Pydantic 契约,在项目根
-  job_spec.py  candidate.py  search_plan.py
+  job_spec.py
 .claude/skills/sglang-server-config-gen/  # 本 skill(claude 从这里加载)
   SKILL.md        # 本文件:入口(读什么、步骤、输出、闸)
   knowledge.md    # 全部调优经验+判据(改经验改这里)

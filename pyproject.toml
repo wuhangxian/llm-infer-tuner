@@ -14,11 +14,8 @@ dependencies = [
   "typer>=0.12"
 ]
 
-[project.scripts]
-llm-infer-tuner = "cli.main:app"
-
 [tool.hatch.build.targets.wheel]
-packages = ["planner", "cli", "schemas", "runners"]
+packages = ["planner", "schemas", "runners"]
 
 [dependency-groups]
 dev = [
@@ -39,7 +36,7 @@ target-version = "py311"
 select = ["E", "F", "I", "UP"]
 
 [tool.pyright]
-include = ["cli", "planner", "tests"]
+include = ["planner", "tests"]
 exclude = [".venv"]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
