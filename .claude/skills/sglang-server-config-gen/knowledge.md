@@ -140,6 +140,9 @@
 | `--max-running-requests` | `[8, 16, 32]` | judgment | 适用长输入(60k+);BBuf 的 [64,96,128] 是 8k dataset,不可直接迁 |
 | `--kv-cache-dtype` | `[auto, fp8_e4m3]` | measured | 长输入 KV 是主瓶颈,fp8 腰斩 kv/token;需配精度验证 |
 | `--schedule-conservativeness` | `[0.3, 1.0, 1.3]` | official | 官方唯一给出闭环判据的调度参数(见 §6) |
+| `--page-size` | `[1, 32, 64]` | official | 所有模型通用。1=默认;32=MoE 推荐(cookbook Qwen3-Coder);64=mamba V2 必须(`FLA_CHUNK_SIZE % page_size == 0`)。**条件生成**:mamba V2(`extra_buffer`)→ 只生成 64;MoE(`arch` 含 `moe`)→ 生成 [1, 32];其余 → [1] |
+| `--mamba-radix-cache-strategy` | `[no_buffer, extra_buffer]` | official | **仅 `hybrid_mamba: true` 模型生成**。V1(`no_buffer`)默认,无 overlap,显存低;V2(`extra_buffer`)开 overlap+分支缓存,吞吐更好但显存更多。V2 必须配 `--page-size 64`。与投机解码有交互:投机解码+radix cache → 必须用 `extra_buffer`(见 §7) |
+| `--speculative-algorithm` | `[无, EAGLE]` | official | **仅 `capabilities.supports_mtp: true` 模型生成**。「无」是对照基线(不写这组 flag);EAGLE 从 `mtp_params` 取配套值(`num-steps`/`eagle-topk`/`num-draft-tokens`)。cookbook 5/7 Qwen 模型推荐,延迟可降 2-3 倍。放 §6 F 阶段搜,先跑通非投机基线 |
 
 **kv-cache-dtype 按算力过滤**(`source` v0.5.10):choices=`[auto, fp8_e5m2, fp8_e4m3, bf16, fp4_e2m1]`;`fp8_*` 无 SM 门槛(CUDA 11.8+),`fp4_e2m1` 需 CUDA≥12.8 + PyTorch 2.8.0+。默认池保守取 `[auto, fp8_e4m3]`,更激进精度要搜在 job 里显式给。
 
@@ -160,6 +163,10 @@
 | `--pipeline-parallel-size > 1` | judgment | 单机流水线气泡,严格劣于 TP/EP |
 | `--speculative-eagle-topk > 1` | source | overlap scheduler 与 trtllm_mha 都只支持 topk=1,固定为 1 |
 | `--enable-mixed-chunk` + 投机解码 | source | 源码里 assert 冲突 |
+| `--speculative-algorithm` + `supports_mtp: false` | official | 模型没有 MTP 权重(`mtp.safetensors`),启动直接报错 |
+| `--mamba-radix-cache-strategy` + `hybrid_mamba: false` | official | 非 GDN 模型没有 mamba 层,参数被忽略,等于白跑 |
+| `--mamba-radix-cache-strategy extra_buffer` + `--page-size != 64` | source | `FLA_CHUNK_SIZE(64) % page_size != 0` → 启动报错 |
+| `--speculative-algorithm` + `--mamba-radix-cache-strategy no_buffer` | source | 投机解码+radix cache 必须 `extra_buffer`(见 §7) |
 | `--chunked-prefill-size -1` | judgment | 关闭 chunked prefill,长输入峰值激活会爆(有生产用过,非普适,可手工 A/B 一次) |
 | `--tp-size N`(块量化下 `moe_intermediate_size/N` 或 `intermediate_size/N` 不是 `block_size` 整数倍) | measured | **启动即崩**(加载权重时 `ValueError: output_size not divisible by block_n`),非压测 OOM。细粒度 MoE 专家小最常撞;判据与算法见 §2「块量化 × TP 整除硬约束」。例:35B-A3B(moe_int=512/block=128)排除 tp=8 |
 
@@ -192,6 +199,11 @@ qwen3.6(`hybrid_mamba: true`)适用。
 - 投机解码 + radix cache → 必须用 `extra_buffer`
 
 **为什么两分支都要测**:extra_buffer 在非 KV-bound 场景更优;KV-bound 场景要权衡 overlap 收益 vs 并发下降。长输入正是 KV-bound,两分支必须实测对冲。
+
+**与投机解码的交互**(§3 `--speculative-algorithm`):
+- 投机解码 + radix cache → **必须用 `extra_buffer`**(`no_buffer` + 投机解码 = ValueError)。
+- 因此当模型 `supports_mtp: true` 且候选含 `--speculative-algorithm EAGLE` 时,`--mamba-radix-cache-strategy` 只生成 `extra_buffer`,不生成 `no_buffer`。
+- 反之,非投机基线(`--speculative-algorithm` 为「无」)才可自由生成 `no_buffer` / `extra_buffer` 两条。
 
 **mamba ratio(`--mamba-full-memory-ratio`,默认 0.9)不该盲扫——有公式**:`r* ≈ S · token_equiv · dcp_size / L`。参考:L=64K→r≈0.31,L=128K→r≈0.16。S 由 cache strategy 决定(extra_buffer overlap 开→S=5,extra_buffer_lazy→S=4)。**strategy 和 ratio 不正交,别当独立笛卡尔积扫。** L≈60k 时 r*≈0.31,盲扫 0.5/0.9 会整段落在 KV-bound 区。
 - 逃生:L 很长时 r* 会低到状态池装不下一个请求,改 pin `--max-mamba-cache-size = 目标并发 × S`,别用 sub-0.15 的 r。
