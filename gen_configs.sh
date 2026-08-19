@@ -102,27 +102,18 @@ read -r -d '' PROMPT <<EOF || true
 ${JOB_JSON}
 \`\`\`
 
-## 权威知识库(必须按顺序读,再产出任何参数)
-1. \`${SKILL_DIR}/SKILL.md\` —— 流程入口:该读什么、推导步骤、输出契约、3 道硬闸。
-2. \`${SKILL_DIR}/knowledge.md\` —— **所有调优判断都在这**(§0 绝不写 context-length;§1 按算力选 attention;§2 TP/PP/EP 推导,**含块量化×TP 整除硬约束**;§3 搜索空间;§4 pin;§5 排除项;§6 阶段顺序;§7 混合 mamba;§8 调度;§9 并发)。每条 reason 里注明你依据的章节。
-3. \`catalogs/*.yaml\` —— 按 JobSpec 点名的卡:gpu.yaml(gpu_model→sm/nvlink;gpu_count/gpu_memory_gb 在 JobSpec 里)、models.yaml(model→arch/is_moe/num_experts/moe_intermediate_size/quantization.block_size/weight_gb/default_flags)、workloads.yaml(workload→输入输出长度/并发梯度)。
-4. \`${SKILL_DIR}/images.yaml\` —— JobSpec.image 点名的镜像卡(CUDA、attention 菜单、valid_flags 白名单)。
+## 执行方式
 
-## 硬要求
-- **块量化×TP 整除**(knowledge.md §2):块量化(fine-grained FP8/AWQ/GPTQ)下,MoE 每卡专家维度 = moe_intermediate_size/tp,须整除 block_size;\`tp_max=floor(moe_intermediate_size/block_size)\`。**超出 tp_max 的 tp 直接不生成**(会在加载权重时崩,不是压测 OOM)。
-- **绝不写 \`--context-length\`**(§0 红线),pin 与搜索空间里都不许出现。
-- 模型专属 flag(reasoning-parser/tool-call-parser/trust-remote-code)从 models.yaml 的 default_flags 原样取,别自己编。
-- 只用 SGLang 真实参数名,别造 flag;attention 后端须在该 SM 的 shortlist 内(§1)。
+请按 \`${SKILL_DIR}/SKILL.md\` 的流程执行:读 knowledge.md + catalogs/*.yaml + images.yaml,
+按其中的约束和推导步骤生成候选配置。所有调优判据、硬约束、输出格式
+都在 SKILL.md 和 knowledge.md 里,这里不重复。
+
+## 运行时信息(知识库里没有的)
+
+- --model-path 用占位符 \`${MODEL_PATH}\`,不绑定任何机器路径(第二步由 targets.json 填入)。
+- --host 0.0.0.0 --port 30000。
+- store_true 类 flag(如 --trust-remote-code)为 true 时写裸 flag、false 时省略。
 - 候选数 ≤ JobSpec 的 max_candidates。
-
-## 输出(严格按 schema,只返回 JSON 对象,不要 markdown)
-返回 \`{"candidates":[...]}\`。每个候选:
-- \`id\`:如 "c001"。
-- \`params\`:结构化决策值(tp_size/pp_size/attention_backend/mem_fraction_static + pin 的模型 flag)。
-- \`cmd\`:**完整可直接执行的一行命令**,格式:
-  \`python -m sglang.launch_server --model-path ${MODEL_PATH} <各 flag> --host 0.0.0.0 --port 30000\`
-  store_true 类 flag(如 --trust-remote-code)为 true 时写裸 flag、false 时省略;--model-path 用上面给的路径。
-- \`reasons\`:每条注明依据的 knowledge.md 章节(尤其 tp 为何是这些、为何砍掉更大的 tp)。
 EOF
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
