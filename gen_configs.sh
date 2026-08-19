@@ -72,7 +72,25 @@ mkdir -p "$(dirname "$OUT")"
 JOB_JSON="$(cat "$JOB")"
 
 # 输出结构约束:一个 {candidates:[...]} 对象,第 5 步 jq 再拆成 jsonl
-SCHEMA='{"type":"object","required":["candidates"],"properties":{"candidates":{"type":"array","items":{"type":"object","required":["id","params","cmd","reasons"],"properties":{"id":{"type":"string"},"params":{"type":"object"},"cmd":{"type":"string"},"reasons":{"type":"array","items":{"type":"string"}}}}}}}'
+SCHEMA='{ \
+  "type": "object", \
+  "required": ["candidates"], \
+  "properties": { \
+    "candidates": { \
+      "type": "array", \
+      "items": { \
+        "type": "object", \
+        "required": ["id", "params", "cmd", "reasons"], \
+        "properties": { \
+          "id": { "type": "string" }, \
+          "params": { "type": "object" }, \
+          "cmd": { "type": "string" }, \
+          "reasons": { "type": "array", "items": { "type": "string" } } \
+        } \
+      } \
+    } \
+  } \
+}'
 
 read -r -d '' PROMPT <<EOF || true
 # llm-infer-tuner 一步出 SGLang 启动配置(JSONL)
