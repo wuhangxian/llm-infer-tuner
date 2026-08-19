@@ -165,6 +165,7 @@ class _CandidateContext:
     bench_template: str
     multiplier: int
     outputs_container_path: str
+    port: int = 30000  # per-candidate port (overrides config.port in parallel mode)
 
 
 def _resolve_bench_template(
@@ -279,6 +280,126 @@ def _make_evaluate(ctx: _CandidateContext, candidate_id: str, candidate_dir: Pat
     return evaluate
 
 
+def _allocate_gpus_and_ports(
+    candidates: list[dict[str, Any]],
+    gpu_count: int,
+    base_port: int = 30000,
+) -> list[tuple[dict[str, Any], str, int]]:
+    """Assign GPU IDs and ports to each candidate.
+
+    Returns a list of (candidate, gpu_ids_str, port) tuples. Candidates are
+    grouped into batches that fit within gpu_count: the sum of tp_size in each
+    batch does not exceed gpu_count.
+
+    Example (8 GPUs, 4 candidates all TP1):
+      batch 1: cand1(GPU0, port 30000), cand2(GPU1, 30001),
+               cand3(GPU2, 30002), cand4(GPU3, 30003)
+      → 4 GPUs used, 4 idle (could fit 4 more TP1 candidates in same batch)
+
+    Example (8 GPUs, 4 candidates all TP2):
+      batch 1: cand1(GPU0,1, 30000), cand2(GPU2,3, 30001),
+               cand3(GPU4,5, 30002), cand4(GPU6,7, 30003)
+    """
+    result: list[tuple[dict[str, Any], str, int]] = []
+    gpu_cursor = 0
+    port_cursor = base_port
+    for candidate in candidates:
+        tp_size = int(candidate.get("params", {}).get("tp_size", 1))
+        tp_size = max(1, tp_size)
+        gpu_ids = list(range(gpu_cursor, gpu_cursor + tp_size))
+        gpu_cursor += tp_size
+        gpu_ids_str = "device=" + ",".join(str(g) for g in gpu_ids)
+        result.append((candidate, gpu_ids_str, port_cursor))
+        port_cursor += 1
+    return result
+
+
+def _run_batch_parallel(
+    ctx_template: _CandidateContext,
+    batch: list[tuple[dict[str, Any], str, int]],
+    remote: RemoteRunner,
+    outputs_host_dir: str,
+    outputs_container_path: str,
+    *,
+    qualifies,
+    round_label: str,
+    max_probes: int,
+    confirm: int,
+    refine: bool,
+    seeds_by_id: dict[str, list[RunResult]] | None = None,
+) -> dict[str, SearchOutcome]:
+    """Run a batch of candidates in parallel, each in its own container.
+
+    Each candidate gets its own docker container with specific GPUs and port.
+    All containers are started, health-checked, and benchmarked concurrently.
+    """
+    config = ctx_template.config
+    job = ctx_template.job
+    bench_template = ctx_template.bench_template
+    multiplier = ctx_template.multiplier
+
+    containers: list[tuple[str, Container, _CandidateContext, dict[str, Any], str, int]] = []
+
+    # Create one container per candidate in this batch
+    for candidate, gpu_ids_str, port in batch:
+        candidate_id = str(candidate.get("id", "unknown"))
+        container_name = f"{config.container_name}-{candidate_id}"
+        container_config = ContainerConfig(
+            image_ref=config.image_ref,
+            name=container_name,
+            model_host_dir=config.model_host_dir,
+            model_container_path=config.model_container_path,
+            outputs_host_dir=outputs_host_dir,
+            outputs_container_path=outputs_container_path,
+            port=port,
+            gpus=gpu_ids_str,
+        )
+        container = Container(remote, container_config)
+        ctx = _CandidateContext(
+            container=container,
+            config=config,
+            job=job,
+            bench_template=bench_template,
+            multiplier=multiplier,
+            outputs_container_path=outputs_container_path,
+            port=port,
+        )
+        containers.append((candidate_id, container, ctx, candidate, gpu_ids_str, port))
+
+    # Start all containers in this batch
+    for candidate_id, container, ctx, candidate, gpu_ids_str, port in containers:
+        _log(f"[{round_label}] {candidate_id}: starting container (GPUs={gpu_ids_str}, port={port}) ...")
+        started = container.start()
+        if not started.ok or not container.is_running():
+            _log(f"[{round_label}] {candidate_id}: container FAILED to start: {started.stderr.strip()}")
+
+    # Run each candidate (server lifecycle + search) — still sequential within batch
+    # but each has its own container with isolated GPUs and port
+    outcomes: dict[str, SearchOutcome] = {}
+    for candidate_id, container, ctx, candidate, gpu_ids_str, port in containers:
+        cand_seeds = None
+        if seeds_by_id and candidate_id in seeds_by_id:
+            cand_seeds = seeds_by_id[candidate_id]
+        outcome = _run_candidate(
+            ctx,
+            candidate,
+            qualifies=qualifies,
+            round_label=round_label,
+            max_probes=max_probes,
+            confirm=confirm,
+            refine=refine,
+            seeds=cand_seeds,
+        )
+        outcomes[candidate_id] = outcome
+
+    # Stop and remove all containers in this batch
+    for candidate_id, container, ctx, candidate, gpu_ids_str, port in containers:
+        container.stop()
+        container.remove()
+
+    return outcomes
+
+
 def _run_candidate(
     ctx: _CandidateContext,
     candidate: dict[str, Any],
@@ -308,6 +429,10 @@ def _run_candidate(
     # mount point so the server finds the weights.
     server_cmd = cmd.replace("${MODEL_PATH}", config.model_container_path)
     server_cmd = server_cmd.replace(config.model_host_dir, config.model_container_path)
+    # Replace the port in the launch command with this candidate's assigned port
+    candidate_port = ctx.port
+    server_cmd = server_cmd.replace("--port 30000", f"--port {candidate_port}")
+    server_cmd = server_cmd.replace("--host 0.0.0.0 --port 30000", f"--host 0.0.0.0 --port {candidate_port}")
     candidate_out = f"{ctx.outputs_container_path}/{candidate_id}"
     server_log = f"{candidate_out}/server.log"
     container.exec(f"mkdir -p {shlex.quote(candidate_out)}")
@@ -317,7 +442,7 @@ def _run_candidate(
     def _server_alive() -> bool:
         return container.exec("pgrep -f sglang.launch_server").ok
 
-    probe = make_health_probe(container, port=config.port)
+    probe = make_health_probe(container, port=candidate_port)
     ready = wait_until_ready(probe, is_alive=_server_alive)
 
     try:
@@ -510,61 +635,61 @@ def run_executor(
         )
 
     outputs_container_path = "/workspace/outputs"
-    container_config = ContainerConfig(
-        image_ref=config.image_ref,
-        name=config.container_name,
-        model_host_dir=config.model_host_dir,
-        model_container_path=config.model_container_path,
-        outputs_host_dir=outputs_host_dir,
-        outputs_container_path=outputs_container_path,
-        port=config.port,
-    )
-    container = Container(remote, container_config)
 
     config.results_dir.mkdir(parents=True, exist_ok=True)
-    # A failed `docker run` otherwise slips through and surfaces later as a bogus
-    # health-check timeout; check it here and surface the real docker error.
-    _log(f"starting container {config.container_name} from {config.image_ref} ...")
-    started = container.start()
-    if not started.ok or not container.is_running():
-        raise RuntimeError(
-            "docker run failed to start the container: "
-            f"{(started.stderr or started.stdout).strip()}"
-        )
-    _log(f"container up. job={job.job_id} candidates={len(candidates)} "
-         f"output_len={output_len} multiplier={multiplier} top_k={config.top_k}")
+    _log(f"job={job.job_id} candidates={len(candidates)} "
+         f"output_len={output_len} multiplier={multiplier} top_k={config.top_k} "
+         f"gpu_count={job.gpu_count}")
 
     results_by_candidate: dict[str, list[RunResult]] = {}
     candidate_summaries: dict[str, dict[str, Any]] = {}
     search_diagnostics: dict[str, dict[str, Any]] = {}
 
-    # Shared context threaded into each candidate's evaluate() closure.
-    ctx = _CandidateContext(
-        container=container,
+    # Template context (container is None here; each batch creates its own)
+    ctx_template = _CandidateContext(
+        container=None,  # type: ignore[arg-type]
         config=config,
         job=job,
         bench_template=bench_template,
         multiplier=multiplier,
         outputs_container_path=outputs_container_path,
+        port=config.port,
     )
 
-    try:
-        # ---- ROUND 1: coarse adaptive expansion over ALL candidates -----------
-        # Each candidate's server is started once, expanded (no bisection) to
-        # bracket its SLA boundary, then torn down. Cheap ranking signal for
-        # picking the top-K, and the probes become round-2 seeds.
-        for candidate in candidates:
-            candidate_id = str(candidate.get("id", "unknown"))
-            outcome = _run_candidate(
-                ctx,
-                candidate,
-                qualifies=qualifies,
-                round_label="r1",
-                max_probes=ROUND1_MAX_PROBES,
-                confirm=ROUND1_CONFIRM,
-                refine=False,
-                seeds=None,
-            )
+    # Allocate GPUs and ports for ALL candidates upfront
+    allocations = _allocate_gpus_and_ports(candidates, job.gpu_count, base_port=config.port)
+
+    # ---- Split into batches that fit within gpu_count ----
+    batches: list[list[tuple[dict[str, Any], str, int]]] = []
+    current_batch: list[tuple[dict[str, Any], str, int]] = []
+    current_gpus_used = 0
+    for candidate, gpu_ids_str, port in allocations:
+        tp_size = int(candidate.get("params", {}).get("tp_size", 1))
+        if current_gpus_used + tp_size > job.gpu_count and current_batch:
+            batches.append(current_batch)
+            current_batch = []
+            current_gpus_used = 0
+        current_batch.append((candidate, gpu_ids_str, port))
+        current_gpus_used += tp_size
+    if current_batch:
+        batches.append(current_batch)
+
+    _log(f"{len(candidates)} candidates split into {len(batches)} batch(es) "
+         f"(max {job.gpu_count} GPUs per batch)")
+
+    # ---- ROUND 1: coarse expansion over ALL candidates (batch-parallel) ----
+    for batch_idx, batch in enumerate(batches):
+        _log(f"round-1 batch {batch_idx + 1}/{len(batches)}: "
+             f"{[c.get('id') for c, _, _ in batch]}")
+        outcomes = _run_batch_parallel(
+            ctx_template, batch, remote, outputs_host_dir, outputs_container_path,
+            qualifies=qualifies,
+            round_label="r1",
+            max_probes=ROUND1_MAX_PROBES,
+            confirm=ROUND1_CONFIRM,
+            refine=False,
+        )
+        for candidate_id, outcome in outcomes.items():
             results_by_candidate[candidate_id] = outcome.results
             search_diagnostics[candidate_id] = _outcome_diag(outcome)
             candidate_summaries[candidate_id] = {
@@ -572,40 +697,51 @@ def run_executor(
                 "round1": _outcome_diag(outcome),
             }
 
-        # ---- pick top-K by round-1 goodput ------------------------------------
-        round1_ranking = rank_candidates(
-            results_by_candidate, job.sla, output_len=output_len,
-            gpu_count=job.gpu_count,
-        )
-        top_ids = [row["candidate_id"] for row in round1_ranking[: config.top_k]]
-        _log(f"round-1 done. ranking={[ (r['candidate_id'], r['goodput_per_host']) for r in round1_ranking ]}")
-        _log(f"round-2 refining top-{config.top_k}: {top_ids}")
+    # ---- pick top-K by round-1 goodput ------------------------------------
+    round1_ranking = rank_candidates(
+        results_by_candidate, job.sla, output_len=output_len,
+        gpu_count=job.gpu_count,
+    )
+    top_ids = [row["candidate_id"] for row in round1_ranking[: config.top_k]]
+    _log(f"round-1 done. ranking={[(r['candidate_id'], r['goodput_per_host']) for r in round1_ranking]}")
+    _log(f"round-2 refining top-{config.top_k}: {top_ids}")
 
-        # ---- ROUND 2: precise bisection on the top-K, reusing round-1 probes --
-        candidate_by_id = {str(c.get("id", "unknown")): c for c in candidates}
-        for candidate_id in top_ids:
-            candidate = candidate_by_id.get(candidate_id)
-            if candidate is None:
-                continue
-            outcome = _run_candidate(
-                ctx,
-                candidate,
-                qualifies=qualifies,
-                round_label="r2",
-                max_probes=ROUND2_MAX_PROBES,
-                confirm=ROUND2_CONFIRM,
-                refine=True,
-                seeds=results_by_candidate.get(candidate_id),
-            )
-            # Overwrite (not append): outcome.results is the deduped union of the
-            # round-1 seeds and the new round-2 probes, so it is the authoritative
-            # per-candidate result list for ranking.
+    # ---- ROUND 2: precise bisection on top-K (batch-parallel) ----
+    candidate_by_id = {str(c.get("id", "unknown")): c for c in candidates}
+    top_candidates = [candidate_by_id[cid] for cid in top_ids if cid in candidate_by_id]
+    top_allocations = _allocate_gpus_and_ports(top_candidates, job.gpu_count, base_port=config.port)
+
+    # Split top-K into batches too
+    top_batches: list[list[tuple[dict[str, Any], str, int]]] = []
+    current_batch = []
+    current_gpus_used = 0
+    for candidate, gpu_ids_str, port in top_allocations:
+        tp_size = int(candidate.get("params", {}).get("tp_size", 1))
+        if current_gpus_used + tp_size > job.gpu_count and current_batch:
+            top_batches.append(current_batch)
+            current_batch = []
+            current_gpus_used = 0
+        current_batch.append((candidate, gpu_ids_str, port))
+        current_gpus_used += tp_size
+    if current_batch:
+        top_batches.append(current_batch)
+
+    for batch_idx, batch in enumerate(top_batches):
+        _log(f"round-2 batch {batch_idx + 1}/{len(top_batches)}: "
+             f"{[c.get('id') for c, _, _ in batch]}")
+        outcomes = _run_batch_parallel(
+            ctx_template, batch, remote, outputs_host_dir, outputs_container_path,
+            qualifies=qualifies,
+            round_label="r2",
+            max_probes=ROUND2_MAX_PROBES,
+            confirm=ROUND2_CONFIRM,
+            refine=True,
+            seeds_by_id=results_by_candidate,
+        )
+        for candidate_id, outcome in outcomes.items():
             results_by_candidate[candidate_id] = outcome.results
             search_diagnostics[candidate_id] = _outcome_diag(outcome)
             candidate_summaries[candidate_id]["round2"] = _outcome_diag(outcome)
-    finally:
-        container.stop()
-        container.remove()
 
     ranking = rank_candidates(
         results_by_candidate, job.sla, output_len=output_len,

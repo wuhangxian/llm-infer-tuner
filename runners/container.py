@@ -19,7 +19,7 @@ class ContainerConfig:
     model_container_path: str  # mount point inside the container (used as --model-path)
     outputs_host_dir: str  # results directory on the dev machine
     outputs_container_path: str = "/workspace/outputs"
-    gpus: str = "all"
+    gpus: str = "all"  # "all" or "device=0,1" for specific GPUs
     shm_size: str = "32g"
     port: int = 30000
     extra_run_args: Sequence[str] = field(default_factory=tuple)
