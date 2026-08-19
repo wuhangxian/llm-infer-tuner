@@ -150,7 +150,7 @@ jq -r '
   "  tp=" + (.params.tp_size|tostring) +
   "  " + (.params.attention_backend // "-") +
   "  mf=" + (.params.mem_fraction_static|tostring) +
-  "  mamba=" + (.params.mamba_scheduler_strategy // .params["mamba-radix-cache-strategy"] // "-") +
+  "  mamba=" + (.params.mamba_radix_cache_strategy // .params.mamba_scheduler_strategy // .params["mamba-radix-cache-strategy"] // "-") +
   "  page=" + (.params.page_size // .params["page-size"] // "-" | tostring) +
   "  spec=" + (.params.speculative_algorithm // .params["speculative-algorithm"] // "-")
 ' "$OUT" >&2
