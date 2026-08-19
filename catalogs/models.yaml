@@ -22,11 +22,11 @@ models:
     hf_model_id: Qwen/Qwen3.6-27B-FP8
     family: qwen3.6
     parameter_count_b: 27
-    arch: dense_hybrid_gdn            # ⚠️ 非 MoE(无 num_experts)→ 不生成 ep 轴
+    arch: moe_hybrid_gdn            # MoE 组件 + GDN 混合架构;有 moe_intermediate_size → 块量化 TP 约束生效
     hybrid_mamba: true               # Gated DeltaNet + Gated Attention 混合 → 触发缓存策略搜索
     default_precision: fp8
     weight_gb: {fp8: 27, bf16: 54, nvfp4: 22}
-    # 单卡权重放得下即准入(fp8=27G < 72G,故 TP1/2/4/8 权重全放得下)。KV 交压测/SLA 兜底。
+    # 单卡权重放得下即准入(fp8=27G < 72G,故 TP1/2/4 权重放得下)。⚠️ 块量化约束:moe_int=512/block=128 → tp_max=4,TP8 会崩(启动报错确认)。
 
     modalities:
       input: [text, image]
@@ -44,8 +44,9 @@ models:
       num_hidden_layers: 64
       hidden_size: 5120
       vocab_size: 248320
-      is_moe: false
+      is_moe: true                 # ⚠️ 实测启动报错确认:有 MoE 组件(moe_intermediate_size=512)
       intermediate_size: 17408
+      moe_intermediate_size: 512    # source: SGLang 启动报错 "moe_intermediate_size=512";block_size=128 → tp_max=4,TP8 会崩
       attention:
         type: hybrid
         gated_attention: {num_query_heads: 24, num_key_value_heads: 4, head_dim: 256, rope_dim: 64}

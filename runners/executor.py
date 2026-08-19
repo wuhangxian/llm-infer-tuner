@@ -400,6 +400,33 @@ def _run_batch_parallel(
     return outcomes
 
 
+def _extract_failure_reason(log_path: Path) -> str:
+    """Extract the last error/exception from a server log file.
+
+    Scans the log backwards for lines containing Error/ValueError/
+    AssertionError/Exception, returns the matching line plus 2 lines
+    of context after it.
+    """
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "(server log not available)"
+    lines = text.splitlines()
+    # Search from the end for an error line
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i].strip()
+        for keyword in ("ValueError", "AssertionError", "RuntimeError",
+                         "Error:", "Exception", "Traceback"):
+            if keyword in line:
+                # Take this line + up to 2 following lines for context
+                context = lines[i:i + 3]
+                return " ".join(context).strip()[:500]
+    # No error keyword found, return last 3 lines as fallback
+    if lines:
+        return " ".join(lines[-3:]).strip()[:500]
+    return "(empty server log)"
+
+
 def _run_candidate(
     ctx: _CandidateContext,
     candidate: dict[str, Any],
@@ -448,11 +475,12 @@ def _run_candidate(
     try:
         if not ready:
             _log(f"[{round_label}] {candidate_id}: server NOT ready (crash/timeout)")
+            local_log = candidate_dir / f"server.{round_label}.log"
+            _pull_container_file(container, server_log, local_log)
+            reason = _extract_failure_reason(local_log)
+            _log(f"[{round_label}] {candidate_id}: crash reason: {reason}")
             failed = _health_check_failed_result(
-                candidate_id, "server did not become ready before timeout"
-            )
-            _pull_container_file(
-                container, server_log, candidate_dir / f"server.{round_label}.log"
+                candidate_id, f"server did not become ready: {reason}"
             )
             outcome = SearchOutcome(
                 results=[failed],
