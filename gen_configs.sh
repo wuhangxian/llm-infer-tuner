@@ -44,12 +44,30 @@ mkdir -p "$(dirname "$OUT")"
 # 第 3 步:拼接 prompt
 # ─────────────────────────────────────────────────────────────────────────
 # 把三部分组装成一段完整的 prompt,后面第 4 步把它喂给 claude:
-#   1. job.json 的完整内容(模型/卡型/负载/SLA/镜像)
-#   2. 调优硬约束(块量化×TP 整除、绝不写 context-length、模型 flag 原样取等)
-#   3. 输出 JSON Schema(约束 claude 返回 {candidates:[...]} 结构)
+#
+#   1. job.json 的完整内容
+#      — 模型/卡型/负载/SLA/镜像等,让 AI 知道这次要调什么
+#
+#   2. 调优硬约束
+#      — 块量化×TP 必须整除,超出 tp_max 的 tp 不生成
+#      — 绝不写 --context-length(§0 红线)
+#      — 模型专属 flag(reasoning-parser 等)从 models.yaml 原样取,不自己编
+#      — attention 后端必须在 SM 短名单内
+#      — 候选数 ≤ max_candidates
+#
+#   3. 输出 JSON Schema
+#      — 约束 claude 返回 {candidates:[...]} 结构
+#      — 每条候选含 id + params + cmd + reasons 四个字段
+#      — 第 5 步 jq 再拆成一行一候选的 JSONL
+#
 # prompt 里还告诉 claude 该按顺序读 4 个知识库文件:
-#   SKILL.md → knowledge.md → catalogs/*.yaml → images.yaml
-# --model-path 在这里写死为 ${MODEL_PATH} 占位符,不绑定任何机器路径。
+#   ① SKILL.md     — 流程入口:该读什么、推导步骤、输出契约
+#   ② knowledge.md — 全部调优经验(§0-§9)
+#   ③ catalogs/    — gpu.yaml + models.yaml + workloads.yaml(按 job 里的 ID 查表)
+#   ④ images.yaml  — 镜像信息(CUDA 版本、支持的 attention 后端)
+#
+# --model-path 在这里写死为 ${MODEL_PATH} 占位符,不绑定任何机器路径,
+# 第二步由 targets.json 填入实际路径。
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 JOB_JSON="$(cat "$JOB")"
 
