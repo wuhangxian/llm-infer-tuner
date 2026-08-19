@@ -144,5 +144,13 @@ echo "$RAW" | jq -e '
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 N="$(wc -l < "$OUT" | tr -d ' ')"
 echo "✅ 已生成 $N 条候选 → $OUT" >&2
-echo "── 预览(id / tp / attention / mem-fraction)──" >&2
-jq -r '"  \(.id)  tp=\(.params.tp_size)  \(.params.attention_backend)  mf=\(.params.mem_fraction_static)"' "$OUT" >&2
+echo "── 预览(id / tp / attention / mem-fraction / mamba / page / speculative)──" >&2
+jq -r '
+  "  " + .id +
+  "  tp=" + (.params.tp_size|tostring) +
+  "  " + (.params.attention_backend // "-") +
+  "  mf=" + (.params.mem_fraction_static|tostring) +
+  "  mamba=" + (.params.mamba_scheduler_strategy // .params["mamba-radix-cache-strategy"] // "-") +
+  "  page=" + (.params.page_size // .params["page-size"] // "-" | tostring) +
+  "  spec=" + (.params.speculative_algorithm // .params["speculative-algorithm"] // "-")
+' "$OUT" >&2
