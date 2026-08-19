@@ -35,12 +35,25 @@ class Container:
     def start(self, *, timeout: int | None = None) -> CommandResult:
         """Launch the container detached with GPUs, mounts, and port published."""
         cfg = self.config
+        # Build --device args from GPU IDs. This server uses CDI (Container
+        # Device Interface), where --gpus "device=0,1,2,3" fails with
+        # "cannot set both Count and DeviceIDs". Use --device nvidia.com/gpu=N
+        # per GPU instead, which works with both CDI and legacy runtimes.
+        if cfg.gpus == "all":
+            gpu_args = ["--gpus", "all"]
+        elif cfg.gpus.startswith("device="):
+            ids = cfg.gpus[len("device="):].split(",")
+            gpu_args = []
+            for gid in ids:
+                gpu_args.extend(["--device", f"nvidia.com/gpu={gid.strip()}"])
+        else:
+            gpu_args = ["--gpus", cfg.gpus]
+
         argv = [
             "docker",
             "run",
             "-d",
-            "--gpus",
-            cfg.gpus,
+            *gpu_args,
             "--shm-size",
             cfg.shm_size,
             "-v",

@@ -233,7 +233,7 @@ def _make_evaluate(ctx: _CandidateContext, candidate_id: str, candidate_dir: Pat
             base_command = substitute_placeholders(
                 command_tpl,
                 host="127.0.0.1",
-                port=ctx.config.port,
+                port=ctx.port,
                 model_path=ctx.config.model_container_path,
                 job_id=ctx.job.job_id,
                 timestamp=timestamp,

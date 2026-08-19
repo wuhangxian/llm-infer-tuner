@@ -1,0 +1,51 @@
+{
+  "job_id": "qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2",
+  "engine": "sglang",
+  "image_ref": "hai-beijing.tencentcloudcr.com/ai/sglang:v0.5.16-cu129",
+  "derivation_summary": {
+    "sm_major": 12,
+    "attention_short_list": ["flashinfer", "triton"],
+    "excluded_attention": ["fa3 (SM120 hard-fail)", "trtllm_mha prefill (SM120!=SM100 raise, server_args.py:2373-2375)"],
+    "tp_admissible": [1, 2, 4],
+    "tp_excluded": [8],
+    "tp_block_quant_check": "MoE moe_intermediate_size=512, block_size=128 -> tp_max=floor(512/128)=4. 512%(128*tp): tp1/2/4 -> 512%128/256/512 == 0 (OK); tp8 -> 512%1024 != 0 (per-shard 64<128) -> startup ValueError(output_size not divisible by block_n) -> EXCLUDE tp8 (knowledge.md §2③).",
+    "tp_chosen": 4,
+    "tp_choice_reason": "tp=4 is measured throughput-optimal for this model (§2⑤, 2346 tok/s); tp1/2 legal but slower.",
+    "gpu_count_vs_tp": "gpu_count=8 but block-quant caps tp at 4 -> this config runs on 4 of 8 GPUs (knowledge.md §2③ '8卡机最多切4路, gpu_count!=tp'). Filling the remaining 4 GPUs would require dp/ep world expansion (--dp-size / --enable-dp-attention), which is NOT endorsed by knowledge.md and carries launch risk on SM120 -> deferred to on-machine verification per §2④ '宁可少生成,不生成注定崩的候选'.",
+    "ep_axis": "exists (MoE, num_experts=256); held at baseline ep=1 (not emitted) to isolate the cache-strategy A/B. tp%ep==0 & num_experts%ep==0 both trivially hold.",
+    "pp_size": 1,
+    "hybrid_mamba": true,
+    "cache_strategy_ab": "no_buffer (V1, page_size=1) vs extra_buffer (V2, page_size=64) -- SKILL step 6 explicitly names this A/B for this case; §7 '两分支必须实测对冲'.",
+    "page_size_linkage": "flashinfer+no_buffer -> page_size 1; extra_buffer -> forced page_size 64 (FLA_CHUNK_SIZE(64)%page_size==0, §5/§7).",
+    "schedule_policy": "fcfs (qa-chat independent requests, no shared prefix -> NOT pinning lpm, §4)",
+    "kv_cache_dtype": "auto (default; short 3.5k input not KV-bound, no fp8 KV needed this round)",
+    "context_length": "NEVER written; falls back to native 262144 (knowledge.md §0 red line)",
+    "flag_names": "v0.5.16 flag_aliases={} and 'mamba-radix-cache-strategy' is a direct valid_flag (no alias, unlike v0.5.10 which aliased to mamba-scheduler-strategy)",
+    "budget_note": "max_candidates=2 -> both slots spent on the single highest-value startable A/B (hybrid-mamba cache strategy) at the low-risk baseline (tp4/flashinfer/mem0.88). mem-sweep / attention (triton) / ep / speculative axes deferred."
+  },
+  "candidates": [
+    {
+      "candidate_id": "c001",
+      "params": {"tp_size": 4, "pp_size": 1, "ep_size": 1, "attention_backend": "flashinfer", "mem_fraction_static": 0.88, "chunked_prefill_size": 8192, "page_size": 1, "mamba_radix_cache_strategy": "no_buffer"},
+      "server_command": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --attention-backend flashinfer --mem-fraction-static 0.88 --chunked-prefill-size 8192 --page-size 1 --mamba-radix-cache-strategy no_buffer --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code",
+      "benchmark_commands": [],
+      "reasons": [
+        "低风险基线锚点:SM120 首选 flashinfer(§1,auto-select 也回落它);tp=4 是块量化下的合法上限且实测吞吐最优(§2③⑤,weight 8.75G/卡远放得下);no_buffer 是 hybrid_mamba 默认低显存分支(§7 V1);mem 0.88 居中(§3/§6 A);page_size 1 与 flashinfer+no_buffer 联动(§3/§5)。",
+        "作为 C 阶段缓存策略 A/B 的对照臂(vs c002 extra_buffer),其余轴全部固定以隔离单变量。"
+      ],
+      "expected_risk": "low"
+    },
+    {
+      "candidate_id": "c002",
+      "params": {"tp_size": 4, "pp_size": 1, "ep_size": 1, "attention_backend": "flashinfer", "mem_fraction_static": 0.88, "chunked_prefill_size": 8192, "page_size": 64, "mamba_radix_cache_strategy": "extra_buffer"},
+      "server_command": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --attention-backend flashinfer --mem-fraction-static 0.88 --chunked-prefill-size 8192 --page-size 64 --mamba-radix-cache-strategy extra_buffer --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code",
+      "benchmark_commands": [],
+      "reasons": [
+        "C 阶段缓存策略对冲臂:extra_buffer(V2)开 overlap scheduler + 分支缓存,非 KV-bound 场景吞吐更好(§7),3.5k 短输入正是可能非 KV-bound 的场景,值得 A/B 而不可预判。",
+        "extra_buffer 硬约束:必须配 --page-size 64(FLA_CHUNK_SIZE(64)%page_size==0,§5/§7);未 disable radix cache 故不触发 extra_buffer+disable-radix-cache 的 ValueError。相对 c001 仅改缓存策略+联动 page_size,单变量可比。",
+        "medium 风险:V2 分支缓存占更多显存,mem 0.88 下需带压测确认峰值不 OOM 并读启动日志 available_gpu_mem(§6 A/§12);若 OOM 回退 c001 的 no_buffer。"
+      ],
+      "expected_risk": "medium"
+    }
+  ]
+}
