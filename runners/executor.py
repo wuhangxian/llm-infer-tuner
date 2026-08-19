@@ -511,6 +511,12 @@ def _outcome_diag(outcome: SearchOutcome) -> dict[str, Any]:
 
 def _preflight_checks(config: ExecutorConfig, remote: RemoteRunner) -> None:
     """Verify remote connectivity, model directory, and image availability before container start."""
+    # 0. Clean up stale containers from previous runs (same job_id prefix)
+    prefix = shlex.quote(config.container_name + "%")
+    cleanup = remote.run(f"docker rm -f $(docker ps -a --filter name={prefix} -q) 2>/dev/null || true")
+    if cleanup.ok and cleanup.stdout.strip():
+        _log(f"Cleaned up stale containers: {cleanup.stdout.strip()}")
+
     # 1. SSH
     probe = remote.run("echo ok")
     if not probe.ok or probe.stdout.strip() != "ok":
@@ -656,20 +662,18 @@ def run_executor(
         port=config.port,
     )
 
-    # Allocate GPUs and ports for ALL candidates upfront
-    allocations = _allocate_gpus_and_ports(candidates, job.gpu_count, base_port=config.port)
-
     # ---- Split into batches that fit within gpu_count ----
-    batches: list[list[tuple[dict[str, Any], str, int]]] = []
-    current_batch: list[tuple[dict[str, Any], str, int]] = []
+    # Each batch reuses GPU IDs starting from 0 (batches run sequentially).
+    batches: list[list[dict[str, Any]]] = []
+    current_batch: list[dict[str, Any]] = []
     current_gpus_used = 0
-    for candidate, gpu_ids_str, port in allocations:
+    for candidate in candidates:
         tp_size = int(candidate.get("params", {}).get("tp_size", 1))
         if current_gpus_used + tp_size > job.gpu_count and current_batch:
             batches.append(current_batch)
             current_batch = []
             current_gpus_used = 0
-        current_batch.append((candidate, gpu_ids_str, port))
+        current_batch.append(candidate)
         current_gpus_used += tp_size
     if current_batch:
         batches.append(current_batch)
@@ -679,10 +683,12 @@ def run_executor(
 
     # ---- ROUND 1: coarse expansion over ALL candidates (batch-parallel) ----
     for batch_idx, batch in enumerate(batches):
+        # Allocate GPUs within this batch (reset cursor to 0)
+        alloc = _allocate_gpus_and_ports(batch, job.gpu_count, base_port=config.port)
         _log(f"round-1 batch {batch_idx + 1}/{len(batches)}: "
-             f"{[c.get('id') for c, _, _ in batch]}")
+             f"{[c.get('id') for c in batch]}")
         outcomes = _run_batch_parallel(
-            ctx_template, batch, remote, outputs_host_dir, outputs_container_path,
+            ctx_template, alloc, remote, outputs_host_dir, outputs_container_path,
             qualifies=qualifies,
             round_label="r1",
             max_probes=ROUND1_MAX_PROBES,
@@ -709,28 +715,28 @@ def run_executor(
     # ---- ROUND 2: precise bisection on top-K (batch-parallel) ----
     candidate_by_id = {str(c.get("id", "unknown")): c for c in candidates}
     top_candidates = [candidate_by_id[cid] for cid in top_ids if cid in candidate_by_id]
-    top_allocations = _allocate_gpus_and_ports(top_candidates, job.gpu_count, base_port=config.port)
 
     # Split top-K into batches too
-    top_batches: list[list[tuple[dict[str, Any], str, int]]] = []
+    top_batches: list[list[dict[str, Any]]] = []
     current_batch = []
     current_gpus_used = 0
-    for candidate, gpu_ids_str, port in top_allocations:
+    for candidate in top_candidates:
         tp_size = int(candidate.get("params", {}).get("tp_size", 1))
         if current_gpus_used + tp_size > job.gpu_count and current_batch:
             top_batches.append(current_batch)
             current_batch = []
             current_gpus_used = 0
-        current_batch.append((candidate, gpu_ids_str, port))
+        current_batch.append(candidate)
         current_gpus_used += tp_size
     if current_batch:
         top_batches.append(current_batch)
 
     for batch_idx, batch in enumerate(top_batches):
+        alloc = _allocate_gpus_and_ports(batch, job.gpu_count, base_port=config.port)
         _log(f"round-2 batch {batch_idx + 1}/{len(top_batches)}: "
-             f"{[c.get('id') for c, _, _ in batch]}")
+             f"{[c.get('id') for c in batch]}")
         outcomes = _run_batch_parallel(
-            ctx_template, batch, remote, outputs_host_dir, outputs_container_path,
+            ctx_template, alloc, remote, outputs_host_dir, outputs_container_path,
             qualifies=qualifies,
             round_label="r2",
             max_probes=ROUND2_MAX_PROBES,
