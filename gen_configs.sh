@@ -150,7 +150,7 @@ echo "$RAW" | jq -e '
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 N="$(wc -l < "$OUT" | tr -d ' ')"
 echo "✅ 已生成 $N 条候选 → $OUT" >&2
-echo "── 预览(id / tp / attention / mem-fraction / mamba / page / speculative)──" >&2
+echo "── 预览(id / tp / att / mf / mamba / page / spec / chunk / kv / sched)──" >&2
 jq -r '
   "  " + .id +
   "  tp=" + (.params.tp_size|tostring) +
@@ -158,5 +158,8 @@ jq -r '
   "  mf=" + (.params.mem_fraction_static|tostring) +
   "  mamba=" + (.params.mamba_radix_cache_strategy // .params.mamba_scheduler_strategy // .params["mamba-radix-cache-strategy"] // "-") +
   "  page=" + (.params.page_size // .params["page-size"] // "-" | tostring) +
-  "  spec=" + (.params.speculative_algorithm // .params["speculative-algorithm"] // .params.speculative // "-")
+  "  spec=" + (.params.speculative_algorithm // .params["speculative-algorithm"] // .params.speculative // "-") +
+  "  chunk=" + (.params.chunked_prefill_size // .params["chunked-prefill-size"] // "-" | tostring) +
+  "  kv=" + (.params.kv_cache_dtype // .params["kv-cache-dtype"] // "-") +
+  "  sched=" + (.params.schedule_conservativeness // .params["schedule-conservativeness"] // "-" | tostring)
 ' "$OUT" >&2
