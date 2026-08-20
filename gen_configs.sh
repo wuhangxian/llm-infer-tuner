@@ -158,5 +158,5 @@ jq -r '
   "  mf=" + (.params.mem_fraction_static|tostring) +
   "  mamba=" + (.params.mamba_radix_cache_strategy // .params.mamba_scheduler_strategy // .params["mamba-radix-cache-strategy"] // "-") +
   "  page=" + (.params.page_size // .params["page-size"] // "-" | tostring) +
-  "  spec=" + (.params.speculative_algorithm // .params["speculative-algorithm"] // "-")
+  "  spec=" + (.params.speculative_algorithm // .params["speculative-algorithm"] // .params.speculative // "-")
 ' "$OUT" >&2
