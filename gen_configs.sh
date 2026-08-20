@@ -119,6 +119,12 @@ RAW="$(claude -p "$PROMPT" \
   --add-dir "$SKILL_DIR" \
   --dangerously-skip-permissions)"
 
+# 保存 claude 原始返回到 claude-raw-outputs/(方便调试和回溯,不进 git)
+RAW_DIR="claude-raw-outputs"
+mkdir -p "$RAW_DIR"
+echo "$RAW" > "$RAW_DIR/${JOB_ID}.json"
+echo "ℹ️  原始返回 → $RAW_DIR/${JOB_ID}.json" >&2
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 第 5 步:拆 JSONL
 # ─────────────────────────────────────────────────────────────────────────
