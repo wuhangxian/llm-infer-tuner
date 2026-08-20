@@ -176,18 +176,61 @@
 
 ---
 
-## 6. 阶段顺序(为什么分阶段:显存类参数互抢,平铺会产生大量注定 OOM/等价组合)
+## 6. 候选选择策略(baseline_first_bounded_product)
 
-| 阶段 | 名 | 判据 | 出处 | 要点 |
-|---|---|---|---|---|
-| A | 显存边界 | **capacity 不用吞吐** | official | mem-fraction 从 0.80 每 +0.01 探到 OOM 前;价值是「撑更高并发」,低并发下测吞吐=没测。判据三条:①能起来 ②available_gpu_mem 落 5-8GB ③目标并发下不崩。**OOM 常在负载峰值才炸,A 阶段必须带压测。** 选出的 mem-fraction 固定给 B~F 复用 |
-| B | attention backend | throughput | source | 唯一官方+团队都零数据的维度,必须实测。候选被硬件砍到很少(SM120 只 flashinfer/triton),成本低 |
-| C | 混合架构缓存策略 | throughput | official | 仅混合架构(mamba/GDN)适用;两分支各有代价,看是否 KV-bound,不可预判 |
-| D | chunked prefill | throughput | official | 长输入 prefill 占主导,TTFT/峰值激活主轴 |
-| E | 并发容量 | throughput | judgment | 放 A 之后,取值上限靠 A 的启动日志 max_total_num_tokens 算出 |
-| F | 投机解码(MTP) | throughput | measured | 团队 H20 实测:长输入短输出高并发区 MTP 恒定劣化(QPS≥128 时 QPM 低≈15%,draft model 占显存压低 max_running_requests)。放最后,先跑通非投机基线。H20 数据外推需实测 |
-| G | 组合验证 | throughput | judgment | B~F 是坐标下降一轮,不保证组合最优。各阶段赢家合起来实测;**若不优于各单项最优,说明有负交互,回头重扫**。不做这步只能叫「各维度单项最优」 |
+**前提**:执行器一次性生成所有候选并行实测排名,不做分阶段负反馈。候选选择必须均衡覆盖各维度,不按阶段顺序把重要维度推到最后。
 
+### 6.1 维度重要性分级
+
+| 等级 | 维度 | 影响幅度 |
+|---|---|---|
+| 高影响 | TP、投机解码、attention | 投机解码延迟降 2-3 倍;TP 决定通信开销和显存利用率;attention 影响吞吐 10-30% |
+| 中影响 | mem-fraction、mamba 策略 | mem-fraction 撑高并发上限;mamba 策略影响 overlap 吞吐 |
+| 低影响 | chunked-prefill、schedule-conservativeness、kv-cache-dtype | 影响 5-15%,有剩余名额才铺 |
+
+### 6.2 最优候选数计算
+
+生成候选前算各维度的独立值数，再算符卡约束后的最优候选数:
+
+基线 = 1 条(固定)
+高影响独立值 = (TP数-1) + (投机解码数-1) + (attention数-1)  # 减1因基线占了一个组合
+交叉组合 = (TP数-1) × 投机解码数  # TP×投机解码交叉点(扣除基线占的)
+中影响独立值 = mem-fraction数 + mamba数(仅 hybrid_mamba=true)
+低影响独立值 = chunked-prefill数 + schedule数 + kv-cache数
+
+最优候选数 = 基线 + 高影响独立值 + 交叉组合 + 中影响独立值 + 低影响独立值
+
+**示例**(qwen36-27b-fp8, SM120, hybrid_mamba=true, supports_mtp=true):
+- TP=[1,2,4]=3 (TP8 块量化约束砍掉)
+- 投机解码=[无,EAGLE]=2
+- attention=[flashinfer,triton]=2
+- mem-fraction=[0.84,0.88,0.92]=3
+- mamba=[no_buffer,extra_buffer]=2
+- chunked-prefill=[4096,8192,16384]=3
+- schedule=[0.3,1.0,1.3]=3
+- kv-cache=[auto,fp8_e4m3]=2
+
+基线 1 + 高影响独立 (2+1+1=4) + 交叉 (2×2=4) + 中影响 (3+2=5) + 低影响 (3+3+2=8) = 22
+
+如果 max_candidates=16 < 22,按§6.3 截断。
+
+### 6.3 名额分配规则
+
+基线固定 1 条后,剩余名额(max_candidates-1)按比例分配:
+
+| 类别 | 占比 | 填充顺序 |
+|---|---|---|
+| 高影响 | 60% | 先 TP(不同值各1条)→ 再投机解码(开/关×不同TP交叉)→ 再attention(triton) |
+| 中影响 | 30% | mem-fraction(上下界各1)、mamba(两分支各1) |
+| 低影响 | 10% | 有剩余才铺,每个维度 1-2 个值 |
+
+### 6.4 交叉优先级
+
+名额不够时,高影响维度的交叉组合(TP×投机解码)优先于低影响维度的单独铺设。宁可砍掉 chunked-prefill/schedule/kv-cache 的候选,也要保留 TP×投机解码的交叉组合。
+
+### 6.5 不重复
+
+参数完全相同的候选只留 1 条。两条候选只差一个低影响参数而高影响参数完全相同的,合并为1条(取默认值)。
 ---
 
 ## 7. 混合架构(mamba/GDN)专属 — `official`
