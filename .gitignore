@@ -10,3 +10,4 @@ build/
 outputs/
 .env
 *.env
+raw/
