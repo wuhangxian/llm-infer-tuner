@@ -154,12 +154,12 @@ echo "── 预览(id / tp / att / mf / mamba / page / spec / chunk / kv / sche
 jq -r '
   "  " + .id +
   "  tp=" + (.params.tp_size|tostring) +
-  "  " + (.params.attention_backend // "-") +
+  "  " + (.params.attention_backend // "-(default)") +
   "  mf=" + (.params.mem_fraction_static|tostring) +
-  "  mamba=" + (.params.mamba_radix_cache_strategy // .params.mamba_scheduler_strategy // .params["mamba-radix-cache-strategy"] // "-") +
-  "  page=" + (.params.page_size // .params["page-size"] // "-" | tostring) +
-  "  spec=" + (.params.speculative_algorithm // .params["speculative-algorithm"] // .params.speculative // "-") +
-  "  chunk=" + (.params.chunked_prefill_size // .params["chunked-prefill-size"] // "-" | tostring) +
-  "  kv=" + (.params.kv_cache_dtype // .params["kv-cache-dtype"] // "-") +
-  "  sched=" + (.params.schedule_conservativeness // .params["schedule-conservativeness"] // "-" | tostring)
+  "  mamba=" + (.params.mamba_radix_cache_strategy // .params.mamba_scheduler_strategy // .params["mamba-radix-cache-strategy"] // "no_buffer(default)") +
+  "  page=" + (.params.page_size // .params["page-size"] // "1(default)" | tostring) +
+  "  spec=" + (.params.speculative_algorithm // .params["speculative-algorithm"] // .params.speculative // "none(default)") +
+  "  chunk=" + (.params.chunked_prefill_size // .params["chunked-prefill-size"] // "8192(default)" | tostring) +
+  "  kv=" + (.params.kv_cache_dtype // .params["kv-cache-dtype"] // "auto(default)") +
+  "  sched=" + (.params.schedule_conservativeness // .params["schedule-conservativeness"] // "1.0(default)" | tostring)
 ' "$OUT" >&2
