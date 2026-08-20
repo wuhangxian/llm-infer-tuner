@@ -10,4 +10,4 @@ build/
 outputs/
 .env
 *.env
-raw/
+claude-raw-outputs/
