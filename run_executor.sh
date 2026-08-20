@@ -96,19 +96,19 @@ echo "    model(container)=$MODEL_CONTAINER_PATH" >&2
 echo "    configs=$CONFIGS  results=$RESULTS" >&2
 echo >&2
 
-exec uv run python -m runners.executor \\
-  --job "$JOB" \\
-  --configs "$CONFIGS" \\
-  --results "$RESULTS" \\
-  --ssh-target "$SSH_TARGET" \\
-  --ssh-password "$SSH_PASSWORD" \\
-  --image-ref "$IMAGE_REF" \\
-  --model-host-dir "$MODEL_HOST_DIR" \\
-  --model-container-path "$MODEL_CONTAINER_PATH" \\
-  --container-name "$CONTAINER_NAME" \\
-  --port "$PORT" \\
-  --max-candidates "$MAX_CAND" \\
-  --remote-outputs-dir "$REMOTE_OUTPUTS_DIR" \\
-  --target-gpu-model "$TARGET_GPU_MODEL" \\
-  --target-gpu-count "$TARGET_GPU_COUNT" \\
+exec uv run python -m runners.executor \
+  --job "$JOB" \
+  --configs "$CONFIGS" \
+  --results "$RESULTS" \
+  --ssh-target "$SSH_TARGET" \
+  --ssh-password "$SSH_PASSWORD" \
+  --image-ref "$IMAGE_REF" \
+  --model-host-dir "$MODEL_HOST_DIR" \
+  --model-container-path "$MODEL_CONTAINER_PATH" \
+  --container-name "$CONTAINER_NAME" \
+  --port "$PORT" \
+  --max-candidates "$MAX_CAND" \
+  --remote-outputs-dir "$REMOTE_OUTPUTS_DIR" \
+  --target-gpu-model "$TARGET_GPU_MODEL" \
+  --target-gpu-count "$TARGET_GPU_COUNT" \
   --target-gpu-memory-gb "$TARGET_GPU_MEM"
