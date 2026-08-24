@@ -24,6 +24,7 @@ import json
 import re
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -98,15 +99,88 @@ def extract_valid_flags(server_args_path: Path) -> list[str]:
 
 
 def extract_attention_backends(server_args_path: Path) -> list[str]:
-    """Extract attention_backend choices from the add_argument call."""
+    """Extract attention_backend choices from server_args.py.
+
+    Handles three syntaxes across SGLang versions:
+    1. Legacy:  parser.add_argument("--attention-backend", choices=[...])
+    2. Modern:  attention_backend: A[Optional[str], Arg(choices=VAR_NAME, ...)]
+    3. Inline:  choices=["triton", ...] inside Arg()
+    """
     source = server_args_path.read_text(encoding="utf-8")
-    pattern = r'add_argument\(\s*["\']--attention-backend["\'].*?choices=\[([^\]]+)\]'
-    match = re.search(pattern, source, re.DOTALL)
-    if not match:
-        return []
-    raw = match.group(1)
-    backends = re.findall(r'["\']([^"\']+)["\']', raw)
-    return sorted(backends)
+    tree = ast.parse(source)
+
+    def _resolve_list_var(var_name: str) -> list[str]:
+        """Resolve a module-level list variable, including .extend() calls."""
+        backends: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == var_name:
+                        if isinstance(node.value, ast.List):
+                            backends.update(
+                                el.value for el in node.value.elts
+                                if isinstance(el, ast.Constant) and isinstance(el.value, str)
+                            )
+        # Collect .extend([...]) additions on the variable
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                f = node.func
+                if (isinstance(f, ast.Attribute) and f.attr == "extend"
+                        and isinstance(f.value, ast.Name) and f.value.id == var_name):
+                    if node.args and isinstance(node.args[0], ast.List):
+                        backends.update(
+                            el.value for el in node.args[0].elts
+                            if isinstance(el, ast.Constant) and isinstance(el.value, str)
+                        )
+        return sorted(backends)
+
+    def _extract_from_arg_call(call_node: ast.Call) -> list[str] | None:
+        """Extract choices from an Arg() or add_argument() call."""
+        for kw in call_node.keywords:
+            if kw.arg == "choices":
+                if isinstance(kw.value, ast.List):
+                    return sorted({
+                        el.value for el in kw.value.elts
+                        if isinstance(el, ast.Constant) and isinstance(el.value, str)
+                    })
+                if isinstance(kw.value, ast.Name):
+                    return _resolve_list_var(kw.value.id)
+        return None
+
+    # 1) Legacy: add_argument("--attention-backend", ..., choices=...)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr == "add_argument":
+                if node.args and isinstance(node.args[0], ast.Constant):
+                    if node.args[0].value == "--attention-backend":
+                        result = _extract_from_arg_call(node)
+                        if result is not None:
+                            return result
+
+    # 2) Modern: attention_backend: A[Optional[str], Arg(choices=VAR_NAME, ...)]
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AnnAssign):
+            target_id = getattr(node.target, "id", "")
+            if target_id == "attention_backend":
+                for child in ast.walk(node.annotation):
+                    if isinstance(child, ast.Call):
+                        f = child.func
+                        name = f.id if isinstance(f, ast.Name) else getattr(f, "attr", "")
+                        if name in ("Arg", "Argument"):
+                            result = _extract_from_arg_call(child)
+                            if result is not None:
+                                return result
+
+    # 3) Fallback: regex on choices=VAR_NAME anywhere in source
+    var_match = re.search(r'choices=([A-Z_][A-Z0-9_]*)', source)
+    if var_match:
+        result = _resolve_list_var(var_match.group(1))
+        if result:
+            return result
+
+    return []
+
 
 
 def extract_constraints(server_args_path: Path) -> list[dict[str, str]]:
@@ -132,6 +206,7 @@ def load_images_yaml() -> dict[str, Any]:
 
 
 def save_images_yaml(data: dict) -> None:
+    data["total"] = len(data.get("images", {}))
     with open(IMAGES_YAML, "w", encoding="utf-8") as f:
         yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
@@ -180,6 +255,7 @@ def process_tag(tag: str, repo_dir: Path, data: dict) -> bool:
     if is_new:
         # Create new entry with defaults
         images[image_key] = {
+            "last_updated": datetime.now().strftime("%Y-%m-%d"),
             "image_ref": f"lmsysorg/sglang:{tag}",
             "sglang_version": tag.lstrip("v"),
             "cuda_version": None,  # needs manual fill or Dockerfile inspection
@@ -221,6 +297,9 @@ def process_tag(tag: str, repo_dir: Path, data: dict) -> bool:
                 print(f"  [backends] -{sorted(removed)}")
             entry["attention_backends"] = sorted(new_backends)
             changed = True
+
+        if changed:
+            entry["last_updated"] = datetime.now().strftime("%Y-%m-%d")
 
     return changed
 

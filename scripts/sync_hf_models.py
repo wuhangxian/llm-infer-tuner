@@ -23,6 +23,7 @@ import json
 import re
 import subprocess
 import sys
+from datetime import datetime
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -181,6 +182,7 @@ def load_models_yaml() -> dict[str, Any]:
 
 
 def save_models_yaml(data: dict) -> None:
+    data["total"] = len(data.get("models", {}))
     with open(MODELS_YAML, "w", encoding="utf-8") as f:
         yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
@@ -203,6 +205,7 @@ def generate_new_model_card(hf_id: str, info: dict) -> dict[str, Any]:
     arch = "moe" if is_moe else "dense"
 
     card: dict[str, Any] = {
+        "last_updated": datetime.now().strftime("%Y-%m-%d"),
         "hf_model_id": hf_id,
         "family": "[AUTO-fill]",
         "parameter_count_b": None,
@@ -378,6 +381,12 @@ def main(argv: list[str] | None = None) -> int:
             if diffs:
                 for d in diffs:
                     print(f"    [diff] {d}")
+                # Stamp the entry with today's date since we found changes
+                for key, val in models.items():
+                    if val.get("hf_model_id") == hf_id:
+                        val["last_updated"] = datetime.now().strftime("%Y-%m-%d")
+                        models_changed = True
+                        break
             else:
                 print("    [ok] up to date")
 
