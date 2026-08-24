@@ -32,7 +32,7 @@
 
 `source`(读 v0.5.10 源码)。这是「引擎相关」的算力知识,故在 skill 内、不在 catalogs/gpu.yaml。
 
-**最终 attention 候选 = 本短名单[sm_major] ∩ 镜像菜单(images.yaml.attention_backends)∩ CUDA 达标。**
+**最终 attention 候选 = 本短名单[sm_major] ∩ 镜像菜单(sglang-images.yaml.attention_backends)∩ CUDA 达标。**
 三者取交才是真正能上的 attention 轴。短名单是「阶段中性」的一份,`--prefill-attention-backend` / `--decode-attention-backend` 两轴共用它,所以**只放两侧都能起的后端**。
 
 | sm_major | 架构 | 短名单 | 备注 |

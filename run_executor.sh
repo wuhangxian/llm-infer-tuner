@@ -17,6 +17,13 @@
 #   → 输出 outputs/<job_id>/results/ranking.json
 set -euo pipefail
 
+# Load .env for claude API credentials
+if [ -f .env ]; then
+  set -a
+  . ./.env
+  set +a
+fi
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 第 1 步:前置检查 — 验证依赖和输入文件都就位
 # ─────────────────────────────────────────────────────────────────────────
@@ -26,7 +33,7 @@ set -euo pipefail
 #   • configs.jsonl — 第一步 gen_configs.sh 的产物,候选启动配置
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 JOB="${1:?用法: ./run_executor.sh <job.json> <target.json> [configs.jsonl] [results_dir]}"
-TARGET="${2:?缺 target.json,例 input/targets/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2__s3.json}"
+TARGET="${2:?缺 target.json,例 input/targets/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2__122-51-115-16.json}"
 
 command -v jq >/dev/null || { echo "❌ 需要 jq" >&2; exit 1; }
 [ -f "$JOB" ]     || { echo "❌ job 不存在: $JOB" >&2; exit 1; }

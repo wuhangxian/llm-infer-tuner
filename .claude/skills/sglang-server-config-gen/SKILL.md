@@ -21,7 +21,7 @@ description: 输入一个固定 JSON(JobSpec:机型/模型/镜像/负载/SLA/预
 
 **不干**:起服务、压测、剪枝、入库、出报告(下游第二阶段的事)。
 
-**核心原则:加新经验 = 只改 `knowledge.md` / `catalogs/*.yaml` / `images.yaml` 的文本,不改生成器代码。**
+**核心原则:加新经验 = 只改 `knowledge.md` / `catalogs/*.yaml`(含 `sglang-images.yaml`)的文本,不改生成器代码。**
 
 ---
 
@@ -49,7 +49,7 @@ description: 输入一个固定 JSON(JobSpec:机型/模型/镜像/负载/SLA/预
  | `gpu_model` | `catalogs/gpu.yaml` | 算力(sm_major) / NVLink |
  | `gpu_count` / `gpu_memory_gb` | inline (JobSpec) | 卡数(TP/EP 上限) / 单卡显存(TP 准入判据) |
 | `model` | `catalogs/models.yaml` | 架构 / 是否 MoE / 权重大小 / parser 名 / KV 粗估 |
-| `image` | `images.yaml`(本 skill 内) | CUDA 版本 / attention 菜单 / flag 别名 / valid_flags 白名单 |
+| `image` | `catalogs/sglang-images.yaml` | CUDA 版本 / attention 菜单 / flag 别名 / valid_flags 白名单 |
 | `workload` | `catalogs/workloads.yaml` | 输入/输出长度 / 并发梯度 / 采样参数 |
 | `sla` / `search` | inline | SLA 阈值 / 候选数与时间预算 |
 
@@ -59,9 +59,9 @@ description: 输入一个固定 JSON(JobSpec:机型/模型/镜像/负载/SLA/预
 
 ## AI 生成时读哪些文件、按什么步骤
 
-**读(按序,路径均相对项目根)**:① 本 `SKILL.md` → ② `.claude/skills/sglang-server-config-gen/knowledge.md`(全部经验判据)→ ③ 三张 `catalogs/*.yaml`(按 JobSpec 里的 ID 取对应卡片)→ ④ 本 skill 的 `.claude/skills/sglang-server-config-gen/images.yaml`(按 image ID 取镜像卡片)。
+**读(按序,路径均相对项目根)**:① 本 `SKILL.md` → ② `.claude/skills/sglang-server-config-gen/knowledge.md`(全部经验判据)→ ③ 三张 `catalogs/*.yaml`(按 JobSpec 里的 ID 取对应卡片)→ ④ `catalogs/sglang-images.yaml`(按 image ID 取镜像卡片)。
 
-> 路径说明:`knowledge.md` 和 `images.yaml` 与本 SKILL.md 同目录(`.claude/skills/sglang-server-config-gen/`);`catalogs/`、`schemas/` 在项目根下。`claude` 从项目根运行,按上述相对路径即可读到。
+> 路径说明:`knowledge.md` 与本 SKILL.md 同目录(`.claude/skills/sglang-server-config-gen/`);`catalogs/`(含 `sglang-images.yaml`)、`schemas/` 在项目根下。`claude` 从项目根运行,按上述相对路径即可读到。
 
 **步骤**:
 
@@ -120,7 +120,7 @@ schemas/                           # Pydantic 契约,在项目根
 .claude/skills/sglang-server-config-gen/  # 本 skill(claude 从这里加载)
   SKILL.md        # 本文件:入口(读什么、步骤、输出、闸)
   knowledge.md    # 全部调优经验+判据(改经验改这里)
-  images.yaml     # sglang 各版镜像事实(引擎相关)
+  # sglang-images.yaml 在 catalogs/ 下(引擎相关镜像事实)
 ```
 
 **engine 路由**:JobSpec 的 `engine` 字段决定用哪个 skill —— `engine:"sglang"` → 本 skill(`.claude/skills/sglang-server-config-gen/`);将来 `engine:"vllm"` → 新建 `.claude/skills/vllm-config-gen/`,复用同一套 `catalogs/`。

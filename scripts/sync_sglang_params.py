@@ -1,13 +1,13 @@
-"""Sync SGLang server parameters from source code into images.yaml.
+"""Sync SGLang server parameters from source code into catalogs/sglang-images.yaml.
 
 Automatically scans all SGLang git tags, discovers new versions not yet in
-images.yaml, and updates existing entries when parameters change.
+sglang-images.yaml, and updates existing entries when parameters change.
 
 For each tag:
   - Clones (or updates) the SGLang repo at that tag
   - Parses server_args.py with AST to extract valid_flags + attention_backends
   - Extracts assert/raise constraints for a human-review report
-  - Updates images.yaml if changed, or creates a new entry for new versions
+  - Updates sglang-images.yaml if changed, or creates a new entry for new versions
 
 Usage:
   python scripts/sync_sglang_params.py
@@ -31,7 +31,7 @@ from typing import Any
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-IMAGES_YAML = PROJECT_ROOT / ".claude/skills/sglang-server-config-gen/images.yaml"
+IMAGES_YAML = PROJECT_ROOT / "catalogs" / "sglang-images.yaml"
 SGLANG_REPO = "https://github.com/sgl-project/sglang.git"
 SERVER_ARGS_REL = "python/sglang/srt/server_args.py"
 
@@ -54,7 +54,7 @@ def list_all_tags() -> list[str]:
 
 
 def get_existing_image_keys() -> list[str]:
-    """Get image keys already in images.yaml."""
+    """Get image keys already in sglang-images.yaml."""
     with open(IMAGES_YAML, encoding="utf-8") as f:
         data = yaml.safe_load(f)
     return list(data.get("images", {}).keys())
@@ -241,7 +241,7 @@ def save_constraints_report(constraints: list[dict], tag: str) -> None:
 
 
 def process_tag(tag: str, repo_dir: Path, data: dict) -> bool:
-    """Process a single tag. Returns True if images.yaml was changed."""
+    """Process a single tag. Returns True if sglang-images.yaml was changed."""
     image_key = f"sglang-{tag.lstrip('v')}"
     is_new = image_key not in data.get("images", {})
 
@@ -349,7 +349,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Existing versions to check: {existing_tags}")
 
     # Step 2: Load images.yaml
-    print("[2/3] Loading images.yaml...")
+    print("[2/3] Loading sglang-images.yaml...")
     data = load_images_yaml()
 
     # Step 3: Process each tag
@@ -363,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if any_changed:
         save_images_yaml(data)
-        print(f"\n  -> images.yaml updated")
+        print(f"\n  -> sglang-images.yaml updated")
     else:
         print(f"\n  -> no changes needed")
 

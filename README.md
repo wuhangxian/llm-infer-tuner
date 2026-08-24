@@ -86,12 +86,12 @@ chmod 600 .env
 ```
 
 > `gpu_model / model / workload` 三个 ID 必须能在 `catalogs/*.yaml` 里查到,`image` 能在
-> `.claude/skills/sglang-server-config-gen/images.yaml` 里查到;查不到就先去对应文件补一张卡
+> `catalogs/sglang-images.yaml` 里查到;查不到就先去对应文件补一张卡
 > (每个文件底部都有「缺了怎么补、去哪查」的注释)。
 
-**`input/targets/<job_id>__<server_tag>.json` —— 在哪测**:
+**`input/targets/<job_id>__<ip>.json` —— 在哪测**:
 
-> 文件名规则:`{job_id}__{server_tag}.json`,job_id 段与 `input/jobs/` 对齐,server_tag 区分同型号不同机器。
+> 文件名规则:`{job_id}__<ip>.json`,job_id 段与 `input/jobs/` 对齐,ip 为目标服务器 IP(点换成横杠,如 `122.51.115.16` → `122-51-115-16`)。
 > GPU 字段(`gpu_model`/`gpu_count`/`gpu_memory_gb`)用于和 job.json 校验硬件匹配,防止跑错机器。
 
 ```json
@@ -117,7 +117,7 @@ chmod 600 .env
 ./gen_configs.sh input/jobs/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2.json
 
 # 阶段二:真机压测 + 排名 → outputs/<job>/results/ranking.json
-./run_executor.sh input/jobs/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2.json input/targets/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2__s3.json
+./run_executor.sh input/jobs/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2.json input/targets/qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2__122-51-115-16.json
 ```
 
 ### 4. 看结果
@@ -139,14 +139,14 @@ run_executor.sh         # 阶段二入口:读 target → 拼参数 → 跑 runne
   sglang-server-config-gen/   # 服务端:出 launch_server 启动配置
     SKILL.md            #   流程入口:读什么、推导步骤、输出契约、3 道硬闸
     knowledge.md        #   全部调优判据(attention/并行度/搜索空间/pin/排除…)
-    images.yaml         #   各版 sglang 镜像事实(CUDA/attention 菜单/flag 白名单)
   sglang-client-config-gen/   # 客户端:出 bench_serving 分并发压测命令
     SKILL.md  knowledge.md
 
-catalogs/               # 引擎无关的共享事实(vllm skill 也复用)
+catalogs/               # 引擎无关的共享事实 + 引擎相关镜像事实
   gpu.yaml              #   显卡型号 → 算力(sm)/NVLink(显存/卡数在 JobSpec)
   models.yaml           #   模型 → 架构/是否 MoE/专家数/量化块/权重大小/专属 flag
   workloads.yaml        #   负载 → 输入输出长度/并发梯度/采样参数
+  sglang-images.yaml    #   sglang 各版镜像事实(CUDA/attention 菜单/flag 白名单)
 
 runners/                # 阶段二执行器(全确定性,无 AI 判断)
   executor.py           #   主循环编排:读 configs → 逐候选 起服/压测/采集/排名
@@ -170,7 +170,7 @@ tests/                          # pytest
 ## 设计原则
 
 1. **加经验 = 改文本,不改代码**。新模型 / 新卡 / 新镜像 / 新调优判据,只改 `catalogs/*.yaml`、
-   `.claude/skills/**/knowledge.md`、`images.yaml`,生成器代码零改动。
+   `.claude/skills/**/knowledge.md`、`catalogs/sglang-images.yaml`,生成器代码零改动。
 2. **配置机器无关**。阶段一产出的 `configs.jsonl` 里模型路径是 `${MODEL_PATH}` 占位符,
    同一份配置可在不同机器间搬运,换机器不必重新调 AI。
 3. **AI 出题、代码阅卷**。参数决策交给 AI(灵活);执行、SLA 判定、goodput 排名交给确定性代码(可复现、可审计)。

@@ -1,10 +1,7 @@
 {
-  "_comment": "命名规则: {job_id}__{server_tag}.json。job_id 段与 input/jobs/ 里的文件名对齐,server_tag 区分同型号不同机器(如 s3/s5)。",
-
   "gpu_model": "pro5000",
   "gpu_count": 8,
   "gpu_memory_gb": 72,
-
   "ssh_target": "ubuntu@122.51.115.16",
   "model_host_dir": "/data/autotune/models/Qwen3.6-35B-A3B-FP8",
   "model_container_path": "/data/autotune/models/Qwen3.6-35B-A3B-FP8",

@@ -9,7 +9,7 @@
 #   0 9 * * * cd /path/to/llm-infer-tuner && ./scripts/run_daily_sync.sh >> logs/sync.log 2>&1
 #
 # 做两件事:
-#   1. 扫描 SGLang 所有 git tag,发现新版本自动提取参数写入 images.yaml
+#   1. 扫描 SGLang 所有 git tag,发现新版本自动提取参数写入 catalogs/sglang-images.yaml
 #      已有版本检查参数是否有变化,有变化就更新
 #   2. 扫描 SGLang cookbook 发现新模型,自动从 HuggingFace 拉 config.json
 #      提取架构信息写入 models.yaml(标 [AUTO] 待人工补全)
@@ -53,14 +53,14 @@ python3 scripts/sync_hf_models.py --sglang-repo "$SGLANG_REPO" 2>&1 || echo "  [
 echo ""
 echo "Checking for changes..."
 CHANGED_FILES=""
-git diff --quiet .claude/skills/sglang-server-config-gen/images.yaml 2>/dev/null || CHANGED_FILES="$CHANGED_FILES images.yaml"
+git diff --quiet catalogs/sglang-images.yaml 2>/dev/null || CHANGED_FILES="$CHANGED_FILES sglang-images.yaml"
 git diff --quiet catalogs/models.yaml 2>/dev/null || CHANGED_FILES="$CHANGED_FILES models.yaml"
 
 if [ -z "$CHANGED_FILES" ]; then
   echo "No changes detected."
 else
   echo "*** Changes detected! ***"
-  git diff --stat .claude/skills/sglang-server-config-gen/images.yaml catalogs/models.yaml
+  git diff --stat catalogs/sglang-images.yaml catalogs/models.yaml
   echo ""
   echo "To push: git add -A && git commit -m 'Daily sync: update catalogs' && git push"
 fi

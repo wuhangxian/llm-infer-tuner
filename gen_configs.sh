@@ -9,6 +9,13 @@
 # 第二步由 targets.json 填入。故 configs.jsonl 机器无关,可跨机搬运。
 set -euo pipefail
 
+# Load .env for claude API credentials
+if [ -f .env ]; then
+  set -a
+  . ./.env
+  set +a
+fi
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 第 1 步:前置检查
 # ─────────────────────────────────────────────────────────────────────────
@@ -64,7 +71,7 @@ mkdir -p "$(dirname "$OUT")"
 #   ① SKILL.md     — 流程入口:该读什么、推导步骤、输出契约
 #   ② knowledge.md — 全部调优经验(§0-§9)
 #   ③ catalogs/    — gpu.yaml + models.yaml + workloads.yaml(按 job 里的 ID 查表)
-#   ④ images.yaml  — 镜像信息(CUDA 版本、支持的 attention 后端)
+#   ④ catalogs/sglang-images.yaml  — 镜像信息(CUDA 版本、支持的 attention 后端)
 #
 # --model-path 在这里写死为 ${MODEL_PATH} 占位符,不绑定任何机器路径,
 # 第二步由 targets.json 填入实际路径。
@@ -86,7 +93,7 @@ ${JOB_JSON}
 
 ## 执行方式
 
-请按 \`${SKILL_DIR}/SKILL.md\` 的流程执行:读 knowledge.md + catalogs/*.yaml + images.yaml,
+请按 \`${SKILL_DIR}/SKILL.md\` 的流程执行:读 knowledge.md + catalogs/*.yaml(含 sglang-images.yaml),
 按其中的约束和推导步骤生成候选配置。所有调优判据、硬约束、输出格式
 都在 SKILL.md 和 knowledge.md 里,这里不重复。
 
@@ -103,7 +110,7 @@ EOF
 # ─────────────────────────────────────────────────────────────────────────
 # 用 claude -p "$PROMPT" 非交互模式调用 AI。关键参数:
 #   --add-dir .           让 claude 能读项目根下的 catalogs/ 等
-#   --add-dir $SKILL_DIR  让 claude 能读 SKILL.md/knowledge.md/images.yaml
+#   --add-dir $SKILL_DIR  让 claude 能读 SKILL.md/knowledge.md
 #   --json-schema         约束 claude 返回 {candidates:[...]} 结构
 #   --output-format json  让 claude 输出 JSON(而非纯文本)
 # AI 读知识库 → 查表(gpu/model/workload/image)→ 推导 TP/attention/mem-fraction
@@ -144,16 +151,17 @@ echo "$RAW" | jq -e '
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 第 6 步:预览输出
 # ─────────────────────────────────────────────────────────────────────────
-# 用 wc -l 数生成了多少条候选,再用 jq 从每行里取 id/tp/attention/
+# 用 wc -l 数生成了多少条候选,再用 jq 从每行里取 id/tp/ep/attention/
 # mem-fraction 拼成一行预览打印到 stderr,让用户一眼看到结果概貌,
 # 不用手动 cat 文件。
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 N="$(wc -l < "$OUT" | tr -d ' ')"
 echo "✅ 已生成 $N 条候选 → $OUT" >&2
-echo "── 预览(id / tp / att / mf / mamba / page / spec / chunk / kv / sched)──" >&2
+echo "── 预览(id / tp / ep / att / mf / mamba / page / spec / chunk / kv / sched)──" >&2
 jq -r '
   "  " + .id +
   "  tp=" + (.params.tp_size|tostring) +
+  "  ep=" + (.params.ep_size // 1 | tostring) +
   "  " + (.params.attention_backend // "-(default)") +
   "  mf=" + (.params.mem_fraction_static|tostring) +
   "  mamba=" + (.params.mamba_radix_cache_strategy // .params.mamba_scheduler_strategy // .params["mamba-radix-cache-strategy"] // "no_buffer(default)") +
