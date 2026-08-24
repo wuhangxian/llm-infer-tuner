@@ -76,10 +76,17 @@ def clone_or_update(tag: str, repo_dir: Path) -> Path:
 
 
 def extract_valid_flags(server_args_path: Path) -> list[str]:
-    """Extract all --flag names from add_argument calls via AST."""
+    """Extract all valid flag names from server_args.py.
+
+    Handles two syntaxes across SGLang versions:
+    1. Legacy:  parser.add_argument("--flag-name", ...)
+    2. Modern:  flag_name: A[Optional[str], Arg(...)]  (AnnAssign + A[] subscript)
+    """
     source = server_args_path.read_text(encoding="utf-8")
     tree = ast.parse(source)
     flags: list[str] = []
+
+    # 1) Legacy: add_argument("--flag-name", ...)
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             func = node.func
@@ -89,6 +96,16 @@ def extract_valid_flags(server_args_path: Path) -> list[str]:
                     if isinstance(arg_name, str) and arg_name.startswith("--"):
                         flag = arg_name.lstrip("-").replace("-", "_")
                         flags.append(flag)
+
+    # 2) Modern: flag_name: A[Optional[str], Arg(...)]
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AnnAssign):
+            ann = node.annotation
+            if isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id == "A":
+                target_id = getattr(node.target, "id", "")
+                if target_id and not target_id.startswith("_"):
+                    flags.append(target_id)
+
     seen: set[str] = set()
     unique: list[str] = []
     for f in flags:

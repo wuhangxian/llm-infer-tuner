@@ -1,149 +1,120 @@
-# ============ 模型目录(引擎无关的模型内在属性)============
-#
-# key = JobSpec.model。一个模型一条,记「模型的内在属性」:架构、权重大小、
-# 是否 MoE、专属 parser 名、KV/token 粗估。引擎中性:换 vllm 也用同一份架构事实。
-#
-# 加新模型 = 在这里加一条,不改任何代码。谁加模型谁补。
-#
-# 关键字段:
-#   arch                 架构类型。含 "moe" 或有 num_experts → 生成 ep 轴;dense 不生成。
-#   hybrid_mamba         混合 GDN/Mamba 架构 → 触发混合架构缓存策略搜索(见 knowledge.md C 阶段)。
-#   weight_gb            各精度权重大小 GB —— 决定 TP 准入(单卡 weight/tp ≤ memory_gb)。
-#   num_experts          MoE 专家数 —— ep 硬约束 num_experts % ep == 0(见 knowledge.md EP 派生)。
-#   kv_gb_per_token      单卡每 token KV 粗估 GB —— 仅候选排序/展示,不删 TP。真值以启动日志为准。
-#   default_flags        模型专属 flag(parser 名等),AI 别自己编,cookbook 里是什么就是什么。
-
 version: 1
-updated: 2026-08-12
-
+total: 3
 models:
-
   qwen36-27b-fp8:
     hf_model_id: Qwen/Qwen3.6-27B-FP8
     family: qwen3.6
     parameter_count_b: 27
-    arch: moe_hybrid_gdn            # MoE 组件 + GDN 混合架构;有 moe_intermediate_size → 块量化 TP 约束生效
-    hybrid_mamba: true               # Gated DeltaNet + Gated Attention 混合 → 触发缓存策略搜索
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: fp8
-    weight_gb: {fp8: 27, bf16: 54, nvfp4: 22}
-    # 单卡权重放得下即准入(fp8=27G < 72G,故 TP1/2/4 权重放得下)。⚠️ 块量化约束:moe_int=512/block=128 → tp_max=4,TP8 会崩(启动报错确认)。
-    # weight_gb source: cookbook Qwen3.6 "27B FP8: ~27GB for weights"
-
+    weight_gb:
+      fp8: 27
+      bf16: 54
+      nvfp4: 22
     modalities:
-      input: [text, image]
-      output: [text]
-
-    quantization:                    # 该 job 用的量化(必须核 image 的 quantization_support)
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
       method: fp8
       scheme: fine-grained
       block_size: 128
       weight_dtype: fp8
       activation_dtype: bf16
-    nvfp4_requires_sm: 10            # cookbook: NVFP4 仅 B200/B300(SM100+);SM120 写 nvfp4 会被拦
-
+    nvfp4_requires_sm: 10
     architecture:
       num_hidden_layers: 64
       hidden_size: 5120
       vocab_size: 248320
-      is_moe: true                 # ⚠️ 实测启动报错确认:有 MoE 组件(moe_intermediate_size=512)
+      is_moe: true
       intermediate_size: 17408
-      moe_intermediate_size: 512    # source: SGLang 启动报错 "moe_intermediate_size=512";block_size=128 → tp_max=4,TP8 会崩
+      moe_intermediate_size: 512
       attention:
         type: hybrid
-        gated_attention: {num_query_heads: 24, num_key_value_heads: 4, head_dim: 256, rope_dim: 64}
-        gated_deltanet: {num_value_heads: 48, num_query_key_heads: 16, head_dim: 128}
-
-    # KV/token 粗估:混合 GDN 大部分层是线性注意力无标准 KV,按注意力层占比折算稠密默认 ≈ 0.00003。
-    # ⚠️ reference 估算,仅排序/展示,不删 TP;真值以启动日志 max_total_num_tokens 为准。
-    kv_gb_per_token: 0.00003
+        gated_attention:
+          num_query_heads: 24
+          num_key_value_heads: 4
+          head_dim: 256
+          rope_dim: 64
+        gated_deltanet:
+          num_value_heads: 48
+          num_query_key_heads: 16
+          head_dim: 128
+    kv_gb_per_token: 3.0e-05
     kv_gb_per_token_source: reference
-
-    context:                         # ⚠️ 仅供参考/查证回落值,绝不写进 --context-length(见 knowledge.md 红线)
-      native_context_length: 262144  # 不写 --context-length 时回落到这个值(不是 max 1M)
+    context:
+      native_context_length: 262144
       maximum_context_length: 1010000
       recommended_initial_context_length: 131072
-
     capabilities:
       supports_reasoning: true
       supports_chat_template: true
       supports_tool_call: true
       supports_mtp: true
-
-    # 模型专属 flag —— cookbook 原文照抄,AI 别自己编 parser 名。
     default_flags:
       reasoning-parser: qwen3
       tool-call-parser: qwen3_coder
       trust-remote-code: true
-    # 投机解码(MTP)参数 —— cookbook 原文;放最后阶段搜,先跑通非投机基线。
     mtp_params:
       speculative-algorithm: EAGLE
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
-
     deployment:
       model_format: huggingface
-      weight_size_gb: null           # 上机 du -sh 权重目录后回填
-      model_path: null               # 第二阶段 haihub 下载后回填实际路径
-
+      weight_size_gb: null
+      model_path: null
     source: https://huggingface.co/Qwen/Qwen3.6-27B-FP8
-    notes: >
-      Qwen3.6 采用 Gated DeltaNet 与 Gated Attention 混合结构。官方 cookbook 建议
-      context-length 至少保 128K 以维持 thinking 能力 —— 但本工具压测复刻生产、绝不写
-      --context-length,回落 native 262144 已 > 128K,自然满足。
+    notes: 'Qwen3.6 采用 Gated DeltaNet 与 Gated Attention 混合结构。官方 cookbook 建议 context-length
+      至少保 128K 以维持 thinking 能力 —— 但本工具压测复刻生产、绝不写 --context-length,回落 native 262144
+      已 > 128K,自然满足。
 
+      '
+    last_updated: '2026-08-25'
   qwen36-35b-a3b-fp8:
     hf_model_id: Qwen/Qwen3.6-35B-A3B-FP8
-    aliases: [qwen3.6-35b, qwen3.6-35b-a3b, qwen36-35b]
+    aliases:
+    - qwen3.6-35b
+    - qwen3.6-35b-a3b
+    - qwen36-35b
     family: qwen3.6
     parameter_count_b: 35
-    arch: moe_hybrid_gdn             # ⚠️ MoE(有 num_experts)→ 生成 ep 轴
-    hybrid_mamba: true               # Gated DeltaNet + Gated Attention 混合 → 触发缓存策略搜索
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: fp8
-    quantization:                    # block_size 供 TP 整除性硬约束(见 knowledge.md §2 TP 推导)
+    quantization:
       method: fp8
-      scheme: fine-grained           # 块量化(block-wise),非 per-tensor → 切分必须落在整块边界
-      block_size: 128                # source: official config.json(weight_block_size=[128,128])
+      scheme: fine-grained
+      block_size: 128
       weight_dtype: fp8
       activation_dtype: bf16
-    weight_gb: {fp8: 35, bf16: 70, nvfp4: 23}
-    # 单卡权重放得下即准入(fp8=35G < 72G,故 TP1/2/4/8 权重全放得下)。KV 交压测/SLA 兜底。
-
-    # MoE 事实(source: official)—— 已核对 Qwen/Qwen3.6-35B-A3B-FP8 的 config.json:
-    #   architectures=["Qwen3_5MoeForConditionalGeneration"], model_type="qwen3_5_moe",
-    #   text_config.num_experts=256, text_config.num_experts_per_tok=8。
-    # num_experts 供 ep-size 轴硬约束(num_experts % ep == 0,见 knowledge.md §2 EP 派生)。
-    # 256=2^8,故任意 2 的幂 ep(≤tp)都整除,ep 候选只受 tp 整除性限制。
+    weight_gb:
+      fp8: 35
+      bf16: 70
+      nvfp4: 23
     num_experts: 256
     num_experts_per_tok: 8
-    num_experts_source: official     # HF config.json(text_config)已核对
-    nvfp4_requires_sm: 10            # cookbook: NVFP4 仅 B200/B300(SM100+);SM120 写 nvfp4 会被拦
-
+    num_experts_source: official
+    nvfp4_requires_sm: 10
     architecture:
       is_moe: true
       num_experts: 256
       num_experts_per_tok: 8
-      moe_intermediate_size: 512      # source: official config.json(每专家 FFN 中间维度)
-      # ⚠️ 512 只够切 4 个 128 块 → 块量化下 TP 上限 = 512/128 = 4,TP8 会崩(见 knowledge.md §2)
-
-    # KV/token 粗估:moe_hybrid_gdn 大部分层是 GDN 线性注意力无标准 KV,只有少数全注意力层
-    # 贡献 KV,按注意力层占比 ≈ 1/4 对稠密默认 0.00012 折算 ≈ 0.00003(fp8 KV 可再腰斩,此处取上界)。
-    # ⚠️ reference 估算,仅排序/展示,不删 TP;真值以启动日志 max_total_num_tokens 为准。
-    kv_gb_per_token: 0.00003
+      moe_intermediate_size: 512
+    kv_gb_per_token: 3.0e-05
     kv_gb_per_token_source: reference
-
-    context:                         # ⚠️ 仅供参考/查证回落值,绝不写进 --context-length(见 knowledge.md 红线)
+    context:
       native_context_length: 262144
       maximum_context_length: 1010000
       recommended_initial_context_length: 131072
-
     capabilities:
       supports_reasoning: true
       supports_chat_template: true
       supports_tool_call: true
       supports_mtp: true
-
-    # 模型专属 flag —— cookbook 原文照抄,AI 别自己编 parser 名。
     default_flags:
       reasoning-parser: qwen3
       tool-call-parser: qwen3_coder
@@ -153,90 +124,77 @@ models:
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
-
     deployment:
       model_format: huggingface
-      weight_size_gb: 35            # source: cookbook Qwen3.6 "35B-A3B FP8: ~35GB for weights"
-      model_path: null               # 第二阶段 haihub 下载后回填实际路径
-
+      weight_size_gb: 35
+      model_path: null
     source: https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8
-    notes: >
-      Qwen3.6-35B-A3B 是 MoE(256 专家/token 激活 8)+ Gated DeltaNet 混合架构。
-      是本知识库里 EP 轴的唯一样例:dense 的 qwen36-27b 不生成 ep,只有本卡会走 EP 派生。
+    notes: 'Qwen3.6-35B-A3B 是 MoE(256 专家/token 激活 8)+ Gated DeltaNet 混合架构。 是本知识库里
+      EP 轴的唯一样例:dense 的 qwen36-27b 不生成 ep,只有本卡会走 EP 派生。
 
+      '
+    last_updated: '2026-08-25'
   deepseek-v4-flash-0731-fp8:
     hf_model_id: DeepSeek/DeepSeek-V4-Flash-0731
-    aliases: [deepseek-v4-flash, dsv4-flash, deepseek-v4-flash-0731]
+    aliases:
+    - deepseek-v4-flash
+    - dsv4-flash
+    - deepseek-v4-flash-0731
     family: deepseek-v4
-    parameter_count_b: 230          # MoE 总参数(256 专家 + 1 共享专家 + attention)
-    arch: moe                        # MoE(n_routed_experts=256)→ 生成 ep 轴
-    hybrid_mamba: false             # 标准 Transformer,非 GDN 混合
+    parameter_count_b: 230
+    arch: moe
+    hybrid_mamba: false
     default_precision: fp8
     quantization:
       method: fp8
-      scheme: fine-grained           # 块量化(block-wise),block_size=128
-      block_size: 128                # source: config.json weight_block_size=[128,128]
+      scheme: fine-grained
+      block_size: 128
       weight_dtype: fp8
       activation_dtype: bf16
-      expert_dtype: fp4              # 专家权重用 FP4(原生,非 nvfp4 量化)
-    weight_gb: {fp8: 156, bf16: 312}  # source: 上机 du -sh 实测 156G
-    # TP 准入:TP1=156G>72G ✗, TP2=78G>72G ✗, TP4=39G<72G ✓, TP8=19.5G<72G ✓
-    # 块量化整除:moe_intermediate_size=2048, block_size=128 → tp_max=16,TP4/8 均整除 ✓
-
-    num_experts: 256                 # source: config.json n_routed_experts=256
-    num_experts_per_tok: 6           # source: config.json num_experts_per_tok=6
-    num_experts_source: official     # HF config.json 已核对
-    nvfp4_requires_sm: 10            # 专家已原生 fp4,无需额外 nvfp4 gate
-
+      expert_dtype: fp4
+    weight_gb:
+      fp8: 156
+      bf16: 312
+    num_experts: 256
+    num_experts_per_tok: 6
+    num_experts_source: official
+    nvfp4_requires_sm: 10
     architecture:
       is_moe: true
       num_experts: 256
       num_experts_per_tok: 6
-      moe_intermediate_size: 2048    # source: config.json
+      moe_intermediate_size: 2048
       num_hidden_layers: 43
       hidden_size: 4096
       vocab_size: 129280
       num_attention_heads: 64
-      num_key_value_heads: 1         # MLA 结构(q_lora_rank=1024, head_dim=512)
+      num_key_value_heads: 1
       head_dim: 512
-
-    kv_gb_per_token: 0.00012         # 稠密标准估算(MLA 实际 KV 更小,此处取上界)
+    kv_gb_per_token: 0.00012
     kv_gb_per_token_source: reference
-
     context:
-      native_context_length: 1048576 # config.json max_position_embeddings
+      native_context_length: 1048576
       maximum_context_length: 1048576
       recommended_initial_context_length: 131072
-
     capabilities:
       supports_reasoning: true
       supports_chat_template: true
       supports_tool_call: true
-      supports_mtp: true             # source: cookbook DeepSeek-V4 DSpark;config.json 有 dspark/n_mtp_layers 参数
-
+      supports_mtp: true
     default_flags:
-      reasoning-parser: deepseek-v4  # source: cookbook DeepSeek-V4 "enable the deepseek-v4 reasoning parser"
-      tool-call-parser: deepseekv4   # source: cookbook DeepSeek-V4 "enable the deepseekv4 tool-call parser"
-      trust-remote-code: true        # 自定义 tokenizer(encoding_dsv4.py)
-    # 投机解码(DSpark)参数 — cookbook DeepSeek-V4 Flash Official (0731) 原文
-    # DSpark 权重打包在主 checkpoint 里,不需单独 --speculative-draft-model-path
-    # 不设 num-steps/eagle-topk/num-draft-tokens,SGLang 从 checkpoint 读取
+      reasoning-parser: deepseek-v4
+      tool-call-parser: deepseekv4
+      trust-remote-code: true
     mtp_params:
-      speculative-algorithm: DSPARK  # source: cookbook "enable DSpark with --speculative-algorithm DSPARK"
-
+      speculative-algorithm: DSPARK
     deployment:
       model_format: huggingface
-      weight_size_gb: 156            # 上机 du -sh 实测
+      weight_size_gb: 156
       model_path: /data/autotune/models/DeepSeek-V4-Flash-0731/DeepSeek-V4-Flash-0731
-
     source: https://huggingface.co/DeepSeek/DeepSeek-V4-Flash-0731
-    notes: >
-      DeepSeek-V4-Flash 是 MoE(256 专家/token 激活 6)+ MLA 注意力架构。
-      权重 156G(fp8 + fp4 专家),TP2 放不下(78G>72G),最小 TP=4。
-      自定义 tokenizer 需 trust-remote-code。⚠️ SGLang v0.5.16 可能不支持
-      DeepseekV4ForCausalLM 架构,若启动失败需升级 sglang 镜像。
+    notes: 'DeepSeek-V4-Flash 是 MoE(256 专家/token 激活 6)+ MLA 注意力架构。 权重 156G(fp8 + fp4
+      专家),TP2 放不下(78G>72G),最小 TP=4。 自定义 tokenizer 需 trust-remote-code。⚠️ SGLang v0.5.16
+      可能不支持 DeepseekV4ForCausalLM 架构,若启动失败需升级 sglang 镜像。
 
-# ---- 缺模型时怎么补(权威来源)----
-# arch/is_moe/num_experts: 权重目录或 HF 的 config.json(有 num_experts 即 MoE)
-# weight_gb:               du -sh 权重目录 / SGLang cookbook 模型页 Hardware requirements 表
-# parser 名/投机参数:      SGLang cookbook 对应模型页启动命令,原文照抄,别自己编
+      '
+    last_updated: '2026-08-25'
