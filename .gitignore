@@ -11,3 +11,5 @@ outputs/
 .env
 *.env
 claude-raw-outputs/
+reports/
+logs/
