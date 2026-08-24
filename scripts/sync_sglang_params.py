@@ -1,16 +1,17 @@
 """Sync SGLang server parameters from source code into images.yaml.
 
-This script clones (or updates) the SGLang repo at a given tag, parses
-server_args.py with AST to extract:
-  - All CLI argument names -> valid_flags
-  - attention_backend choices -> attention_backends menu
-  - __post_init__ assert/raise -> constraints report
+Automatically scans all SGLang git tags, discovers new versions not yet in
+images.yaml, and updates existing entries when parameters change.
 
-Then compares with the current images.yaml and updates if changed.
+For each tag:
+  - Clones (or updates) the SGLang repo at that tag
+  - Parses server_args.py with AST to extract valid_flags + attention_backends
+  - Extracts assert/raise constraints for a human-review report
+  - Updates images.yaml if changed, or creates a new entry for new versions
 
 Usage:
-  python scripts/sync_sglang_params.py [--tag v0.5.16] [--repo-dir /tmp/sglang]
-  python scripts/sync_sglang_params.py --tag v0.5.17  # new release
+  python scripts/sync_sglang_params.py
+  python scripts/sync_sglang_params.py --tags v0.5.10 v0.5.16  # specific tags only
 
 No AI needed. Pure deterministic AST extraction.
 """
@@ -23,12 +24,10 @@ import json
 import re
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
 import yaml
-
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 IMAGES_YAML = PROJECT_ROOT / ".claude/skills/sglang-server-config-gen/images.yaml"
@@ -36,19 +35,42 @@ SGLANG_REPO = "https://github.com/sgl-project/sglang.git"
 SERVER_ARGS_REL = "python/sglang/srt/server_args.py"
 
 
+def list_all_tags() -> list[str]:
+    """List all SGLang git tags (v0.5.x release tags only)."""
+    result = subprocess.run(
+        ["git", "ls-remote", "--tags", SGLANG_REPO],
+        capture_output=True, text=True, check=True, timeout=60,
+    )
+    tags: list[str] = []
+    for line in result.stdout.splitlines():
+        # Format: <sha>	refs/tags/v0.5.10
+        if "refs/tags/" in line:
+            tag = line.split("refs/tags/")[-1].strip()
+            # Only keep release tags like v0.5.x (skip gateway-*, nightly, etc.)
+            if re.match(r"^v\d+\.\d+\.\d+$", tag):
+                tags.append(tag)
+    return sorted(tags, key=lambda t: [int(x) for x in t.lstrip("v").split(".")])
+
+
+def get_existing_image_keys() -> list[str]:
+    """Get image keys already in images.yaml."""
+    with open(IMAGES_YAML, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return list(data.get("images", {}).keys())
+
+
 def clone_or_update(tag: str, repo_dir: Path) -> Path:
-    """Clone SGLang repo at a specific tag, or update if already cloned."""
+    """Clone SGLang repo at a specific tag."""
     server_args = repo_dir / SERVER_ARGS_REL
     if server_args.exists():
-        # Already cloned, just checkout the tag
         subprocess.run(["git", "fetch", "--tags", "--depth=1", "origin"],
-                       cwd=repo_dir, check=True, capture_output=True)
+                       cwd=repo_dir, check=True, capture_output=True, timeout=60)
         subprocess.run(["git", "checkout", tag], cwd=repo_dir, check=True, capture_output=True)
     else:
         repo_dir.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "clone", "--depth=1", "--branch", tag,
                         SGLANG_REPO, str(repo_dir)],
-                       check=True, capture_output=True)
+                       check=True, capture_output=True, timeout=120)
     return server_args
 
 
@@ -60,14 +82,12 @@ def extract_valid_flags(server_args_path: Path) -> list[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             func = node.func
-            # Look for .add_argument("--foo", ...) calls
-            if (isinstance(func, ast.Attribute) and func.attr == "add_argument"):
+            if isinstance(func, ast.Attribute) and func.attr == "add_argument":
                 if node.args and isinstance(node.args[0], ast.Constant):
                     arg_name = node.args[0].value
                     if isinstance(arg_name, str) and arg_name.startswith("--"):
                         flag = arg_name.lstrip("-").replace("-", "_")
                         flags.append(flag)
-    # Deduplicate while preserving order
     seen: set[str] = set()
     unique: list[str] = []
     for f in flags:
@@ -80,20 +100,17 @@ def extract_valid_flags(server_args_path: Path) -> list[str]:
 def extract_attention_backends(server_args_path: Path) -> list[str]:
     """Extract attention_backend choices from the add_argument call."""
     source = server_args_path.read_text(encoding="utf-8")
-    # Find the attention_backend add_argument with choices
-    # Pattern: add_argument("--attention-backend", ..., choices=[...])
     pattern = r'add_argument\(\s*["\']--attention-backend["\'].*?choices=\[([^\]]+)\]'
     match = re.search(pattern, source, re.DOTALL)
     if not match:
         return []
     raw = match.group(1)
-    # Extract quoted strings
     backends = re.findall(r'["\']([^"\']+)["\']', raw)
     return sorted(backends)
 
 
 def extract_constraints(server_args_path: Path) -> list[dict[str, str]]:
-    """Extract assert/raise statements from __post_init__ for constraint report."""
+    """Extract assert/raise statements for constraint report."""
     source = server_args_path.read_text(encoding="utf-8")
     tree = ast.parse(source)
     constraints: list[dict[str, str]] = []
@@ -104,66 +121,22 @@ def extract_constraints(server_args_path: Path) -> list[dict[str, str]]:
                 constraints.append({"type": "assert", "text": text.strip()})
         elif isinstance(node, ast.Raise):
             text = ast.get_source_segment(source, node)
-            if text and len(text) < 500:
-                # Only keep raises with ValueError/AssertionError messages
-                if "ValueError" in text or "AssertionError" in text or "raise" in text:
-                    constraints.append({"type": "raise", "text": text.strip()})
+            if text and len(text) < 500 and ("ValueError" in text or "AssertionError" in text):
+                constraints.append({"type": "raise", "text": text.strip()})
     return constraints
 
 
 def load_images_yaml() -> dict[str, Any]:
-    """Load current images.yaml."""
     with open(IMAGES_YAML, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
-def update_image_entry(data: dict, image_key: str, valid_flags: list[str],
-                        attention_backends: list[str]) -> bool:
-    """Update a specific image entry in images.yaml. Returns True if changed."""
-    images = data.get("images", {})
-    if image_key not in images:
-        print(f"  [skip] {image_key} not in images.yaml")
-        return False
-    entry = images[image_key]
-    changed = False
-
-    # Update valid_flags
-    current_flags = set(entry.get("valid_flags", []))
-    new_flags = set(valid_flags)
-    if current_flags != new_flags:
-        added = new_flags - current_flags
-        removed = current_flags - new_flags
-        if added:
-            print(f"  [flags] +{len(added)} new: {sorted(added)[:10]}...")
-        if removed:
-            print(f"  [flags] -{len(removed)} removed: {sorted(removed)[:10]}...")
-        entry["valid_flags"] = sorted(new_flags)
-        changed = True
-
-    # Update attention_backends
-    current_backends = set(entry.get("attention_backends", []))
-    new_backends = set(attention_backends)
-    if current_backends != new_backends:
-        added = new_backends - current_backends
-        removed = current_backends - new_backends
-        if added:
-            print(f"  [backends] +{sorted(added)}")
-        if removed:
-            print(f"  [backends] -{sorted(removed)}")
-        entry["attention_backends"] = sorted(new_backends)
-        changed = True
-
-    return changed
-
-
 def save_images_yaml(data: dict) -> None:
-    """Save updated images.yaml."""
     with open(IMAGES_YAML, "w", encoding="utf-8") as f:
         yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
 
 def save_constraints_report(constraints: list[dict], tag: str) -> None:
-    """Save constraints report for human review."""
     reports_dir = PROJECT_ROOT / "reports"
     reports_dir.mkdir(exist_ok=True)
     report_path = reports_dir / f"constraints_{tag}.md"
@@ -171,62 +144,142 @@ def save_constraints_report(constraints: list[dict], tag: str) -> None:
              f"Auto-extracted from server_args.py ({len(constraints)} assert/raise)\n",
              "Review and update knowledge.md section 5 if new constraints found.\n\n"]
     for i, c in enumerate(constraints, 1):
-        lines.append(f"## {i}. [{c['type']}]\n```
-{c['text']}
-```\n")
+        lines.append("## " + str(i) + ". [" + c["type"] + "]\n```\n" + c["text"] + "\n```\n")
     report_path.write_text("\n".join(lines), encoding="utf-8")
-    print(f"  [report] {report_path}")
+
+
+def process_tag(tag: str, repo_dir: Path, data: dict) -> bool:
+    """Process a single tag. Returns True if images.yaml was changed."""
+    image_key = f"sglang-{tag.lstrip('v')}"
+    is_new = image_key not in data.get("images", {})
+
+    if is_new:
+        print(f"  [NEW] {image_key} — cloning and extracting...")
+    else:
+        print(f"  [EXISTING] {image_key} — checking for changes...")
+
+    try:
+        server_args_path = clone_or_update(tag, repo_dir)
+    except subprocess.CalledProcessError as exc:
+        print(f"  [error] clone failed: {exc}")
+        return False
+
+    valid_flags = extract_valid_flags(server_args_path)
+    attention_backends = extract_attention_backends(server_args_path)
+    constraints = extract_constraints(server_args_path)
+
+    print(f"    valid_flags: {len(valid_flags)}")
+    print(f"    attention_backends: {len(attention_backends)} -> {attention_backends}")
+    print(f"    constraints: {len(constraints)}")
+
+    save_constraints_report(constraints, tag)
+
+    images = data.setdefault("images", {})
+    changed = False
+
+    if is_new:
+        # Create new entry with defaults
+        images[image_key] = {
+            "image_ref": f"lmsysorg/sglang:{tag}",
+            "sglang_version": tag.lstrip("v"),
+            "cuda_version": None,  # needs manual fill or Dockerfile inspection
+            "digest": None,
+            "attention_backends": attention_backends,
+            "startup_floor": {
+                "verified": None,
+                "source": None,
+            },
+            "flag_aliases": {},
+            "valid_flags": valid_flags,
+            "_auto_generated": True,  # mark for manual review
+        }
+        print(f"  -> Created new entry {image_key}")
+        print(f"  -> [TODO] Fill cuda_version, digest, startup_floor manually")
+        changed = True
+    else:
+        entry = images[image_key]
+        current_flags = set(entry.get("valid_flags", []))
+        new_flags = set(valid_flags)
+        if current_flags != new_flags:
+            added = new_flags - current_flags
+            removed = current_flags - new_flags
+            if added:
+                print(f"  [flags] +{len(added)} new: {sorted(added)[:10]}")
+            if removed:
+                print(f"  [flags] -{len(removed)} removed: {sorted(removed)[:10]}")
+            entry["valid_flags"] = sorted(new_flags)
+            changed = True
+
+        current_backends = set(entry.get("attention_backends", []))
+        new_backends = set(attention_backends)
+        if current_backends != new_backends:
+            added = new_backends - current_backends
+            removed = current_backends - new_backends
+            if added:
+                print(f"  [backends] +{sorted(added)}")
+            if removed:
+                print(f"  [backends] -{sorted(removed)}")
+            entry["attention_backends"] = sorted(new_backends)
+            changed = True
+
+    return changed
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Sync SGLang params from source code")
-    parser.add_argument("--tag", default="v0.5.16", help="SGLang git tag")
+    parser.add_argument("--tags", nargs="*", default=[],
+                        help="Specific tags to check (default: auto-scan all)")
     parser.add_argument("--repo-dir", default="/tmp/sglang-sync",
                         help="Local dir for SGLang repo clone")
     args = parser.parse_args(argv)
 
-    tag = args.tag
-    image_key = f"sglang-{tag.lstrip('v')}"
-    print(f"=== Syncing SGLang {tag} -> images.yaml[{image_key}] ===")
+    print("=== SGLang Parameter Sync ===")
 
-    # Step 1: Clone/update repo
-    print(f"[1/4] Cloning SGLang {tag}...")
-    repo_dir = Path(args.repo_dir)
-    server_args_path = clone_or_update(tag, repo_dir)
-    print(f"  -> {server_args_path}")
-
-    # Step 2: Extract from source
-    print("[2/4] Extracting parameters via AST...")
-    valid_flags = extract_valid_flags(server_args_path)
-    attention_backends = extract_attention_backends(server_args_path)
-    constraints = extract_constraints(server_args_path)
-    print(f"  valid_flags: {len(valid_flags)}")
-    print(f"  attention_backends: {len(attention_backends)} -> {attention_backends}")
-    print(f"  constraints: {len(constraints)} assert/raise")
-
-    # Step 3: Compare and update images.yaml
-    print(f"[3/4] Updating {IMAGES_YAML.relative_to(PROJECT_ROOT)}...")
-    data = load_images_yaml()
-    changed = update_image_entry(data, image_key, valid_flags, attention_backends)
-    if changed:
-        save_images_yaml(data)
-        print("  -> images.yaml updated")
+    # Step 1: Determine which tags to process
+    if args.tags:
+        tags = args.tags
+        print(f"[1/3] Using specified tags: {tags}")
     else:
-        print("  -> no changes needed")
+        print("[1/3] Scanning all SGLang tags...")
+        all_tags = list_all_tags()
+        # Filter: only tags from 2026-05-01 onwards (v0.5.13+)
+        tags = [t for t in all_tags if t >= "v0.5.13"]
+        print(f"  Found {len(all_tags)} total tags, {len(tags)} since 2026-05-01: {tags}")
 
-    # Step 4: Save constraints report
-    print("[4/4] Saving constraints report...")
-    save_constraints_report(constraints, tag)
+    existing_keys = get_existing_image_keys()
+    new_tags = [t for t in tags if f"sglang-{t.lstrip('v')}" not in existing_keys]
+    existing_tags = [t for t in tags if f"sglang-{t.lstrip('v')}" in existing_keys]
+    print(f"  New versions to add: {new_tags or 'none'}")
+    print(f"  Existing versions to check: {existing_tags}")
+
+    # Step 2: Load images.yaml
+    print("[2/3] Loading images.yaml...")
+    data = load_images_yaml()
+
+    # Step 3: Process each tag
+    print("[3/3] Processing tags...")
+    any_changed = False
+    for tag in tags:
+        print(f"\n  --- {tag} ---")
+        changed = process_tag(tag, Path(args.repo_dir), data)
+        if changed:
+            any_changed = True
+
+    if any_changed:
+        save_images_yaml(data)
+        print(f"\n  -> images.yaml updated")
+    else:
+        print(f"\n  -> no changes needed")
 
     # Summary
     print("\n=== Summary ===")
-    print(f"  tag: {tag}")
-    print(f"  image_key: {image_key}")
-    print(f"  valid_flags: {len(valid_flags)}")
-    print(f"  attention_backends: {attention_backends}")
-    print(f"  constraints: {len(constraints)}")
-    print(f"  images_yaml_changed: {changed}")
-    print(f"  constraints_report: reports/constraints_{tag}.md")
+    print(f"  tags scanned: {len(tags)}")
+    print(f"  new entries: {len(new_tags)}")
+    print(f"  existing checked: {len(existing_tags)}")
+    print(f"  images_yaml_changed: {any_changed}")
+    if new_tags:
+        print(f"  [TODO] New entries need manual fill: cuda_version, digest, startup_floor")
+    print(f"  constraints reports: reports/constraints_*.md")
     return 0
 
 

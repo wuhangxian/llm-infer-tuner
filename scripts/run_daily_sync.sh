@@ -1,30 +1,29 @@
 #!/bin/bash
-# run_daily_sync.sh —— 每日同步 SGLang 参数和 HuggingFace 模型信息
+# run_daily_sync.sh —— 每日自动同步 SGLang 参数和 HuggingFace 模型信息
 #
-# 用法: ./scripts/run_daily_sync.sh
-#       或用 cron 每天自动跑:
-#         crontab -e
-#         0 9 * * * cd /data/home/dorianwu/aaawhx-study/llm-infer-tuner && ./scripts/run_daily_sync.sh >> logs/sync.log 2>&1
+# 用法:
+#   ./scripts/run_daily_sync.sh
+#
+# cron 每天自动跑:
+#   crontab -e
+#   0 9 * * * cd /path/to/llm-infer-tuner && ./scripts/run_daily_sync.sh >> logs/sync.log 2>&1
 #
 # 做两件事:
-#   1. 从 SGLang 源码提取参数 → 更新 images.yaml + 生成约束报告
-#   2. 从 HuggingFace API 拉模型 config.json → 对比 models.yaml + 生成差异报告
+#   1. 扫描 SGLang 所有 git tag,发现新版本自动提取参数写入 images.yaml
+#      已有版本检查参数是否有变化,有变化就更新
+#   2. 扫描 SGLang cookbook 发现新模型,自动从 HuggingFace 拉 config.json
+#      提取架构信息写入 models.yaml(标 [AUTO] 待人工补全)
+#      已有模型检查 config.json 是否有变化
 #
-# 有变化时:自动更新 yaml 文件 + 打印 diff 摘要,你手动 git push。
-# 没变化时:静默跳过。
+# 有变化时:自动更新 yaml 文件 + 打印 diff 摘要,你手动 git push
+# 没变化时:静默跳过
 set -euo pipefail
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 配置
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-# SGLang 版本列表(每次新增 tag 时在这里加一行)
-SGLANG_TAGS=("v0.5.10" "v0.5.13" "v0.5.16")
-
-# 额外关注的新模型(HF model ID,空格分隔)
-WATCH_MODELS=""
+# SGLang 本地仓库路径(用于 cookbook 扫描,不用每次 clone)
+SGLANG_REPO="${SGLANG_REPO:-/data/home/dorianwu/sglang-latest}"
 
 LOG_DIR="logs"
 mkdir -p "$LOG_DIR" reports
@@ -35,32 +34,29 @@ echo "Daily Sync: $TIMESTAMP"
 echo "========================================"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 1. 同步 SGLang 参数
+# 1. 同步 SGLang 参数(自动扫描所有 tag)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo ""
-echo "[1/2] Syncing SGLang parameters..."
-for tag in "${SGLANG_TAGS[@]}"; do
-  echo "  --- $tag ---"
-  python3 scripts/sync_sglang_params.py --tag "$tag" 2>&1 || echo "  [warn] $tag sync failed"
-done
+echo "[1/2] Syncing SGLang parameters (auto-scan all tags)..."
+python3 scripts/sync_sglang_params.py 2>&1 || echo "  [warn] sglang sync failed"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 2. 同步 HuggingFace 模型信息
+# 2. 同步 HuggingFace 模型信息(自动扫描 cookbook + 已有模型变更检测)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo ""
-echo "[2/2] Syncing HuggingFace models..."
-if [ -n "$WATCH_MODELS" ]; then
-  python3 scripts/sync_hf_models.py --watch $WATCH_MODELS 2>&1 || echo "  [warn] hf sync failed"
-else
-  python3 scripts/sync_hf_models.py 2>&1 || echo "  [warn] hf sync failed"
-fi
+echo "[2/2] Syncing HuggingFace models (auto-scan cookbook)..."
+python3 scripts/sync_hf_models.py --sglang-repo "$SGLANG_REPO" 2>&1 || echo "  [warn] hf sync failed"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 3. 检查是否有变化
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo ""
 echo "Checking for changes..."
-if git diff --quiet .claude/skills/sglang-server-config-gen/images.yaml catalogs/models.yaml 2>/dev/null; then
+CHANGED_FILES=""
+git diff --quiet .claude/skills/sglang-server-config-gen/images.yaml 2>/dev/null || CHANGED_FILES="$CHANGED_FILES images.yaml"
+git diff --quiet catalogs/models.yaml 2>/dev/null || CHANGED_FILES="$CHANGED_FILES models.yaml"
+
+if [ -z "$CHANGED_FILES" ]; then
   echo "No changes detected."
 else
   echo "*** Changes detected! ***"
@@ -71,3 +67,5 @@ fi
 
 echo ""
 echo "Done. Reports in reports/ directory."
+echo "  - reports/models_diff.md (新模型 + 已有模型差异)"
+echo "  - reports/constraints_*.md (每版 SGLang 的约束报告)"
