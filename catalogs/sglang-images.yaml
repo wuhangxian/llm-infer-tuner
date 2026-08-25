@@ -2,42 +2,6 @@
 # 字段:image_ref/cuda_version/attention_backends/flag_aliases/startup_floor/valid_flags。
 # valid_flags 由 scripts/sync_sglang_params.py 从源码 AST 自动提取。
 
-unverified_fallback:
-  policy: spread_all_backends
-  apply_startup_floor: false
-quantization_support:
-  validated_against: lmsysorg/sglang:v0.5.10 (sglang v0.5.10 tag 源码核实)
-  entries:
-  - format: fp8
-    granularity:
-    - per-tensor
-    - per-channel
-    - block
-    method:
-    - static
-    - dynamic
-    sm:
-    - 8
-    - 9
-    - 10
-    - 12
-    source: '读 v0.5.10 python/sglang/srt/layers/quantization/fp8.py: Fp8Config.ACTIVATION_SCHEMES=[static,dynamic](L113);
-      Fp8LinearMethod 支持 per-tensor/per-channel/block weight(L256-258); get_min_capability()=80(L175,非
-      mxfp8);configs/ 含 NVIDIA_H20 条目佐证 SM9 已验证。'
-  - format: fp8
-    granularity:
-    - per-tensor
-    - per-channel
-    - block
-    method:
-    - static
-    - dynamic
-    sm:
-    - 9
-    - 10
-    - 12
-    source: 读 v0.5.10 compressed_tensors_w8a8_fp8.py:55 get_min_capability()=89; QuantizationStrategy.TENSOR→PerTensorScaleParameter(L41);configs/
-      含 NVIDIA_H20。
 version: 1
 total: 3
 
