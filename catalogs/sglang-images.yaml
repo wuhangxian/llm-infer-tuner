@@ -60,7 +60,8 @@ quantization_support:
 version: 1
 total: 3
 images:
-  sglang-v0.5.10:
+  # ── I01: SGLang v0.5.10 (CUDA 12.9.1) ─────────────────
+  I01_sglang-v0.5.10:
     image_ref: lmsysorg/sglang:v0.5.10
     sglang_version: 0.5.10
     cuda_version: 12.9.1
@@ -575,7 +576,8 @@ images:
     - weight_loader_prefetch_num_threads
     - weight_version
     last_updated: '2026-08-25'
-  sglang-v0.5.13:
+  # ── I02: SGLang v0.5.13 (CUDA 13.0.1) ─────────────────
+  I02_sglang-v0.5.13:
     image_ref: lmsysorg/sglang:v0.5.13
     sglang_version: 0.5.13
     cuda_version: 13.0.1
@@ -1090,7 +1092,8 @@ images:
     - weight_loader_prefetch_num_threads
     - weight_version
     last_updated: '2026-08-25'
-  sglang-v0.5.16:
+  # ── I03: SGLang v0.5.16 (CUDA 13.0.1, TCR) ────────────
+  I03_sglang-v0.5.16:
     image_ref: hai-beijing.tencentcloudcr.com/ai/sglang:v0.5.16-cu129
     sglang_version: 0.5.16
     cuda_version: 13.0.1

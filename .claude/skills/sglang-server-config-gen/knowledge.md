@@ -84,7 +84,7 @@
   - 计算 `tp_max = floor(moe_intermediate_size / block_size)`(dense 用 `intermediate_size`)。
   - **只保留 `tp ∈ {2 的幂} 且 tp ≤ tp_max 且 moe_intermediate_size % (block_size × tp) == 0`** 的候选;其余 TP **直接不生成**(不是降优先级,是删)。
   - 连带:该 TP 下所有 `--attention-backend`、`--mem-fraction-static` 等组合**一并不生成**(它们再合法也起不来,是 TP 先崩)。避免像本次那样白跑 4 次启动(c001–c004 四条 tp=8 组合全崩在同一个错)。
-  - **实例**:qwen36-35b-a3b-fp8,`moe_intermediate_size=512`、`block_size=128` → `tp_max=4`。**合法 TP={1,2,4}**(每卡 512/256/128,整除);**排除 TP=8**(64<128)。故 8 卡机上此模型最多切 4 路,`gpu_count=8` **不等于** tp 可取 8。
+  - **实例**:M02_qwen36-35b-a3b-fp8,`moe_intermediate_size=512`、`block_size=128` → `tp_max=4`。**合法 TP={1,2,4}**(每卡 512/256/128,整除);**排除 TP=8**(64<128)。故 8 卡机上此模型最多切 4 路,`gpu_count=8` **不等于** tp 可取 8。
 
   **④ 卡片缺字段时的保守兜底**:`moe_intermediate_size`(或 `intermediate_size`)或 `quantization.block_size` 任一缺失 → **不得假设可切到 `tp=gpu_count`**;按已知能起的最小安全档(如 tp≤4)生成,并在候选 `reasons` 明确标注「未核对块量化整除性,TP 上限存疑,需上机核 config.json」。**宁可少生成,不生成注定崩的候选。**
 
@@ -99,7 +99,7 @@
   - `target_concurrency`:优先取 workload 的目标并发;没有时用 `target_concurrency_default = 16`。
   - `input_len`:取 workload 的输入长度(input+可忽略的 output)。
   - 用途:同样放得下权重的多个 TP,按 headroom 估算从大到小提示优先级(headroom 越大越抗高并发);**绝不因 headroom 小而删 TP**,删只走本节的权重门槛(单卡权重 ≤ 显存),降序只走下方长输入规则。真值仍以启动日志 `max_total_num_tokens` 为准。
-- 例:qwen36-27b-fp8(27G)在 72G 卡:TP1 权重 27✓ / TP2 13.5✓ / TP4 6.8✓ / TP8 3.4✓ → 可行 TP `[1,2,4,8]`,**默认全保留**。
+- 例:M01_qwen36-27b-fp8(27G)在 72G 卡:TP1 权重 27✓ / TP2 13.5✓ / TP4 6.8✓ / TP8 3.4✓ → 可行 TP `[1,2,4,8]`,**默认全保留**。
 - **排序提示(不删候选)**:
   - 输入超 32768 时把 TP1 排到末尾(`measured`:本地 Pro5000 Qwen3.5-27B 64k 输入下 TP1 吞吐从并发 1 到 32 完全平坦≈778 tok/s。但证据模型≠目标模型,外推不确定 → 只降序不删)。
   - 无 NVLink 的卡 TP 通信走 PCIe,开销高于 NVLink → 只影响排序,不排除任何 TP。
@@ -200,7 +200,7 @@
 
 最优候选数 = 基线 + 高影响独立值 + 交叉组合 + 中影响独立值 + 低影响独立值
 
-**示例**(qwen36-27b-fp8, SM120, hybrid_mamba=true, supports_mtp=true):
+**示例**(M01_qwen36-27b-fp8, SM120, hybrid_mamba=true, supports_mtp=true):
 - TP=[1,2,4]=3 (TP8 块量化约束砍掉)
 - 投机解码=[无,EAGLE]=2
 - attention=[flashinfer,triton]=2

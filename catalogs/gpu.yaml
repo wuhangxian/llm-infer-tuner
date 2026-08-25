@@ -35,13 +35,14 @@ updated: 2026-08-12
 gpu_catalog:
 
   # ========== Volta / Turing (SM7x) — 云端老推理卡 ==========
-  v100:
+  # ── Volta / Turing (SM7x) ──────────────────────────────────────
+  G01_v100:
     aliases: [tesla v100, v100-sxm2, v100-pcie, v100s]
     compute_cap: "7.0"    # Volta SM70
     sm_major: 7
     nvlink: true          # SXM2 版有 NVLink;PCIe 版无
     source: official
-  t4:
+  G02_t4:
     aliases: [tesla t4]
     compute_cap: "7.5"    # Turing SM75 → 落 7 桶
     sm_major: 7
@@ -49,45 +50,46 @@ gpu_catalog:
     source: official
 
   # ========== Ampere (SM80 / SM86) ==========
-  a100:
+  # ── Ampere (SM80 / SM86) ──────────────────────────────────────
+  G03_a100:
     aliases: [a100-80gb, a100 80gb, a100-40gb, a100-sxm, a100-pcie]
     compute_cap: "8.0"    # Ampere GA100
     sm_major: 8
     nvlink: true
     source: official
-  a800:
+  G04_a800:
     aliases: [a800-80gb, a800 80gb, a800-40gb, a800-sxm, a800-pcie]
     compute_cap: "8.0"    # SXM/80GB=GA100=8.0;PCIe/40GB=GA102=8.6。取更低 8.0(worst-case);sm_major 都是 8
     sm_major: 8
     nvlink: true
     source: reference     # ★出口特供,不在官方表;按同 die 推,待实测确认
-  a10g:
+  G05_a10g:
     aliases: [a10-g]
     compute_cap: "8.6"    # AWS g5 专用(GA102)
     sm_major: 8
     nvlink: false
     source: reference     # ★AWS 特供,不在官方表;按 GA102 推,待实测确认
-  a30:
+  G06_a30:
     compute_cap: "8.0"    # Ampere GA100
     sm_major: 8
     nvlink: true          # 支持 NVLink Bridge
     source: official
-  a40:
+  G07_a40:
     compute_cap: "8.6"    # Ampere GA102
     sm_major: 8
     nvlink: false
     source: official
-  a10:
+  G08_a10:
     compute_cap: "8.6"    # Ampere GA102
     sm_major: 8
     nvlink: false
     source: official
-  a16:
+  G09_a16:
     compute_cap: "8.6"    # Ampere GA107 ×4
     sm_major: 8
     nvlink: false
     source: official
-  a6000:
+  G10_a6000:
     aliases: [rtx a6000, rtxa6000]
     compute_cap: "8.6"    # Ampere 工作站 GA102
     sm_major: 8
@@ -95,28 +97,29 @@ gpu_catalog:
     source: official
 
   # ========== Ada Lovelace (SM89,均落 8 桶) ==========
-  l4:
+  # ── Ada Lovelace (SM89) ──────────────────────────────────────
+  G11_l4:
     compute_cap: "8.9"    # Ada AD104
     sm_major: 8
     nvlink: false
     source: official
-  l40:
+  G12_l40:
     compute_cap: "8.9"    # Ada AD102
     sm_major: 8
     nvlink: false
     source: official
-  l40s:
+  G13_l40s:
     compute_cap: "8.9"    # Ada AD102
     sm_major: 8
     nvlink: false
     source: official
-  rtx6000ada:
+  G14_rtx6000ada:
     aliases: [rtx 6000 ada, rtx6000-ada, "6000 ada"]
     compute_cap: "8.9"    # Ada 工作站 AD102
     sm_major: 8
     nvlink: false         # Ada 代取消 NVLink
     source: official
-  "4090":
+  G15_4090:
     aliases: [rtx4090, rtx 4090, geforce rtx 4090]
     compute_cap: "8.9"    # Ada AD102
     sm_major: 8
@@ -124,27 +127,28 @@ gpu_catalog:
     source: official
 
   # ========== Hopper (SM90) ==========
-  h100:
+  # ── Hopper (SM90) ──────────────────────────────────────
+  G16_h100:
     compute_cap: "9.0"    # Hopper GH100
     sm_major: 9
     nvlink: true
     source: official
-  h200:
+  G17_h200:
     compute_cap: "9.0"    # Hopper GH100(显存升级,算力同 H100)
     sm_major: 9
     nvlink: true
     source: official
-  h20:
+  G18_h20:
     compute_cap: "9.0"    # Hopper 中国特供
     sm_major: 9
     nvlink: true
     source: measured      # 实测 compute_cap=9.0(不在官方表)
-  h800:
+  G19_h800:
     compute_cap: "9.0"    # Hopper 中国特供,同 GH100 die
     sm_major: 9
     nvlink: true          # 有 NVLink(带宽较 H100 阉割,不影响 compute_cap/backend)
     source: reference     # ★出口特供,不在官方表;按同 die 推,待实测确认
-  gh200:
+  G20_gh200:
     aliases: [gh200, grace hopper]
     compute_cap: "9.0"    # Hopper GH100(Grace 超级芯片)
     sm_major: 9
@@ -152,17 +156,18 @@ gpu_catalog:
     source: official
 
   # ========== Blackwell 数据中心 (SM10x) ==========
-  b200:
+  # ── Blackwell (SM10x) ──────────────────────────────────────
+  G21_b200:
     compute_cap: "10.0"   # Blackwell 数据中心 SM100 GB100
     sm_major: 10
     nvlink: true
     source: official
-  b300:
+  G22_b300:
     compute_cap: "10.3"   # ★一说 SM103(10.3),未实测;sm_major 无论 10.0/10.3 都是 10
     sm_major: 10
     nvlink: true
     source: reference     # ★不在官方表;算力待实测确认(10.0 还是 10.3)
-  gb200:
+  G23_gb200:
     aliases: [gb200, grace blackwell]
     compute_cap: "10.0"   # Blackwell SM100(Grace 超级芯片)
     sm_major: 10
@@ -172,43 +177,44 @@ gpu_catalog:
   # ========== Blackwell 工作站/消费 (SM120) ==========
   # ⚠️ 这一代是 SM120 ≠ SM100。大量 sglang Blackwell 优化 gate 写在 is_sm100_supported(),
   #    SM120 静默不生效 —— 照抄 B200 配方会起不来。trtllm_mha 在 SM120 的分侧结论见 knowledge.md §1。
-  pro5000:
+  # ── Blackwell (SM120) ──────────────────────────────────────
+  G24_pro5000:
     aliases: [rtx pro 5000, rtx5000, pro 5000]
     compute_cap: "12.0"   # Blackwell SM120
     sm_major: 12
     nvlink: false
     source: measured      # 实测 nvidia-smi compute_cap=12.0
-  pro6000:
+  G25_pro6000:
     aliases: [rtx pro 6000, rtx6000, pro 6000]
     compute_cap: "12.0"   # Blackwell SM120
     sm_major: 12
     nvlink: false
     source: reference     # ★按 RTX PRO Blackwell 系归 SM120,待实测确认
-  "5090":
+  G26_5090:
     aliases: [rtx5090, rtx 5090, geforce rtx 5090]
     compute_cap: "12.0"   # Blackwell 消费级 GB202
     sm_major: 12
     nvlink: false
     source: official
-  "5080":
+  G27_5080:
     aliases: [rtx5080, rtx 5080, geforce rtx 5080]
     compute_cap: "12.0"   # Blackwell 消费级 GB203
     sm_major: 12
     nvlink: false
     source: official
-  "5070ti":
+  G28_5070ti:
     aliases: [rtx5070ti, rtx 5070 ti, "5070 ti", geforce rtx 5070 ti]
     compute_cap: "12.0"   # Blackwell 消费级 GB203
     sm_major: 12
     nvlink: false
     source: official
-  "5070":
+  G29_5070:
     aliases: [rtx5070, rtx 5070, geforce rtx 5070]
     compute_cap: "12.0"   # Blackwell 消费级 GB205
     sm_major: 12
     nvlink: false
     source: official
-  "5060":
+  G30_5060:
     aliases: [rtx5060, rtx 5060, geforce rtx 5060, "5060 ti", 5060ti]
     compute_cap: "12.0"   # Blackwell 消费级 GB206
     sm_major: 12

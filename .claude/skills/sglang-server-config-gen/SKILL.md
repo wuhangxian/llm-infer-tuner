@@ -37,7 +37,7 @@ description: 输入一个固定 JSON(JobSpec:机型/模型/镜像/负载/SLA/预
   "gpu_count": 8,
   "gpu_memory_gb": 72,
   "model": "qwen36-27b-fp8",
-  "image": "sglang-v0.5.10",
+  "image": "I01_sglang-v0.5.10",
   "workload": "qa-chat-3.5k-1k",
   "sla": { "max_avg_ttft_ms": 2000, "max_avg_tpot_ms": 80, "min_success_rate": 0.99 },
   "search": { "max_candidates": 16, "max_runtime_minutes": 180 }

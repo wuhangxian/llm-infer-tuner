@@ -1,11 +1,11 @@
 {
   "job_id": "deepseek-v4-flash-0731-fp8_pro5000_8x72g_qa-chat-8k-1k_cand8",
   "engine": "sglang",
-  "gpu_model": "pro5000",
+  "gpu_model": "G24_pro5000",
   "gpu_count": 8,
   "gpu_memory_gb": 72,
-  "model": "deepseek-v4-flash-0731-fp8",
-  "image": "sglang-v0.5.16",
+  "model": "M03_deepseek-v4-flash-0731-fp8",
+  "image": "I03_sglang-v0.5.16",
   "workload": "qa-chat-8k-1k",
   "benchmark_method": "sglang-bench-serving",
   "sla": {
