@@ -37,21 +37,15 @@ echo "========================================"
 # 1. 同步 SGLang 参数(自动扫描所有 tag)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo ""
-echo "[1/3] Syncing SGLang parameters (auto-scan all tags)..."
+echo "[1/2] Syncing SGLang parameters (auto-scan all tags)..."
 python3 scripts/sync_sglang_params.py 2>&1 || echo "  [warn] sglang sync failed"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 2. 同步 HuggingFace 模型信息(自动扫描 cookbook + 已有模型变更检测)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo ""
-echo "[2/3] Syncing HuggingFace models (auto-scan cookbook)..."
+echo "[2/2] Syncing HuggingFace models (auto-scan cookbook)..."
 python3 scripts/sync_hf_models.py --sglang-repo "$SGLANG_REPO" 2>&1 || echo "  [warn] hf sync failed"
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 3. 同步 GPU 信息
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-echo "[3/3] Syncing GPU info..."
-python3 scripts/sync_gpu.py 2>&1 || echo "  [warn] gpu sync failed"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 3. 检查是否有变化
