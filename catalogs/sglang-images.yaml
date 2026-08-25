@@ -1,25 +1,6 @@
-# ============ SGLang 镜像目录(引擎相关:一版 sglang = 一条)============
-#
-# key = JobSpec.image 的干净 ID(如 "sglang-v0.5.10")。这份是 sglang 特有的,
-# 所以放在 skill 内、不进共享 catalogs/。换 vllm 会有各自的 images.yaml。
-#
-# 铁律:每条都来自亲自读该 tag 源码,只记「这版 sglang 认什么、卡什么」,
-# 不记「某张卡会怎样」(那是 knowledge.md 的按算力查后端表)。
-#
-# 每条字段:
-#   image_ref           拉镜像用的完整引用。⚠️ 上机拉取以此为准(第二阶段从 TCR 拉时改这里)。
-#   sglang_version      版本号(核对后端表是否过期)。
-#   cuda_version        Dockerfile 里的 CUDA,后端 gate 下限输入(fa3≥12.3,sm100/120≥12.8)。
-#   attention_backends  这版 --attention-backend 认哪些名字(搜索轴的「菜单」)。
-#                       最终 attention 候选 = knowledge.md 的 sm 短名单 ∩ 本菜单 ∩ CUDA 达标。
-#   flag_aliases        {规范名: 这版真名} —— render 期按此翻译;不同才写。
-#   startup_floor       启动算力门槛(major<8→float16,minor<5→拒绝);verified:null=该版未定位。
-#   valid_flags         这版 launch_server 全部合法参数名(render 期第三道闸:翻译后 flag ∈ 此清单)。
-#                       来源:server_args.py add_argument 全扫(AST 静态抽取,可复跑核对)。
-#
-# ⚠️ image_ref 现为占位公开 tag(lmsysorg/sglang:vX)。第二阶段确定 TCR 私有镜像后,
-#    把对应条目的 image_ref 改成 TCR 地址即可,ID 与其余事实不变。
-# 命中不了(私有/latest/魔改)→ 走 unverified_fallback:后端全铺开、不硬拦。
+# SGLang 镜像目录(一版 sglang = 一条)。key = JobSpec.image。
+# 字段:image_ref/cuda_version/attention_backends/flag_aliases/startup_floor/valid_flags。
+# valid_flags 由 scripts/sync_sglang_params.py 从源码 AST 自动提取。
 
 unverified_fallback:
   policy: spread_all_backends
