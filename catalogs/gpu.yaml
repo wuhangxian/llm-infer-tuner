@@ -1,33 +1,6 @@
-# ============ GPU 目录(引擎无关的物理事实)============
-#
-# 只剩一层:gpu_catalog。key = JobSpec.gpu_model(显卡型号)。
-#
-# 为什么只有一层:
-#   旧设计有 instances(机型级)+ gpu_catalog(显卡级)两层,但 instances 的字段
-#   (count / memory_gb)现在直接写在 job.json 里(gpu_count / gpu_memory_gb),
-#   因为它们是调优决策输入(TP 准入判据),不是被引用的静态事实。
-#   host_memory_gb 不影响调优决策,不放了。
-#
-# 这份是引擎中性的:同一张卡换 vllm 也照用这些物理数;
-# 「sm120 该铺哪些 attention 后端」是 sglang 特有知识,不在这里,在
-# .claude/skills/sglang-server-config-gen/knowledge.md。
-#
-# 加新显卡型号 = 在 gpu_catalog 下加一条,不改任何代码。
-#
-# 每张卡字段:
-#   compute_cap  完整算力,如 "8.6"(查官方 https://developer.nvidia.com/cuda-gpus)
-#   sm_major    compute_cap 取整,如 8(attention 分桶键)
-#   nvlink       有无 NVLink(只影响 TP 排序提示,不排除任何 TP)
-#   source       算力可信度:official=官方表 / measured=实测 / reference=按同架构推(最可疑)
-#
-# key 按显卡名小写匹配(精确优先,再取最长命中)。sm_major 相同的算力共用一档:
-#   7.0/7.5→7、8.x/8.9→8、9.0→9、10.x→10、12.0→12。
-#
-# ⚠️ 这里只放「引擎中性的物理算力」。「某 sm_major 铺哪些 attention 后端」是 sglang 特有知识,
-#    不在这份,在 .claude/skills/sglang-server-config-gen/knowledge.md §1 的按算力查后端表。
-#
-# ⚠️ 单卡显存不写在这里(同型号有不同 SKU,如 A100 40GB/80GB)。显存直接写在
-#    job.json 的 gpu_memory_gb 里,是 TP 准入判据(weight_gb/tp ≤ gpu_memory_gb)的输入。
+# GPU 目录(引擎无关)。key = JobSpec.gpu_model。
+# 字段:compute_cap/sm_major/nvlink/source。显存不在这里,在 job.json 的 gpu_memory_gb。
+# attention 后端选择见 knowledge.md §1,不在这里。
 
 version: 1
 updated: 2026-08-12
