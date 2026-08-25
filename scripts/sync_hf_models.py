@@ -127,6 +127,48 @@ def fetch_config_json(hf_model_id: str) -> dict[str, Any]:
         return {}
 
 
+
+def fetch_model_size_gb(hf_model_id: str) -> int | None:
+    """Fetch total safetensors file size from HuggingFace API."""
+    url = f"https://huggingface.co/api/models/{hf_model_id}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "llm-infer-tuner-sync"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        siblings = data.get("siblings", [])
+        total_bytes = 0
+        for sib in siblings:
+            rfname = sib.get("rfilename", "")
+            if rfname.endswith(".safetensors") or rfname.endswith(".bin"):
+                # HF API doesn't return file size directly, estimate from siblings count
+                pass
+        # HF API siblings don't have size. Try the tree API instead.
+        return None
+    except Exception:
+        return None
+
+
+def fetch_weight_gb(hf_model_id: str) -> dict[str, int]:
+    """Fetch weight file sizes from HuggingFace. Returns {precision: gb}.
+    Uses HuggingFace API to get safetensors index and compute total size.
+    """
+    weights: dict[str, int] = {}
+    try:
+        # Try fetching model.safetensors.index.json to get total shard sizes
+        url = f"https://huggingface.co/{hf_model_id}/raw/main/model.safetensors.index.json"
+        req = urllib.request.Request(url, headers={"User-Agent": "llm-infer-tuner-sync"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            index = json.loads(resp.read().decode("utf-8"))
+        metadata = index.get("metadata", {})
+        total_size = metadata.get("total_size", 0)
+        if total_size > 0:
+            gb = total_size / (1024 ** 3)
+            # Round to nearest GB
+            weights["estimated"] = round(gb)
+    except Exception:
+        pass
+    return weights
+
 def extract_model_info(config: dict) -> dict[str, Any]:
     """Extract relevant fields from HF config.json."""
     text_config = config.get("text_config", {})
@@ -136,11 +178,15 @@ def extract_model_info(config: dict) -> dict[str, Any]:
 
     is_moe = get("is_moe", None)
     num_experts = get("num_experts", None)
+    n_routed_experts = get("n_routed_experts", None)
     moe_intermediate_size = get("moe_intermediate_size", None)
     intermediate_size = get("intermediate_size", None)
 
-    if is_moe is None and num_experts is not None:
+    # MoE detection: check is_moe, then num_experts, then n_routed_experts
+    if is_moe is None and (num_experts is not None or n_routed_experts is not None):
         is_moe = True
+    if num_experts is None and n_routed_experts is not None:
+        num_experts = n_routed_experts
 
     # Also check for shared_expert in modules_to_not_convert as MoE indicator
     if is_moe is None:
@@ -173,6 +219,7 @@ def extract_model_info(config: dict) -> dict[str, Any]:
     return {
         "is_moe": is_moe,
         "num_experts": num_experts,
+        "n_routed_experts": n_routed_experts,
         "moe_intermediate_size": moe_intermediate_size,
         "intermediate_size": intermediate_size,
         "block_size": block_size,
@@ -212,20 +259,42 @@ def make_model_key(hf_id: str) -> str:
 
 
 def find_cookbook_mdx(sglang_repo: str, hf_id: str) -> Path | None:
-    """Find the cookbook mdx file that contains this model."""
+    """Find the cookbook mdx file that matches this model.
+    Priority: 1) filename match, 2) --model-path exact match, 3) content fuzzy.
+    """
     repo = Path(sglang_repo)
-    model_name = hf_id.split("/")[-1].lower()
+    model_name = hf_id.split("/")[-1]
+    model_name_clean = re.sub(r"[^a-zA-Z0-9]", "", model_name).lower()
+
+    candidates: list[tuple[int, Path]] = []  # (priority, path)
+
     for cookbook_dir in COOKBOOK_DIRS:
         search_dir = repo / cookbook_dir
         if not search_dir.exists():
             continue
         for mdx in search_dir.rglob("*.mdx"):
+            fname_clean = re.sub(r"[^a-zA-Z0-9]", "", mdx.stem).lower()
             try:
                 text = mdx.read_text(encoding="utf-8")
             except OSError:
                 continue
-            if hf_id in text or model_name in text.lower():
-                return mdx
+            # Priority 1: filename closely matches model name
+            if model_name_clean in fname_clean or fname_clean in model_name_clean:
+                if len(model_name_clean) > 3:  # avoid short matches
+                    candidates.append((1, mdx))
+                    continue
+            # Priority 2: --model-path with exact HF ID in text
+            if f"--model-path {hf_id}" in text or f"--model-path={hf_id}" in text:
+                candidates.append((2, mdx))
+                continue
+            # Priority 3: HF ID appears in text (less precise)
+            if hf_id in text:
+                candidates.append((3, mdx))
+                continue
+
+    if candidates:
+        candidates.sort(key=lambda x: x[0])
+        return candidates[0][1]
     return None
 
 
@@ -317,16 +386,18 @@ def generate_new_model_card(hf_id: str, info: dict, sglang_repo: str = "") -> di
     block_size = info.get("block_size")
     scheme = "fine-grained" if block_size else "per-tensor"
 
-    # Detect arch subtype
+    # Detect arch subtype from architectures/model_type
     model_type = info.get("model_type", "")
     architectures = info.get("architectures", [])
     arch_str = " ".join(architectures).lower() if architectures else model_type.lower()
-    if "mamba" in arch_str or "gdn" in arch_str or "deltanet" in arch_str:
+    if "mamba" in arch_str or "gdn" in arch_str or "deltanet" in arch_str or "linear" in arch_str:
         arch = "moe_hybrid_gdn" if is_moe else "dense_hybrid_gdn"
-    elif "mla" in arch_str or "deepseek" in arch_str:
-        arch = "moe" if is_moe else "dense"
+    elif "deepseek" in arch_str or "dsv" in arch_str or "mla" in arch_str:
+        arch = "moe"
     elif is_moe:
         arch = "moe"
+    else:
+        arch = "dense"
 
     card: dict[str, Any] = {
         "last_updated": datetime.now().strftime("%Y-%m-%d"),
@@ -337,11 +408,15 @@ def generate_new_model_card(hf_id: str, info: dict, sglang_repo: str = "") -> di
         "default_precision": quant_method if quant_method != "none" else "bf16",
     }
 
-    # weight_gb from cookbook
+    # weight_gb: try cookbook first, then HF API
     if cookbook_weights:
         card["weight_gb"] = cookbook_weights
     else:
-        card["weight_gb"] = {}
+        hf_weights = fetch_weight_gb(hf_id)
+        if hf_weights:
+            card["weight_gb"] = hf_weights
+        else:
+            card["weight_gb"] = {}
 
     # Modalities
     has_vision = bool(info.get("architectures")) and any("VL" in a or "Vision" in a or "Conditional" in a for a in info.get("architectures", []))
