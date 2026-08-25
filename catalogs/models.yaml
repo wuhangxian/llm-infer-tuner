@@ -1,8 +1,8 @@
-version: 1
-updated: 2026-08-25 16:09:57
-total: 3
+version: 2
+updated: 2026-08-26 01:27:02
+total: 94
 models:
-  # ── M01: Qwen3.6-27B (Dense + GDN, FP8) ──────────────────
+  # ── M01_qwen36-27b-fp8: Qwen3.6-27B-FP8 (moe_hybrid_gdn, fp8) ─────────────────────
   M01_qwen36-27b-fp8:
     hf_model_id: Qwen/Qwen3.6-27B-FP8
     family: qwen3.6
@@ -71,12 +71,12 @@ models:
       model_path: null
     source: https://huggingface.co/Qwen/Qwen3.6-27B-FP8
     notes: 'Qwen3.6 采用 Gated DeltaNet 与 Gated Attention 混合结构。官方 cookbook 建议 context-length
-      至少保 128K 以维持 thinking 能力 —— 但本工具压测复刻生产、绝不写 --context-length,回落 native 262144
-      已 > 128K,自然满足。
-
+      至少保 128K 以维持 thinking 能力 —— 但本工具压测复刻生产、绝不写 --context-length,回落 native 262144 已
+      > 128K,自然满足。
       '
     last_updated: '2026-08-25'
-  # ── M02: Qwen3.6-35B-A3B (MoE + GDN, FP8) ──────────────
+
+  # ── M02_qwen36-35b-a3b-fp8: Qwen3.6-35B-A3B-FP8 (moe_hybrid_gdn, fp8) ─────────────────────
   M02_qwen36-35b-a3b-fp8:
     hf_model_id: Qwen/Qwen3.6-35B-A3B-FP8
     aliases:
@@ -132,12 +132,12 @@ models:
       weight_size_gb: 35
       model_path: null
     source: https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8
-    notes: 'Qwen3.6-35B-A3B 是 MoE(256 专家/token 激活 8)+ Gated DeltaNet 混合架构。 是本知识库里
-      EP 轴的唯一样例:dense 的 qwen36-27b 不生成 ep,只有本卡会走 EP 派生。
-
+    notes: 'Qwen3.6-35B-A3B 是 MoE(256 专家/token 激活 8)+ Gated DeltaNet 混合架构。 是本知识库里 EP
+      轴的唯一样例:dense 的 qwen36-27b 不生成 ep,只有本卡会走 EP 派生。
       '
     last_updated: '2026-08-25'
-  # ── M03: DeepSeek-V4-Flash-0731 (MoE + MLA, FP8) ──────
+
+  # ── M03_deepseek-v4-flash-0731-fp8: DeepSeek-V4-Flash-0731 (moe, fp8) ─────────────────────
   M03_deepseek-v4-flash-0731-fp8:
     hf_model_id: DeepSeek/DeepSeek-V4-Flash-0731
     aliases:
@@ -199,6 +199,4895 @@ models:
     notes: 'DeepSeek-V4-Flash 是 MoE(256 专家/token 激活 6)+ MLA 注意力架构。 权重 156G(fp8 + fp4
       专家),TP2 放不下(78G>72G),最小 TP=4。 自定义 tokenizer 需 trust-remote-code。⚠️ SGLang v0.5.16
       可能不支持 DeepseekV4ForCausalLM 架构,若启动失败需升级 sglang 镜像。
-
       '
     last_updated: '2026-08-25'
+
+  # ── M04_minimax-m2: MiniMax-M2 (dense, fp8) ─────────────────────
+  M04_minimax-m2:
+    last_updated: '2026-08-26'
+    hf_model_id: MiniMaxAI/MiniMax-M2
+    family: minimax
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 448
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    architecture:
+      is_moe: null
+      num_hidden_layers: 62
+      hidden_size: 3072
+      vocab_size: 200064
+      intermediate_size: 1536
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 196608
+      maximum_context_length: 196608
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: minimax-append-think
+      tool-call-parser: minimax-m2
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 448
+      model_path: null
+    source: https://huggingface.co/MiniMaxAI/MiniMax-M2
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M05_minimax-m2-5: MiniMax-M2.5 (dense, fp8) ─────────────────────
+  M05_minimax-m2-5:
+    last_updated: '2026-08-26'
+    hf_model_id: MiniMaxAI/MiniMax-M2.5
+    family: minimax
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 434
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    architecture:
+      is_moe: null
+      num_hidden_layers: 62
+      hidden_size: 3072
+      vocab_size: 200064
+      intermediate_size: 1536
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 196608
+      maximum_context_length: 196608
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: minimax-append-think
+      tool-call-parser: minimax-m2
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 434
+      model_path: null
+    source: https://huggingface.co/MiniMaxAI/MiniMax-M2.5
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M06_minimax-m2-7: MiniMax-M2.7 (dense, fp8) ─────────────────────
+  M06_minimax-m2-7:
+    last_updated: '2026-08-26'
+    hf_model_id: MiniMaxAI/MiniMax-M2.7
+    family: minimax
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 448
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    architecture:
+      is_moe: null
+      num_hidden_layers: 62
+      hidden_size: 3072
+      vocab_size: 200064
+      intermediate_size: 1536
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 204800
+      maximum_context_length: 204800
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: minimax-append-think
+      tool-call-parser: minimax-m2
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 448
+      model_path: null
+    source: https://huggingface.co/MiniMaxAI/MiniMax-M2.7
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M07_minimax-m3: MiniMax-M3 (dense, bf16) ─────────────────────
+  M07_minimax-m3:
+    last_updated: '2026-08-26'
+    hf_model_id: MiniMaxAI/MiniMax-M3
+    family: minimax
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 809
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    architecture:
+      is_moe: null
+      num_hidden_layers: 60
+      hidden_size: 6144
+      vocab_size: 200064
+      intermediate_size: 3072
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 1048576
+      maximum_context_length: 1048576
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: auto`**
+      tool-call-parser: auto`**
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 809
+      model_path: null
+    source: https://huggingface.co/MiniMaxAI/MiniMax-M3
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M08_minimax-m3-mxfp8: MiniMax-M3-MXFP8 (dense, mxfp8) ─────────────────────
+  M08_minimax-m3-mxfp8:
+    last_updated: '2026-08-26'
+    hf_model_id: MiniMaxAI/MiniMax-M3-MXFP8
+    family: minimax
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: mxfp8
+    weight_gb:
+      estimated: 421
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: mxfp8
+      scheme: fine-grained
+      block_size: 1
+    architecture:
+      is_moe: null
+      num_hidden_layers: 60
+      hidden_size: 6144
+      vocab_size: 200064
+      intermediate_size: 3072
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 1048576
+      maximum_context_length: 1048576
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: auto`**
+      tool-call-parser: auto`**
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 421
+      model_path: null
+    source: https://huggingface.co/MiniMaxAI/MiniMax-M3-MXFP8
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M09_qwen2-5-vl-72b-instruct: Qwen2.5-VL-72B-Instruct (dense, bf16) ─────────────────────
+  M09_qwen2-5-vl-72b-instruct:
+    last_updated: '2026-08-26'
+    hf_model_id: Qwen/Qwen2.5-VL-72B-Instruct
+    family: qwen2.5
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 137
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    architecture:
+      is_moe: null
+      num_hidden_layers: 80
+      hidden_size: 8192
+      vocab_size: 152064
+      intermediate_size: 29568
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 128000
+      maximum_context_length: 128000
+      recommended_initial_context_length: 128000
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: false
+      supports_mtp: false
+    default_flags:
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 137
+      model_path: null
+    source: https://huggingface.co/Qwen/Qwen2.5-VL-72B-Instruct
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M10_qwen3-235b-a22b-instruct-2507: Qwen3-235B-A22B-Instruct-2507 (moe, bf16) ─────────────────────
+  M10_qwen3-235b-a22b-instruct-2507:
+    last_updated: '2026-08-26'
+    hf_model_id: Qwen/Qwen3-235B-A22B-Instruct-2507
+    family: qwen3
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 438
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 128
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 94
+      hidden_size: 4096
+      vocab_size: 151936
+      intermediate_size: 12288
+      moe_intermediate_size: 1536
+      num_experts: 128
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: qwen3
+      tool-call-parser: qwen25
+    mtp_params:
+      speculative-algorithm: 'EAGLE3`:'
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 438
+      model_path: null
+    source: https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M11_qwen3-235b-a22b-thinking-2507: Qwen3-235B-A22B-Thinking-2507 (moe, bf16) ─────────────────────
+  M11_qwen3-235b-a22b-thinking-2507:
+    last_updated: '2026-08-26'
+    hf_model_id: Qwen/Qwen3-235B-A22B-Thinking-2507
+    family: qwen3
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 438
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 128
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 94
+      hidden_size: 4096
+      vocab_size: 151936
+      intermediate_size: 12288
+      moe_intermediate_size: 1536
+      num_experts: 128
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: qwen3
+      tool-call-parser: qwen25
+    mtp_params:
+      speculative-algorithm: 'EAGLE3`:'
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 438
+      model_path: null
+    source: https://huggingface.co/Qwen/Qwen3-235B-A22B-Thinking-2507
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M12_qwen3-coder-30b-a3b-instruct: Qwen3-Coder-30B-A3B-Instruct (moe, bf16) ─────────────────────
+  M12_qwen3-coder-30b-a3b-instruct:
+    last_updated: '2026-08-26'
+    hf_model_id: Qwen/Qwen3-Coder-30B-A3B-Instruct
+    family: qwen3
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 57
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 128
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 48
+      hidden_size: 2048
+      vocab_size: 151936
+      intermediate_size: 6144
+      moe_intermediate_size: 768
+      num_experts: 128
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      tool-call-parser: qwen3_coder`
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 57
+      model_path: null
+    source: https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M13_qwen3-coder-480b-a35b-instruct-fp8: Qwen3-Coder-480B-A35B-Instruct-FP8 (moe, fp8) ─────────────────────
+  M13_qwen3-coder-480b-a35b-instruct-fp8:
+    last_updated: '2026-08-26'
+    hf_model_id: Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8
+    family: qwen3
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 449
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    num_experts: 160
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 62
+      hidden_size: 6144
+      vocab_size: 151936
+      intermediate_size: 8192
+      moe_intermediate_size: 2560
+      num_experts: 160
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      tool-call-parser: qwen3_coder`
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 449
+      model_path: null
+    source: https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M14_qwen3-coder-next: Qwen3-Coder-Next (moe, bf16) ─────────────────────
+  M14_qwen3-coder-next:
+    last_updated: '2026-08-26'
+    hf_model_id: Qwen/Qwen3-Coder-Next
+    family: qwen3
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 148
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 512
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 48
+      hidden_size: 2048
+      vocab_size: 151936
+      intermediate_size: 5120
+      moe_intermediate_size: 512
+      num_experts: 512
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      tool-call-parser: qwen3_coder`
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 148
+      model_path: null
+    source: https://huggingface.co/Qwen/Qwen3-Coder-Next
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M15_qwen3-next-80b-a3b-instruct: Qwen3-Next-80B-A3B-Instruct (moe, bf16) ─────────────────────
+  M15_qwen3-next-80b-a3b-instruct:
+    last_updated: '2026-08-26'
+    hf_model_id: Qwen/Qwen3-Next-80B-A3B-Instruct
+    family: qwen3
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 151
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 512
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 48
+      hidden_size: 2048
+      vocab_size: 151936
+      intermediate_size: 5120
+      moe_intermediate_size: 512
+      num_experts: 512
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: qwen3
+      tool-call-parser: qwen
+    mtp_params:
+      speculative-algorithm: NEXTN
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 151
+      model_path: null
+    source: https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M16_qwen3-next-80b-a3b-thinking: Qwen3-Next-80B-A3B-Thinking (moe, bf16) ─────────────────────
+  M16_qwen3-next-80b-a3b-thinking:
+    last_updated: '2026-08-26'
+    hf_model_id: Qwen/Qwen3-Next-80B-A3B-Thinking
+    family: qwen3
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 151
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 512
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 48
+      hidden_size: 2048
+      vocab_size: 151936
+      intermediate_size: 5120
+      moe_intermediate_size: 512
+      num_experts: 512
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: qwen3
+      tool-call-parser: qwen
+    mtp_params:
+      speculative-algorithm: NEXTN
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 151
+      model_path: null
+    source: https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Thinking
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M17_qwen3-vl-235b-a22b-instruct: Qwen3-VL-235B-A22B-Instruct (moe, bf16) ─────────────────────
+  M17_qwen3-vl-235b-a22b-instruct:
+    last_updated: '2026-08-26'
+    hf_model_id: Qwen/Qwen3-VL-235B-A22B-Instruct
+    family: qwen3
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 439
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 128
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 94
+      hidden_size: 4096
+      vocab_size: 151936
+      intermediate_size: 12288
+      moe_intermediate_size: 1536
+      num_experts: 128
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: qwen3
+      tool-call-parser: qwen
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 439
+      model_path: null
+    source: https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M18_qwen3-vl-235b-a22b-thinking: Qwen3-VL-235B-A22B-Thinking (moe, bf16) ─────────────────────
+  M18_qwen3-vl-235b-a22b-thinking:
+    last_updated: '2026-08-26'
+    hf_model_id: Qwen/Qwen3-VL-235B-A22B-Thinking
+    family: qwen3
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 439
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 128
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 94
+      hidden_size: 4096
+      vocab_size: 151936
+      intermediate_size: 12288
+      moe_intermediate_size: 1536
+      num_experts: 128
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: qwen3
+      tool-call-parser: qwen
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 439
+      model_path: null
+    source: https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Thinking
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M19_qwen3-5-397b-a17b: Qwen3.5-397B-A17B (moe, bf16) ─────────────────────
+  M19_qwen3-5-397b-a17b:
+    last_updated: '2026-08-26'
+    hf_model_id: Qwen/Qwen3.5-397B-A17B
+    family: qwen3.5
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 751
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 512
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 60
+      hidden_size: 4096
+      vocab_size: 248320
+      intermediate_size: null
+      moe_intermediate_size: 1024
+      num_experts: 512
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: qwen3
+      tool-call-parser: qwen25
+    mtp_params:
+      speculative-algorithm: 'EAGLE3`:'
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 751
+      model_path: null
+    source: https://huggingface.co/Qwen/Qwen3.5-397B-A17B
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M20_mimo-v2-5: MiMo-V2.5 (moe, fp8) ─────────────────────
+  M20_mimo-v2-5:
+    last_updated: '2026-08-26'
+    hf_model_id: XiaomiMiMo/MiMo-V2.5
+    family: mimo
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 293
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 48
+      hidden_size: 4096
+      vocab_size: 152576
+      intermediate_size: 16384
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 1048576
+      maximum_context_length: 1048576
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: false
+      supports_mtp: true
+    default_flags: {}
+    mtp_params:
+      speculative-algorithm: EAGLE`
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 293
+      model_path: null
+    source: https://huggingface.co/XiaomiMiMo/MiMo-V2.5
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M21_mimo-v2-5-pro: MiMo-V2.5-Pro (moe, fp8) ─────────────────────
+  M21_mimo-v2-5-pro:
+    last_updated: '2026-08-26'
+    hf_model_id: XiaomiMiMo/MiMo-V2.5-Pro
+    family: mimo
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 15132
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    num_experts: 384
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 70
+      hidden_size: 6144
+      vocab_size: 152576
+      intermediate_size: 16384
+      moe_intermediate_size: 2048
+      num_experts: 384
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 1048576
+      maximum_context_length: 1048576
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: false
+      supports_mtp: true
+    default_flags: {}
+    mtp_params:
+      speculative-algorithm: EAGLE`
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 15132
+      model_path: null
+    source: https://huggingface.co/XiaomiMiMo/MiMo-V2.5-Pro
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M22_glm-5-1-mxfp4: GLM-5.1-MXFP4 (moe, quark) ─────────────────────
+  M22_glm-5-1-mxfp4:
+    last_updated: '2026-08-26'
+    hf_model_id: amd/GLM-5.1-MXFP4
+    family: glm
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: quark
+    weight_gb:
+      estimated: 16873
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: quark
+      scheme: per-tensor
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 78
+      hidden_size: 6144
+      vocab_size: 154880
+      intermediate_size: 12288
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 202752
+      maximum_context_length: 202752
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: glm45
+      tool-call-parser: glm47
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 16873
+      model_path: null
+    source: https://huggingface.co/amd/GLM-5.1-MXFP4
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M23_ernie-4-5-21b-a3b-pt: ERNIE-4.5-21B-A3B-PT (moe, bf16) ─────────────────────
+  M23_ernie-4-5-21b-a3b-pt:
+    last_updated: '2026-08-26'
+    hf_model_id: baidu/ERNIE-4.5-21B-A3B-PT
+    family: ernie
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 41
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: null
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 28
+      hidden_size: 2560
+      vocab_size: 103424
+      intermediate_size: 12288
+      moe_intermediate_size: 1536
+      num_experts: null
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 131072
+      maximum_context_length: 131072
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: false
+      supports_mtp: false
+    default_flags: {}
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 41
+      model_path: null
+    source: https://huggingface.co/baidu/ERNIE-4.5-21B-A3B-PT
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M24_deepseek-math-v2: DeepSeek-Math-V2 (moe, fp8) ─────────────────────
+  M24_deepseek-math-v2:
+    last_updated: '2026-08-26'
+    hf_model_id: deepseek-ai/DeepSeek-Math-V2
+    family: deepseek
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 1277
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 61
+      hidden_size: 7168
+      vocab_size: 129280
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 163840
+      maximum_context_length: 163840
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: false
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: deepseek-r1
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 1277
+      model_path: null
+    source: https://huggingface.co/deepseek-ai/DeepSeek-Math-V2
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M25_deepseek-ocr: DeepSeek-OCR (moe, bf16) ─────────────────────
+  M25_deepseek-ocr:
+    last_updated: '2026-08-26'
+    hf_model_id: deepseek-ai/DeepSeek-OCR
+    family: deepseek
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 6
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 64
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 12
+      hidden_size: 1280
+      vocab_size: 129280
+      intermediate_size: 6848
+      moe_intermediate_size: 896
+      num_experts: 64
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 8192
+      maximum_context_length: 8192
+      recommended_initial_context_length: 8192
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: false
+      supports_mtp: false
+    default_flags: {}
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 6
+      model_path: null
+    source: https://huggingface.co/deepseek-ai/DeepSeek-OCR
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M26_deepseek-ocr-2: DeepSeek-OCR-2 (moe, bf16) ─────────────────────
+  M26_deepseek-ocr-2:
+    last_updated: '2026-08-26'
+    hf_model_id: deepseek-ai/DeepSeek-OCR-2
+    family: deepseek
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 6
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 64
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 12
+      hidden_size: 1280
+      vocab_size: 129280
+      intermediate_size: 6848
+      moe_intermediate_size: 896
+      num_experts: 64
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 8192
+      maximum_context_length: 8192
+      recommended_initial_context_length: 8192
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: false
+      supports_mtp: false
+    default_flags: {}
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 6
+      model_path: null
+    source: https://huggingface.co/deepseek-ai/DeepSeek-OCR-2
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M27_deepseek-r1: DeepSeek-R1 (moe, fp8) ─────────────────────
+  M27_deepseek-r1:
+    last_updated: '2026-08-26'
+    hf_model_id: deepseek-ai/DeepSeek-R1
+    family: deepseek
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 1275
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 61
+      hidden_size: 7168
+      vocab_size: 129280
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 163840
+      maximum_context_length: 163840
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: deepseek-r1
+      tool-call-parser: deepseekv3
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 1275
+      model_path: null
+    source: https://huggingface.co/deepseek-ai/DeepSeek-R1
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M28_deepseek-r1-0528: DeepSeek-R1-0528 (moe, fp8) ─────────────────────
+  M28_deepseek-r1-0528:
+    last_updated: '2026-08-26'
+    hf_model_id: deepseek-ai/DeepSeek-R1-0528
+    family: deepseek
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 1275
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 61
+      hidden_size: 7168
+      vocab_size: 129280
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 163840
+      maximum_context_length: 163840
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: deepseek-r1
+      tool-call-parser: deepseekv3
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 1275
+      model_path: null
+    source: https://huggingface.co/deepseek-ai/DeepSeek-R1-0528
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M29_deepseek-v3: DeepSeek-V3 (moe, fp8) ─────────────────────
+  M29_deepseek-v3:
+    last_updated: '2026-08-26'
+    hf_model_id: deepseek-ai/DeepSeek-V3
+    family: deepseek
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 1275
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 61
+      hidden_size: 7168
+      vocab_size: 129280
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 163840
+      maximum_context_length: 163840
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: deepseek-v3
+      tool-call-parser: deepseekv3
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 1275
+      model_path: null
+    source: https://huggingface.co/deepseek-ai/DeepSeek-V3
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M30_deepseek-v3-0324: DeepSeek-V3-0324 (moe, fp8) ─────────────────────
+  M30_deepseek-v3-0324:
+    last_updated: '2026-08-26'
+    hf_model_id: deepseek-ai/DeepSeek-V3-0324
+    family: deepseek
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 1275
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 61
+      hidden_size: 7168
+      vocab_size: 129280
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 163840
+      maximum_context_length: 163840
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: deepseek-v3
+      tool-call-parser: deepseekv3
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 1275
+      model_path: null
+    source: https://huggingface.co/deepseek-ai/DeepSeek-V3-0324
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M31_deepseek-v3-1: DeepSeek-V3.1 (moe, fp8) ─────────────────────
+  M31_deepseek-v3-1:
+    last_updated: '2026-08-26'
+    hf_model_id: deepseek-ai/DeepSeek-V3.1
+    family: deepseek
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 1275
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 61
+      hidden_size: 7168
+      vocab_size: 129280
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 163840
+      maximum_context_length: 163840
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: deepseek-v3
+      tool-call-parser: deepseekv3
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 1275
+      model_path: null
+    source: https://huggingface.co/deepseek-ai/DeepSeek-V3.1
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M32_deepseek-v3-1-terminus: DeepSeek-V3.1-Terminus (moe, fp8) ─────────────────────
+  M32_deepseek-v3-1-terminus:
+    last_updated: '2026-08-26'
+    hf_model_id: deepseek-ai/DeepSeek-V3.1-Terminus
+    family: deepseek
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 1275
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 61
+      hidden_size: 7168
+      vocab_size: 129280
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 163840
+      maximum_context_length: 163840
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: deepseek-v3
+      tool-call-parser: deepseekv3
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 1275
+      model_path: null
+    source: https://huggingface.co/deepseek-ai/DeepSeek-V3.1-Terminus
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M33_deepseek-v3-2: DeepSeek-V3.2 (moe, fp8) ─────────────────────
+  M33_deepseek-v3-2:
+    last_updated: '2026-08-26'
+    hf_model_id: deepseek-ai/DeepSeek-V3.2
+    family: deepseek
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 1277
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 61
+      hidden_size: 7168
+      vocab_size: 129280
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 163840
+      maximum_context_length: 163840
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: deepseek-v3
+      tool-call-parser: deepseekv3
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 1277
+      model_path: null
+    source: https://huggingface.co/deepseek-ai/DeepSeek-V3.2
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M34_deepseek-v3-2-exp: DeepSeek-V3.2-Exp (moe, fp8) ─────────────────────
+  M34_deepseek-v3-2-exp:
+    last_updated: '2026-08-26'
+    hf_model_id: deepseek-ai/DeepSeek-V3.2-Exp
+    family: deepseek
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 1277
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 61
+      hidden_size: 7168
+      vocab_size: 129280
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 163840
+      maximum_context_length: 163840
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: deepseek-v3
+      tool-call-parser: deepseekv3
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 1277
+      model_path: null
+    source: https://huggingface.co/deepseek-ai/DeepSeek-V3.2-Exp
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M35_deepseek-v3-2-speciale: DeepSeek-V3.2-Speciale (moe, fp8) ─────────────────────
+  M35_deepseek-v3-2-speciale:
+    last_updated: '2026-08-26'
+    hf_model_id: deepseek-ai/DeepSeek-V3.2-Speciale
+    family: deepseek
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 1277
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 61
+      hidden_size: 7168
+      vocab_size: 129280
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 163840
+      maximum_context_length: 163840
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: deepseek-v3
+      tool-call-parser: deepseekv3
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 1277
+      model_path: null
+    source: https://huggingface.co/deepseek-ai/DeepSeek-V3.2-Speciale
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M36_deepseek-v4-flash: DeepSeek-V4-Flash (moe, fp8) ─────────────────────
+  M36_deepseek-v4-flash:
+    last_updated: '2026-08-26'
+    hf_model_id: deepseek-ai/DeepSeek-V4-Flash
+    family: deepseek
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 149
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 43
+      hidden_size: 4096
+      vocab_size: 129280
+      intermediate_size: null
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 1048576
+      maximum_context_length: 1048576
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: false
+      supports_mtp: true
+    default_flags:
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 149
+      model_path: null
+    source: https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M37_deepseek-v4-flash-0731: DeepSeek-V4-Flash-0731 (moe, fp8) ─────────────────────
+  M37_deepseek-v4-flash-0731:
+    last_updated: '2026-08-26'
+    hf_model_id: deepseek-ai/DeepSeek-V4-Flash-0731
+    family: deepseek
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 155
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 43
+      hidden_size: 4096
+      vocab_size: 129280
+      intermediate_size: null
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 1048576
+      maximum_context_length: 1048576
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: false
+      supports_mtp: true
+    default_flags:
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 155
+      model_path: null
+    source: https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M38_diffusiongemma-26b-a4b-it: diffusiongemma-26B-A4B-it (moe, bf16) ─────────────────────
+  M38_diffusiongemma-26b-a4b-it:
+    last_updated: '2026-08-26'
+    hf_model_id: google/diffusiongemma-26B-A4B-it
+    family: diffusiongemma
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 48
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 128
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 30
+      hidden_size: 2816
+      vocab_size: 262144
+      intermediate_size: 2112
+      moe_intermediate_size: 704
+      num_experts: 128
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: false
+      supports_mtp: false
+    default_flags:
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 48
+      model_path: null
+    source: https://huggingface.co/google/diffusiongemma-26B-A4B-it
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M39_gemma-4-12b-it: gemma-4-12B-it (dense, bf16) ─────────────────────
+  M39_gemma-4-12b-it:
+    last_updated: '2026-08-26'
+    hf_model_id: google/gemma-4-12B-it
+    family: gemma
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 41
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    architecture:
+      is_moe: null
+      num_hidden_layers: 48
+      hidden_size: 3840
+      vocab_size: 262144
+      intermediate_size: 15360
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: gemma4
+      tool-call-parser: gemma4
+    mtp_params:
+      speculative-algorithm: NEXTN
+      speculative-num-steps: 5
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 6
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 41
+      model_path: null
+    source: https://huggingface.co/google/gemma-4-12B-it
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M40_gemma-4-26b-a4b-it: gemma-4-26B-A4B-it (moe, bf16) ─────────────────────
+  M40_gemma-4-26b-a4b-it:
+    last_updated: '2026-08-26'
+    hf_model_id: google/gemma-4-26B-A4B-it
+    family: gemma
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 48
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 128
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 30
+      hidden_size: 2816
+      vocab_size: 262144
+      intermediate_size: 2112
+      moe_intermediate_size: 704
+      num_experts: 128
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: gemma4
+      tool-call-parser: gemma4
+    mtp_params:
+      speculative-algorithm: NEXTN
+      speculative-num-steps: 5
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 6
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 48
+      model_path: null
+    source: https://huggingface.co/google/gemma-4-26B-A4B-it
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M41_gemma-4-31b-it: gemma-4-31B-it (dense, bf16) ─────────────────────
+  M41_gemma-4-31b-it:
+    last_updated: '2026-08-26'
+    hf_model_id: google/gemma-4-31B-it
+    family: gemma
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 58
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    architecture:
+      is_moe: null
+      num_hidden_layers: 60
+      hidden_size: 5376
+      vocab_size: 262144
+      intermediate_size: 21504
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: gemma4
+      tool-call-parser: gemma4
+    mtp_params:
+      speculative-algorithm: NEXTN
+      speculative-num-steps: 5
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 6
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 58
+      model_path: null
+    source: https://huggingface.co/google/gemma-4-31B-it
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M42_gemma-4-e2b-it: gemma-4-E2B-it (dense, bf16) ─────────────────────
+  M42_gemma-4-e2b-it:
+    last_updated: '2026-08-26'
+    hf_model_id: google/gemma-4-E2B-it
+    family: gemma
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 6
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    architecture:
+      is_moe: null
+      num_hidden_layers: 35
+      hidden_size: 1536
+      vocab_size: 262144
+      intermediate_size: 6144
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 131072
+      maximum_context_length: 131072
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: gemma4
+      tool-call-parser: gemma4
+    mtp_params:
+      speculative-algorithm: NEXTN
+      speculative-num-steps: 5
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 6
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 6
+      model_path: null
+    source: https://huggingface.co/google/gemma-4-E2B-it
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M43_gemma-4-e4b-it: gemma-4-E4B-it (dense, bf16) ─────────────────────
+  M43_gemma-4-e4b-it:
+    last_updated: '2026-08-26'
+    hf_model_id: google/gemma-4-E4B-it
+    family: gemma
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 17
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    architecture:
+      is_moe: null
+      num_hidden_layers: 42
+      hidden_size: 2560
+      vocab_size: 262144
+      intermediate_size: 10240
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 131072
+      maximum_context_length: 131072
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: gemma4
+      tool-call-parser: gemma4
+    mtp_params:
+      speculative-algorithm: NEXTN
+      speculative-num-steps: 5
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 6
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 17
+      model_path: null
+    source: https://huggingface.co/google/gemma-4-E4B-it
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M44_llada2-1-flash: LLaDA2.1-flash (moe, bf16) ─────────────────────
+  M44_llada2-1-flash:
+    last_updated: '2026-08-26'
+    hf_model_id: inclusionAI/LLaDA2.1-flash
+    family: llada2.1
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 192
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 32
+      hidden_size: 4096
+      vocab_size: 157184
+      intermediate_size: 9216
+      moe_intermediate_size: 1024
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 32768
+      maximum_context_length: 32768
+      recommended_initial_context_length: 32768
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: false
+      supports_mtp: false
+    default_flags:
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 192
+      model_path: null
+    source: https://huggingface.co/inclusionAI/LLaDA2.1-flash
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M45_llada2-1-mini: LLaDA2.1-mini (moe, bf16) ─────────────────────
+  M45_llada2-1-mini:
+    last_updated: '2026-08-26'
+    hf_model_id: inclusionAI/LLaDA2.1-mini
+    family: llada2.1
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 30
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 20
+      hidden_size: 2048
+      vocab_size: 157184
+      intermediate_size: 5120
+      moe_intermediate_size: 512
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 32768
+      maximum_context_length: 32768
+      recommended_initial_context_length: 32768
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: false
+      supports_mtp: false
+    default_flags:
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 30
+      model_path: null
+    source: https://huggingface.co/inclusionAI/LLaDA2.1-mini
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M46_ling-2-5-1t: Ling-2.5-1T (moe, bf16) ─────────────────────
+  M46_ling-2-5-1t:
+    last_updated: '2026-08-26'
+    hf_model_id: inclusionAI/Ling-2.5-1T
+    family: ling
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 1885
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 80
+      hidden_size: 8192
+      vocab_size: 157184
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 131072
+      maximum_context_length: 131072
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      tool-call-parser: qwen
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 1885
+      model_path: null
+    source: https://huggingface.co/inclusionAI/Ling-2.5-1T
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M47_ling-2-6-1t: Ling-2.6-1T (moe, compressed-tensors) ─────────────────────
+  M47_ling-2-6-1t:
+    last_updated: '2026-08-26'
+    hf_model_id: inclusionAI/Ling-2.6-1T
+    family: ling
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: compressed-tensors
+    weight_gb:
+      estimated: 34605
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: compressed-tensors
+      scheme: per-tensor
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 80
+      hidden_size: 8192
+      vocab_size: 157184
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: qwen3`.
+      tool-call-parser: qwen25`
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: NEXTN
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 34605
+      model_path: null
+    source: https://huggingface.co/inclusionAI/Ling-2.6-1T
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M48_ring-2-5-1t: Ring-2.5-1T (moe, compressed-tensors) ─────────────────────
+  M48_ring-2-5-1t:
+    last_updated: '2026-08-26'
+    hf_model_id: inclusionAI/Ring-2.5-1T
+    family: ring
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: compressed-tensors
+    weight_gb:
+      estimated: 34605
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: compressed-tensors
+      scheme: per-tensor
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 80
+      hidden_size: 8192
+      vocab_size: 157184
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 131072
+      maximum_context_length: 131072
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: deepseek-r1`
+      tool-call-parser: qwen`
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 34605
+      model_path: null
+    source: https://huggingface.co/inclusionAI/Ring-2.5-1T
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M49_ring-2-6-1t: Ring-2.6-1T (moe, compressed-tensors) ─────────────────────
+  M49_ring-2-6-1t:
+    last_updated: '2026-08-26'
+    hf_model_id: inclusionAI/Ring-2.6-1T
+    family: ring
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: compressed-tensors
+    weight_gb:
+      estimated: 34605
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: compressed-tensors
+      scheme: per-tensor
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 80
+      hidden_size: 8192
+      vocab_size: 157184
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 131072
+      maximum_context_length: 131072
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: deepseek-r1`
+      tool-call-parser: glm`
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 34605
+      model_path: null
+    source: https://huggingface.co/inclusionAI/Ring-2.6-1T
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M50_devstral-2-123b-instruct-2512: Devstral-2-123B-Instruct-2512 (dense, fp8) ─────────────────────
+  M50_devstral-2-123b-instruct-2512:
+    last_updated: '2026-08-26'
+    hf_model_id: mistralai/Devstral-2-123B-Instruct-2512
+    family: devstral
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 119
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: per-tensor
+      weight_dtype: fp8
+      activation_dtype: bf16
+    architecture:
+      is_moe: null
+      num_hidden_layers: 88
+      hidden_size: 12288
+      vocab_size: 131072
+      intermediate_size: 28672
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      tool-call-parser: mistral
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 119
+      model_path: null
+    source: https://huggingface.co/mistralai/Devstral-2-123B-Instruct-2512
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M51_ministral-3-14b-instruct-2512: Ministral-3-14B-Instruct-2512 (dense, fp8) ─────────────────────
+  M51_ministral-3-14b-instruct-2512:
+    last_updated: '2026-08-26'
+    hf_model_id: mistralai/Ministral-3-14B-Instruct-2512
+    family: ministral
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 15
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: per-tensor
+      weight_dtype: fp8
+      activation_dtype: bf16
+    architecture:
+      is_moe: null
+      num_hidden_layers: 40
+      hidden_size: 5120
+      vocab_size: 131072
+      intermediate_size: 16384
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: false
+      supports_mtp: false
+    default_flags:
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 15
+      model_path: null
+    source: https://huggingface.co/mistralai/Ministral-3-14B-Instruct-2512
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M52_mistral-medium-3-5-128b: Mistral-Medium-3.5-128B (dense, fp8) ─────────────────────
+  M52_mistral-medium-3-5-128b:
+    last_updated: '2026-08-26'
+    hf_model_id: mistralai/Mistral-Medium-3.5-128B
+    family: mistral
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 124
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: per-tensor
+      weight_dtype: fp8
+      activation_dtype: bf16
+    architecture:
+      is_moe: null
+      num_hidden_layers: 88
+      hidden_size: 12288
+      vocab_size: 131072
+      intermediate_size: 28672
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: mistral`
+      tool-call-parser: mistral`
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 124
+      model_path: null
+    source: https://huggingface.co/mistralai/Mistral-Medium-3.5-128B
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M53_kimi-k2-instruct: Kimi-K2-Instruct (moe, fp8) ─────────────────────
+  M53_kimi-k2-instruct:
+    last_updated: '2026-08-26'
+    hf_model_id: moonshotai/Kimi-K2-Instruct
+    family: kimi
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 17307
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    num_experts: 384
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 61
+      hidden_size: 7168
+      vocab_size: 163840
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 384
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 131072
+      maximum_context_length: 131072
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: kimi_k2`
+      tool-call-parser: kimi_k2`
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 17307
+      model_path: null
+    source: https://huggingface.co/moonshotai/Kimi-K2-Instruct
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M54_kimi-k2-thinking: Kimi-K2-Thinking (moe, compressed-tensors) ─────────────────────
+  M54_kimi-k2-thinking:
+    last_updated: '2026-08-26'
+    hf_model_id: moonshotai/Kimi-K2-Thinking
+    family: kimi
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: compressed-tensors
+    weight_gb:
+      estimated: 34615
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: compressed-tensors
+      scheme: per-tensor
+    num_experts: 384
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 61
+      hidden_size: 7168
+      vocab_size: 163840
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 384
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: kimi_k2`
+      tool-call-parser: kimi_k2`
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 34615
+      model_path: null
+    source: https://huggingface.co/moonshotai/Kimi-K2-Thinking
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M55_kimi-k2-5: Kimi-K2.5 (moe, compressed-tensors) ─────────────────────
+  M55_kimi-k2-5:
+    last_updated: '2026-08-26'
+    hf_model_id: moonshotai/Kimi-K2.5
+    family: kimi
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: compressed-tensors
+    weight_gb:
+      estimated: 34615
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: compressed-tensors
+      scheme: per-tensor
+    num_experts: 384
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 61
+      hidden_size: 7168
+      vocab_size: 163840
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 384
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: kimi_k2`
+      tool-call-parser: kimi_k2`
+      trust-remote-code: true
+    mtp_params:
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 34615
+      model_path: null
+    source: https://huggingface.co/moonshotai/Kimi-K2.5
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M56_kimi-k2-6: Kimi-K2.6 (moe, compressed-tensors) ─────────────────────
+  M56_kimi-k2-6:
+    last_updated: '2026-08-26'
+    hf_model_id: moonshotai/Kimi-K2.6
+    family: kimi
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: compressed-tensors
+    weight_gb:
+      estimated: 34615
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: compressed-tensors
+      scheme: per-tensor
+    num_experts: 384
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 61
+      hidden_size: 7168
+      vocab_size: 163840
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 384
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: kimi_k2`
+      tool-call-parser: kimi_k2`
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE3
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 34615
+      model_path: null
+    source: https://huggingface.co/moonshotai/Kimi-K2.6
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M57_kimi-k2-7-code: Kimi-K2.7-Code (moe, compressed-tensors) ─────────────────────
+  M57_kimi-k2-7-code:
+    last_updated: '2026-08-26'
+    hf_model_id: moonshotai/Kimi-K2.7-Code
+    family: kimi
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: compressed-tensors
+    weight_gb:
+      estimated: 34615
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: compressed-tensors
+      scheme: per-tensor
+    num_experts: 384
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 61
+      hidden_size: 7168
+      vocab_size: 163840
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 384
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: kimi_k2`
+      tool-call-parser: kimi_k2`
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 34615
+      model_path: null
+    source: https://huggingface.co/moonshotai/Kimi-K2.7-Code
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M58_kimi-k3: Kimi-K3 (moe, compressed-tensors) ─────────────────────
+  M58_kimi-k3:
+    last_updated: '2026-08-26'
+    hf_model_id: moonshotai/Kimi-K3
+    family: kimi
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: compressed-tensors
+    weight_gb:
+      estimated: 225611
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: compressed-tensors
+      scheme: per-tensor
+    num_experts: 896
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 93
+      hidden_size: 7168
+      vocab_size: 163840
+      intermediate_size: 33792
+      moe_intermediate_size: 3072
+      num_experts: 896
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 1048576
+      maximum_context_length: 1048576
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: kimi_k3
+      tool-call-parser: kimi_k3
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: DSPARK`
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 225611
+      model_path: null
+    source: https://huggingface.co/moonshotai/Kimi-K3
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M59_kimi-linear-48b-a3b-instruct: Kimi-Linear-48B-A3B-Instruct (moe_hybrid_gdn, bf16) ─────────────────────
+  M59_kimi-linear-48b-a3b-instruct:
+    last_updated: '2026-08-26'
+    hf_model_id: moonshotai/Kimi-Linear-48B-A3B-Instruct
+    family: kimi
+    parameter_count_b: null
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
+    default_precision: bf16
+    weight_gb:
+      estimated: 91
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 27
+      hidden_size: 2304
+      vocab_size: 163840
+      intermediate_size: 9216
+      moe_intermediate_size: 1024
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: false
+      supports_mtp: false
+    default_flags:
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 91
+      model_path: null
+    source: https://huggingface.co/moonshotai/Kimi-Linear-48B-A3B-Instruct
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M60_deepseek-v3-2-nvfp4: DeepSeek-V3.2-NVFP4 (moe, bf16) ─────────────────────
+  M60_deepseek-v3-2-nvfp4:
+    last_updated: '2026-08-26'
+    hf_model_id: nvidia/DeepSeek-V3.2-NVFP4
+    family: deepseek
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 23085
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    nvfp4_requires_sm: 10
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 61
+      hidden_size: 7168
+      vocab_size: 129280
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 163840
+      maximum_context_length: 163840
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: deepseek-v3
+      tool-call-parser: deepseekv3
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 23085
+      model_path: null
+    source: https://huggingface.co/nvidia/DeepSeek-V3.2-NVFP4
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M61_deepseek-v4-flash-nvfp4: DeepSeek-V4-Flash-NVFP4 (moe, fp8) ─────────────────────
+  M61_deepseek-v4-flash-nvfp4:
+    last_updated: '2026-08-26'
+    hf_model_id: nvidia/DeepSeek-V4-Flash-NVFP4
+    family: deepseek
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 4
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    nvfp4_requires_sm: 10
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 43
+      hidden_size: 4096
+      vocab_size: 129280
+      intermediate_size: null
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 1048576
+      maximum_context_length: 1048576
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: false
+      supports_mtp: true
+    default_flags:
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 4
+      model_path: null
+    source: https://huggingface.co/nvidia/DeepSeek-V4-Flash-NVFP4
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M62_deepseek-v4-pro-nvfp4: DeepSeek-V4-Pro-NVFP4 (moe, fp8) ─────────────────────
+  M62_deepseek-v4-pro-nvfp4:
+    last_updated: '2026-08-26'
+    hf_model_id: nvidia/DeepSeek-V4-Pro-NVFP4
+    family: deepseek
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 13
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    nvfp4_requires_sm: 10
+    num_experts: 384
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 61
+      hidden_size: 7168
+      vocab_size: 129280
+      intermediate_size: null
+      moe_intermediate_size: 3072
+      num_experts: 384
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 1048576
+      maximum_context_length: 1048576
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: false
+      supports_mtp: true
+    default_flags:
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 13
+      model_path: null
+    source: https://huggingface.co/nvidia/DeepSeek-V4-Pro-NVFP4
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M63_glm-4-7-nvfp4: GLM-4.7-NVFP4 (moe, modelopt) ─────────────────────
+  M63_glm-4-7-nvfp4:
+    last_updated: '2026-08-26'
+    hf_model_id: nvidia/GLM-4.7-NVFP4
+    family: glm
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: modelopt
+    weight_gb:
+      estimated: 10371
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: modelopt
+      scheme: per-tensor
+    nvfp4_requires_sm: 10
+    num_experts: 160
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 92
+      hidden_size: 5120
+      vocab_size: 151552
+      intermediate_size: 12288
+      moe_intermediate_size: 1536
+      num_experts: 160
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 202752
+      maximum_context_length: 202752
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: glm45
+      tool-call-parser: glm45`.
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 10371
+      model_path: null
+    source: https://huggingface.co/nvidia/GLM-4.7-NVFP4
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M64_glm-5-1-nvfp4: GLM-5.1-NVFP4 (moe, modelopt) ─────────────────────
+  M64_glm-5-1-nvfp4:
+    last_updated: '2026-08-26'
+    hf_model_id: nvidia/GLM-5.1-NVFP4
+    family: glm
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: modelopt
+    weight_gb:
+      estimated: 16873
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: modelopt
+      scheme: per-tensor
+    nvfp4_requires_sm: 10
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 78
+      hidden_size: 6144
+      vocab_size: 154880
+      intermediate_size: 12288
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 202752
+      maximum_context_length: 202752
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: glm45
+      tool-call-parser: glm47
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 16873
+      model_path: null
+    source: https://huggingface.co/nvidia/GLM-5.1-NVFP4
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M65_kimi-k2-5-nvfp4: Kimi-K2.5-NVFP4 (moe, modelopt) ─────────────────────
+  M65_kimi-k2-5-nvfp4:
+    last_updated: '2026-08-26'
+    hf_model_id: nvidia/Kimi-K2.5-NVFP4
+    family: kimi
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: modelopt
+    weight_gb:
+      estimated: 34615
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: modelopt
+      scheme: per-tensor
+    nvfp4_requires_sm: 10
+    num_experts: 384
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 61
+      hidden_size: 7168
+      vocab_size: 163840
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 384
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: kimi_k2`
+      tool-call-parser: kimi_k2`
+      trust-remote-code: true
+    mtp_params:
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 34615
+      model_path: null
+    source: https://huggingface.co/nvidia/Kimi-K2.5-NVFP4
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M66_kimi-k2-6-nvfp4: Kimi-K2.6-NVFP4 (moe, modelopt) ─────────────────────
+  M66_kimi-k2-6-nvfp4:
+    last_updated: '2026-08-26'
+    hf_model_id: nvidia/Kimi-K2.6-NVFP4
+    family: kimi
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: modelopt
+    weight_gb:
+      estimated: 34615
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: modelopt
+      scheme: per-tensor
+    nvfp4_requires_sm: 10
+    num_experts: 384
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 61
+      hidden_size: 7168
+      vocab_size: 163840
+      intermediate_size: 18432
+      moe_intermediate_size: 2048
+      num_experts: 384
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: kimi_k2`
+      tool-call-parser: kimi_k2`
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE3
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 34615
+      model_path: null
+    source: https://huggingface.co/nvidia/Kimi-K2.6-NVFP4
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M67_nvidia-nemotron-3-nano-30b-a3b-bf16: NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 (moe, bf16) ─────────────────────
+  M67_nvidia-nemotron-3-nano-30b-a3b-bf16:
+    last_updated: '2026-08-26'
+    hf_model_id: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+    family: nvidia
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 59
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 128
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 52
+      hidden_size: 2688
+      vocab_size: 131072
+      intermediate_size: 1856
+      moe_intermediate_size: 1856
+      num_experts: 128
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: nemotron_3`
+      tool-call-parser: qwen3_coder`
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 59
+      model_path: null
+    source: https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M68_nvidia-nemotron-3-nano-30b-a3b-fp8: NVIDIA-Nemotron-3-Nano-30B-A3B-FP8 (moe, bf16) ─────────────────────
+  M68_nvidia-nemotron-3-nano-30b-a3b-fp8:
+    last_updated: '2026-08-26'
+    hf_model_id: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8
+    family: nvidia
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 30
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 128
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 52
+      hidden_size: 2688
+      vocab_size: 131072
+      intermediate_size: 1856
+      moe_intermediate_size: 1856
+      num_experts: 128
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: nemotron_3`
+      tool-call-parser: qwen3_coder`
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 30
+      model_path: null
+    source: https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M69_nvidia-nemotron-3-super-120b-a12b-bf16: NVIDIA-Nemotron-3-Super-120B-A12B-BF16 (moe, bf16) ─────────────────────
+  M69_nvidia-nemotron-3-super-120b-a12b-bf16:
+    last_updated: '2026-08-26'
+    hf_model_id: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+    family: nvidia
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 230
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 512
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 88
+      hidden_size: 4096
+      vocab_size: 131072
+      intermediate_size: 2688
+      moe_intermediate_size: 2688
+      num_experts: 512
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: nemotron_3
+      tool-call-parser: qwen3_coder
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 230
+      model_path: null
+    source: https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M70_nvidia-nemotron-3-ultra-550b-a55b-bf16: NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16 (moe, bf16) ─────────────────────
+  M70_nvidia-nemotron-3-ultra-550b-a55b-bf16:
+    last_updated: '2026-08-26'
+    hf_model_id: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16
+    family: nvidia
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 1044
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 512
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: null
+      hidden_size: 8192
+      vocab_size: 131072
+      intermediate_size: 5120
+      moe_intermediate_size: 5120
+      num_experts: 512
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: nemotron_3`
+      tool-call-parser: qwen3_coder`
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 1044
+      model_path: null
+    source: https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M71_nvidia-nemotron-3-ultra-550b-a55b-nvfp4: NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4 (moe, modelopt) ─────────────────────
+  M71_nvidia-nemotron-3-ultra-550b-a55b-nvfp4:
+    last_updated: '2026-08-26'
+    hf_model_id: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+    family: nvidia
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: modelopt
+    weight_gb: {}
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: modelopt
+      scheme: per-tensor
+    nvfp4_requires_sm: 10
+    num_experts: 512
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: null
+      hidden_size: 8192
+      vocab_size: 131072
+      intermediate_size: 5120
+      moe_intermediate_size: 5120
+      num_experts: 512
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: nemotron_3`
+      tool-call-parser: qwen3_coder`
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: null
+      model_path: null
+    source: https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M72_nemotron-3-nano-omni-30b-a3b-reasoning-bf16: Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16 (dense, bf16) ─────────────────────
+  M72_nemotron-3-nano-omni-30b-a3b-reasoning-bf16:
+    last_updated: '2026-08-26'
+    hf_model_id: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16
+    family: nemotron
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 61
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    architecture:
+      is_moe: null
+      num_hidden_layers: null
+      hidden_size: null
+      vocab_size: null
+      intermediate_size: null
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: deepseek-r1`
+      tool-call-parser: qwen3_coder`
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 61
+      model_path: null
+    source: https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M73_nemotron-3-nano-omni-30b-a3b-reasoning-fp8: Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8 (dense, modelopt) ─────────────────────
+  M73_nemotron-3-nano-omni-30b-a3b-reasoning-fp8:
+    last_updated: '2026-08-26'
+    hf_model_id: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8
+    family: nemotron
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: modelopt
+    weight_gb:
+      estimated: 33
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: modelopt
+      scheme: per-tensor
+    architecture:
+      is_moe: null
+      num_hidden_layers: null
+      hidden_size: null
+      vocab_size: null
+      intermediate_size: null
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: deepseek-r1`
+      tool-call-parser: qwen3_coder`
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 33
+      model_path: null
+    source: https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M74_nemotron-3-nano-omni-30b-a3b-reasoning-nvfp4: Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4 (dense, modelopt) ─────────────────────
+  M74_nemotron-3-nano-omni-30b-a3b-reasoning-nvfp4:
+    last_updated: '2026-08-26'
+    hf_model_id: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4
+    family: nemotron
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: modelopt
+    weight_gb:
+      estimated: 21
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: modelopt
+      scheme: per-tensor
+    nvfp4_requires_sm: 10
+    architecture:
+      is_moe: null
+      num_hidden_layers: null
+      hidden_size: null
+      vocab_size: null
+      intermediate_size: null
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: deepseek-r1`
+      tool-call-parser: qwen3_coder`
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 21
+      model_path: null
+    source: https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M75_gpt-oss-120b: gpt-oss-120b (dense, mxfp4) ─────────────────────
+  M75_gpt-oss-120b:
+    last_updated: '2026-08-26'
+    hf_model_id: openai/gpt-oss-120b
+    family: gpt
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: mxfp4
+    weight_gb:
+      estimated: 61
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: mxfp4
+      scheme: per-tensor
+    architecture:
+      is_moe: null
+      num_hidden_layers: 36
+      hidden_size: 2880
+      vocab_size: 201088
+      intermediate_size: 2880
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 131072
+      maximum_context_length: 131072
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: gpt-oss
+      tool-call-parser: gpt-oss
+    mtp_params:
+      speculative-algorithm: EAGLE3
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 61
+      model_path: null
+    source: https://huggingface.co/openai/gpt-oss-120b
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M76_minicpm-v-4-6: MiniCPM-V-4.6 (dense, bf16) ─────────────────────
+  M76_minicpm-v-4-6:
+    last_updated: '2026-08-26'
+    hf_model_id: openbmb/MiniCPM-V-4.6
+    family: minicpm
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 2
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    architecture:
+      is_moe: null
+      num_hidden_layers: 24
+      hidden_size: 1024
+      vocab_size: 248094
+      intermediate_size: 3584
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: qwen3`
+      tool-call-parser: qwen3_coder`.
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 2
+      model_path: null
+    source: https://huggingface.co/openbmb/MiniCPM-V-4.6
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M77_laguna-m-1: Laguna-M.1 (moe, bf16) ─────────────────────
+  M77_laguna-m-1:
+    last_updated: '2026-08-26'
+    hf_model_id: poolside/Laguna-M.1
+    family: laguna
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 421
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 70
+      hidden_size: 4096
+      vocab_size: 100352
+      intermediate_size: 16384
+      moe_intermediate_size: 1024
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: poolside_v1`
+      tool-call-parser: poolside_v1`
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 421
+      model_path: null
+    source: https://huggingface.co/poolside/Laguna-M.1
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M78_deepseek-v4-flash-fp8: DeepSeek-V4-Flash-FP8 (moe, fp8) ─────────────────────
+  M78_deepseek-v4-flash-fp8:
+    last_updated: '2026-08-26'
+    hf_model_id: sgl-project/DeepSeek-V4-Flash-FP8
+    family: deepseek
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 149
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 43
+      hidden_size: 4096
+      vocab_size: 129280
+      intermediate_size: null
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 1048576
+      maximum_context_length: 1048576
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: false
+      supports_chat_template: true
+      supports_tool_call: false
+      supports_mtp: true
+    default_flags:
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 149
+      model_path: null
+    source: https://huggingface.co/sgl-project/DeepSeek-V4-Flash-FP8
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M79_step-3-5-flash: Step-3.5-Flash (moe, bf16) ─────────────────────
+  M79_step-3-5-flash:
+    last_updated: '2026-08-26'
+    hf_model_id: stepfun-ai/Step-3.5-Flash
+    family: step
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 371
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: null
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 45
+      hidden_size: 4096
+      vocab_size: 128896
+      intermediate_size: 11264
+      moe_intermediate_size: 1280
+      num_experts: null
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: step3p5
+      tool-call-parser: step3p5
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 371
+      model_path: null
+    source: https://huggingface.co/stepfun-ai/Step-3.5-Flash
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M80_step-3-7-flash: Step-3.7-Flash (moe, bf16) ─────────────────────
+  M80_step-3-7-flash:
+    last_updated: '2026-08-26'
+    hf_model_id: stepfun-ai/Step-3.7-Flash
+    family: step
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 375
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: null
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 45
+      hidden_size: 4096
+      vocab_size: 128896
+      intermediate_size: 11264
+      moe_intermediate_size: 1280
+      num_experts: null
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: step3p5
+      tool-call-parser: step3p5
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 375
+      model_path: null
+    source: https://huggingface.co/stepfun-ai/Step-3.7-Flash
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M81_step3-vl-10b: Step3-VL-10B (dense, bf16) ─────────────────────
+  M81_step3-vl-10b:
+    last_updated: '2026-08-26'
+    hf_model_id: stepfun-ai/Step3-VL-10B
+    family: step3
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 27
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    architecture:
+      is_moe: null
+      num_hidden_layers: 36
+      hidden_size: 4096
+      vocab_size: 151936
+      intermediate_size: 12288
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 65536
+      maximum_context_length: 65536
+      recommended_initial_context_length: 65536
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: deepseek-r1
+      tool-call-parser: hermes
+      trust-remote-code: true
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 27
+      model_path: null
+    source: https://huggingface.co/stepfun-ai/Step3-VL-10B
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M82_hy3: Hy3 (moe, bf16) ─────────────────────
+  M82_hy3:
+    last_updated: '2026-08-26'
+    hf_model_id: tencent/Hy3
+    family: hy3
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 557
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 192
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 80
+      hidden_size: 4096
+      vocab_size: 120832
+      intermediate_size: 13312
+      moe_intermediate_size: 1536
+      num_experts: 192
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: hunyuan
+      tool-call-parser: hunyuan
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 557
+      model_path: null
+    source: https://huggingface.co/tencent/Hy3
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M83_hy3-preview: Hy3-preview (moe, bf16) ─────────────────────
+  M83_hy3-preview:
+    last_updated: '2026-08-26'
+    hf_model_id: tencent/Hy3-preview
+    family: hy3
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 557
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 192
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 80
+      hidden_size: 4096
+      vocab_size: 120832
+      intermediate_size: 13312
+      moe_intermediate_size: 1536
+      num_experts: 192
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 262144
+      maximum_context_length: 262144
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: auto`
+      tool-call-parser: auto`
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 557
+      model_path: null
+    source: https://huggingface.co/tencent/Hy3-preview
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M84_glm-4-5: GLM-4.5 (moe, bf16) ─────────────────────
+  M84_glm-4-5:
+    last_updated: '2026-08-26'
+    hf_model_id: zai-org/GLM-4.5
+    family: glm
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 334
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 160
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 92
+      hidden_size: 5120
+      vocab_size: 151552
+      intermediate_size: 12288
+      moe_intermediate_size: 1536
+      num_experts: 160
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 131072
+      maximum_context_length: 131072
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: glm45
+      tool-call-parser: glm45`.
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 334
+      model_path: null
+    source: https://huggingface.co/zai-org/GLM-4.5
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M85_glm-4-5v: GLM-4.5V (moe, bf16) ─────────────────────
+  M85_glm-4-5v:
+    last_updated: '2026-08-26'
+    hf_model_id: zai-org/GLM-4.5V
+    family: glm
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 201
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 128
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 46
+      hidden_size: 4096
+      vocab_size: 151552
+      intermediate_size: 10944
+      moe_intermediate_size: 1408
+      num_experts: 128
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 65536
+      maximum_context_length: 65536
+      recommended_initial_context_length: 65536
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: glm45
+      tool-call-parser: glm45`.
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 201
+      model_path: null
+    source: https://huggingface.co/zai-org/GLM-4.5V
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M86_glm-4-6: GLM-4.6 (moe, bf16) ─────────────────────
+  M86_glm-4-6:
+    last_updated: '2026-08-26'
+    hf_model_id: zai-org/GLM-4.6
+    family: glm
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 329
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 160
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 92
+      hidden_size: 5120
+      vocab_size: 151552
+      intermediate_size: 12288
+      moe_intermediate_size: 1536
+      num_experts: 160
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 202752
+      maximum_context_length: 202752
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: glm45
+      tool-call-parser: glm45`.
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 329
+      model_path: null
+    source: https://huggingface.co/zai-org/GLM-4.6
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M87_glm-4-6v: GLM-4.6V (moe, bf16) ─────────────────────
+  M87_glm-4-6v:
+    last_updated: '2026-08-26'
+    hf_model_id: zai-org/GLM-4.6V
+    family: glm
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 100
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 128
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 46
+      hidden_size: 4096
+      vocab_size: 151552
+      intermediate_size: 10944
+      moe_intermediate_size: 1408
+      num_experts: 128
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 131072
+      maximum_context_length: 131072
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: glm45
+      tool-call-parser: glm45`.
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 100
+      model_path: null
+    source: https://huggingface.co/zai-org/GLM-4.6V
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M88_glm-4-7: GLM-4.7 (moe, bf16) ─────────────────────
+  M88_glm-4-7:
+    last_updated: '2026-08-26'
+    hf_model_id: zai-org/GLM-4.7
+    family: glm
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 334
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 160
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 92
+      hidden_size: 5120
+      vocab_size: 151552
+      intermediate_size: 12288
+      moe_intermediate_size: 1536
+      num_experts: 160
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 202752
+      maximum_context_length: 202752
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: glm45
+      tool-call-parser: glm45`.
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 334
+      model_path: null
+    source: https://huggingface.co/zai-org/GLM-4.7
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M89_glm-4-7-flash: GLM-4.7-Flash (moe, bf16) ─────────────────────
+  M89_glm-4-7-flash:
+    last_updated: '2026-08-26'
+    hf_model_id: zai-org/GLM-4.7-Flash
+    family: glm
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 29
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 64
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 47
+      hidden_size: 2048
+      vocab_size: 154880
+      intermediate_size: 10240
+      moe_intermediate_size: 1536
+      num_experts: 64
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 202752
+      maximum_context_length: 202752
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: glm45
+      tool-call-parser: glm45`.
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 29
+      model_path: null
+    source: https://huggingface.co/zai-org/GLM-4.7-Flash
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M90_glm-5: GLM-5 (moe, bf16) ─────────────────────
+  M90_glm-5:
+    last_updated: '2026-08-26'
+    hf_model_id: zai-org/GLM-5
+    family: glm
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 1404
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 78
+      hidden_size: 6144
+      vocab_size: 154880
+      intermediate_size: 12288
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 202752
+      maximum_context_length: 202752
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: glm45
+      tool-call-parser: glm47
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 1404
+      model_path: null
+    source: https://huggingface.co/zai-org/GLM-5
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M91_glm-5-fp8: GLM-5-FP8 (moe, fp8) ─────────────────────
+  M91_glm-5-fp8:
+    last_updated: '2026-08-26'
+    hf_model_id: zai-org/GLM-5-FP8
+    family: glm
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 8437
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 78
+      hidden_size: 6144
+      vocab_size: 154880
+      intermediate_size: 12288
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 202752
+      maximum_context_length: 202752
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: glm45
+      tool-call-parser: glm47
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 8437
+      model_path: null
+    source: https://huggingface.co/zai-org/GLM-5-FP8
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M92_glm-5-1: GLM-5.1 (moe, bf16) ─────────────────────
+  M92_glm-5-1:
+    last_updated: '2026-08-26'
+    hf_model_id: zai-org/GLM-5.1
+    family: glm
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 1404
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 78
+      hidden_size: 6144
+      vocab_size: 154880
+      intermediate_size: 12288
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 202752
+      maximum_context_length: 202752
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: glm45
+      tool-call-parser: glm47
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 1404
+      model_path: null
+    source: https://huggingface.co/zai-org/GLM-5.1
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M93_glm-5-1-fp8: GLM-5.1-FP8 (moe, fp8) ─────────────────────
+  M93_glm-5-1-fp8:
+    last_updated: '2026-08-26'
+    hf_model_id: zai-org/GLM-5.1-FP8
+    family: glm
+    parameter_count_b: null
+    arch: moe
+    hybrid_mamba: false
+    default_precision: fp8
+    weight_gb:
+      estimated: 8437
+    modalities:
+      input:
+      - text
+      output:
+      - text
+    quantization:
+      method: fp8
+      scheme: fine-grained
+      block_size: 128
+      weight_dtype: fp8
+      activation_dtype: bf16
+    num_experts: 256
+    num_experts_per_tok: null
+    num_experts_source: official
+    architecture:
+      is_moe: true
+      num_hidden_layers: 78
+      hidden_size: 6144
+      vocab_size: 154880
+      intermediate_size: 12288
+      moe_intermediate_size: 2048
+      num_experts: 256
+    kv_gb_per_token: 3.0e-05
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 202752
+      maximum_context_length: 202752
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: true
+    default_flags:
+      reasoning-parser: glm45
+      tool-call-parser: glm47
+      trust-remote-code: true
+    mtp_params:
+      speculative-algorithm: EAGLE
+      speculative-num-steps: 3
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 8437
+      model_path: null
+    source: https://huggingface.co/zai-org/GLM-5.1-FP8
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+
+  # ── M94_glyph: Glyph (dense, bf16) ─────────────────────
+  M94_glyph:
+    last_updated: '2026-08-26'
+    hf_model_id: zai-org/Glyph
+    family: glyph
+    parameter_count_b: null
+    arch: dense
+    hybrid_mamba: false
+    default_precision: bf16
+    weight_gb:
+      estimated: 19
+    modalities:
+      input:
+      - text
+      - image
+      output:
+      - text
+    quantization:
+      method: none
+      scheme: per-tensor
+    architecture:
+      is_moe: null
+      num_hidden_layers: 40
+      hidden_size: 4096
+      vocab_size: 151552
+      intermediate_size: 13696
+    kv_gb_per_token: 0.00012
+    kv_gb_per_token_source: reference
+    context:
+      native_context_length: 131072
+      maximum_context_length: 131072
+      recommended_initial_context_length: 131072
+    capabilities:
+      supports_reasoning: true
+      supports_chat_template: true
+      supports_tool_call: true
+      supports_mtp: false
+    default_flags:
+      reasoning-parser: glm45
+      tool-call-parser: glm45
+    deployment:
+      model_format: huggingface
+      weight_size_gb: 19
+      model_path: null
+    source: https://huggingface.co/zai-org/Glyph
+    notes: Auto-synced from HF config.json + SGLang cookbook.
+

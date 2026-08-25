@@ -182,18 +182,26 @@ def extract_model_info(config: dict) -> dict[str, Any]:
     moe_intermediate_size = get("moe_intermediate_size", None)
     intermediate_size = get("intermediate_size", None)
 
-    # MoE detection: check is_moe, then num_experts, then n_routed_experts
+    # MoE detection: check is_moe, then num_experts, then n_routed_experts,
+    # then moe_intermediate_size, then shared_expert in modules_to_not_convert
     if is_moe is None and (num_experts is not None or n_routed_experts is not None):
         is_moe = True
     if num_experts is None and n_routed_experts is not None:
         num_experts = n_routed_experts
-
-    # Also check for shared_expert in modules_to_not_convert as MoE indicator
+    # Some models have moe_intermediate_size but not is_moe flag
+    if is_moe is None and moe_intermediate_size is not None:
+        is_moe = True
+    # Check shared_expert or .gate in modules_to_not_convert
     if is_moe is None:
         quant_config = config.get("quantization_config", text_config.get("quantization_config", {}))
         modules = quant_config.get("modules_to_not_convert", []) if quant_config else []
         if modules and any("shared_expert" in str(m) or ".gate" in str(m) for m in modules):
             is_moe = True
+            # Try to infer num_experts from modules count
+            if num_experts is None:
+                gate_count = sum(1 for m in modules if ".gate" in str(m) and "shared" not in str(m))
+                if gate_count > 0:
+                    num_experts = gate_count
 
     quant_config = config.get("quantization_config", text_config.get("quantization_config", {}))
     quant_method = quant_config.get("quant_method", "none") if quant_config else "none"
@@ -240,21 +248,47 @@ def load_models_yaml() -> dict[str, Any]:
 
 
 def save_models_yaml(data: dict) -> None:
+    """Save models.yaml: refresh version/updated/total + add comment dividers."""
+    data["version"] = data.get("version", 1) + 1
+    data["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     data["total"] = len(data.get("models", {}))
+
+    # Build yaml manually with comment dividers between models
+    lines = [
+        f"version: {data['version']}",
+        f"updated: {data['updated']}",
+        f"total: {data['total']}",
+        "models:",
+    ]
+    for key, val in data.get("models", {}).items():
+        hf_id = val.get("hf_model_id", key)
+        model_name = hf_id.split("/")[-1] if "/" in hf_id else hf_id
+        arch = val.get("arch", "unknown")
+        prec = val.get("default_precision", "unknown")
+        # Comment divider
+        lines.append(f"  # ── {key}: {model_name} ({arch}, {prec}) ─" + "─" * 20)
+        # Dump this single model entry
+        single = {key: val}
+        dumped = yaml.dump(single, default_flow_style=False, allow_unicode=True, sort_keys=False, indent=2)
+        for dline in dumped.splitlines():
+            if dline:
+                lines.append("  " + dline)
+        lines.append("")
     with open(MODELS_YAML, "w", encoding="utf-8") as f:
-        yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        f.write(chr(10).join(lines) + chr(10))
 
 
-def make_model_key(hf_id: str) -> str:
-    """Convert HF model ID to a yaml key (e.g. Qwen/Qwen3.6-27B-FP8 -> qwen36-27b-fp8)."""
-    name = hf_id.split("/")[-1]  # Qwen3.6-27B-FP8
+def make_model_key(hf_id: str, model_index: int) -> str:
+    """Convert HF model ID to a yaml key with M{NN}_ prefix.
+    e.g. (Qwen/Qwen3.6-27B-FP8, 4) -> M04_qwen36-27b-fp8
+    """
+    name = hf_id.split("/")[-1]
     key = name.lower()
-    key = re.sub(r"[^a-z0-9]", "-", key)  # qwen3-6-27b-fp8
-    key = re.sub(r"-+", "-", key)  # collapse dashes
+    key = re.sub(r"[^a-z0-9]", "-", key)
+    key = re.sub(r"-+", "-", key)
     key = key.strip("-")
-    # Qwen3.6 -> qwen36 pattern
     key = key.replace("3-6", "36")
-    return key
+    return f"M{model_index:02d}_{key}"
 
 
 
@@ -403,12 +437,13 @@ def generate_new_model_card(hf_id: str, info: dict, sglang_repo: str = "") -> di
         "last_updated": datetime.now().strftime("%Y-%m-%d"),
         "hf_model_id": hf_id,
         "family": model_name.split("-")[0].lower(),
+        "parameter_count_b": None,  # needs manual fill from cookbook
         "arch": arch,
         "hybrid_mamba": "hybrid" in arch or "gdn" in arch,
         "default_precision": quant_method if quant_method != "none" else "bf16",
     }
 
-    # weight_gb: try cookbook first, then HF API
+    # weight_gb: try cookbook first, then HF API, then estimate from params
     if cookbook_weights:
         card["weight_gb"] = cookbook_weights
     else:
@@ -416,7 +451,24 @@ def generate_new_model_card(hf_id: str, info: dict, sglang_repo: str = "") -> di
         if hf_weights:
             card["weight_gb"] = hf_weights
         else:
-            card["weight_gb"] = {}
+            # Estimate from parameter count: fp8=2 bytes/param, bf16=4 bytes/param
+            num_layers = info.get("num_hidden_layers", 0) or 0
+            hidden = info.get("hidden_size", 0) or 0
+            intermediate = info.get("intermediate_size", 0) or 0
+            num_exp = info.get("num_experts") or 0
+            if num_layers and hidden:
+                # Rough: attention + MLP params per layer
+                attn_params = 2 * hidden * hidden  # Q + KV (simplified)
+                mlp_params = 3 * hidden * intermediate  # gate + up + down
+                if num_exp and is_moe:
+                    mlp_params = num_exp * mlp_params
+                total_params = num_layers * (attn_params + mlp_params) + hidden * info.get("vocab_size", 0)
+                prec = quant_method if quant_method != "none" else "bf16"
+                bytes_per_param = 2 if prec in ("fp8", "fp4", "nvfp4") else 4
+                est_gb = total_params * bytes_per_param / (1024**3)
+                card["weight_gb"] = {"estimated": round(est_gb)}
+            else:
+                card["weight_gb"] = {}
 
     # Modalities
     has_vision = bool(info.get("architectures")) and any("VL" in a or "Vision" in a or "Conditional" in a for a in info.get("architectures", []))
@@ -436,6 +488,9 @@ def generate_new_model_card(hf_id: str, info: dict, sglang_repo: str = "") -> di
         card["quantization"]["weight_dtype"] = "fp8"
         card["quantization"]["activation_dtype"] = "bf16"
 
+    # NVFP4 support
+    if "nvfp4" in model_name.lower():
+        card["nvfp4_requires_sm"] = 10  # cookbook: NVFP4 requires B200/B300 (SM100+)
     # Architecture
     arch_data: dict[str, Any] = {
         "is_moe": is_moe,
@@ -448,14 +503,23 @@ def generate_new_model_card(hf_id: str, info: dict, sglang_repo: str = "") -> di
         arch_data["moe_intermediate_size"] = info.get("moe_intermediate_size")
         arch_data["num_experts"] = info.get("num_experts")
         card["num_experts"] = info.get("num_experts")
-        if info.get("num_experts"):
-            card["num_experts_per_tok"] = None  # needs config check
+        card["num_experts_per_tok"] = info.get("num_experts_per_tok")
+        card["num_experts_source"] = "official"  # from HF config.json
     card["architecture"] = arch_data
+
+    # KV/token rough estimate (reference only)
+    if is_moe:
+        card["kv_gb_per_token"] = 0.00003  # MoE with GDN: most layers linear, small KV
+    else:
+        card["kv_gb_per_token"] = 0.00012  # dense standard estimate
+    card["kv_gb_per_token_source"] = "reference"
 
     # Context
     if info.get("max_position_embeddings"):
         card["context"] = {
             "native_context_length": info["max_position_embeddings"],
+            "maximum_context_length": info["max_position_embeddings"],
+            "recommended_initial_context_length": min(131072, info["max_position_embeddings"]),
         }
 
     # Capabilities
@@ -480,10 +544,13 @@ def generate_new_model_card(hf_id: str, info: dict, sglang_repo: str = "") -> di
         card["mtp_params"] = cookbook_mtp
 
     # Deployment
+    weight_key = card.get("default_precision", "fp8")
+    if weight_key == "none":
+        weight_key = "bf16"
     card["deployment"] = {
         "model_format": "huggingface",
-        "weight_size_gb": cookbook_weights.get(card.get("default_precision", "fp8")),
-        "model_path": None,
+        "weight_size_gb": cookbook_weights.get(weight_key) or card.get("weight_gb", {}).get("estimated"),
+        "model_path": None,  # fill after haihub download
     }
 
     card["source"] = f"https://huggingface.co/{hf_id}"
@@ -603,7 +670,8 @@ def main(argv: list[str] | None = None) -> int:
             # New model — generate card
             print(f"    [NEW] Generating model card...")
             card = generate_new_model_card(hf_id, hf_info, args.sglang_repo)
-            model_key = make_model_key(hf_id)
+            model_index = len(models) + 1
+            model_key = make_model_key(hf_id, model_index)
             # Avoid key collision
             if model_key in models:
                 model_key = model_key + "-auto"
