@@ -210,58 +210,209 @@ def make_model_key(hf_id: str) -> str:
     return key
 
 
-def generate_new_model_card(hf_id: str, info: dict) -> dict[str, Any]:
-    """Generate a new model card from HF info. Marked [AUTO] for manual completion."""
+
+def find_cookbook_mdx(sglang_repo: str, hf_id: str) -> Path | None:
+    """Find the cookbook mdx file that contains this model."""
+    repo = Path(sglang_repo)
+    model_name = hf_id.split("/")[-1].lower()
+    for cookbook_dir in COOKBOOK_DIRS:
+        search_dir = repo / cookbook_dir
+        if not search_dir.exists():
+            continue
+        for mdx in search_dir.rglob("*.mdx"):
+            try:
+                text = mdx.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if hf_id in text or model_name in text.lower():
+                return mdx
+    return None
+
+
+def extract_default_flags_from_cookbook(mdx_path: Path) -> dict[str, Any]:
+    """Extract --reasoning-parser, --tool-call-parser, --trust-remote-code from cookbook."""
+    try:
+        text = mdx_path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    flags: dict[str, Any] = {}
+    # reasoning-parser
+    m = re.search(r'--reasoning-parser\s+(\S+)', text)
+    if m:
+        flags["reasoning-parser"] = m.group(1).strip('\"')
+    # tool-call-parser
+    m = re.search(r'--tool-call-parser\s+(\S+)', text)
+    if m:
+        flags["tool-call-parser"] = m.group(1).strip('\"')
+    # trust-remote-code
+    if "--trust-remote-code" in text:
+        flags["trust-remote-code"] = True
+    return flags
+
+
+def extract_mtp_params_from_cookbook(mdx_path: Path) -> dict[str, Any]:
+    """Extract speculative decoding params from cookbook."""
+    try:
+        text = mdx_path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    params: dict[str, Any] = {}
+    # speculative-algorithm
+    m = re.search(r'--speculative-algorithm\s+(\S+)', text)
+    if m:
+        params["speculative-algorithm"] = m.group(1).strip('\"')
+    # speculative-num-steps
+    m = re.search(r'--speculative-num-steps\s+(\d+)', text)
+    if m:
+        params["speculative-num-steps"] = int(m.group(1))
+    # speculative-eagle-topk
+    m = re.search(r'--speculative-eagle-topk\s+(\d+)', text)
+    if m:
+        params["speculative-eagle-topk"] = int(m.group(1))
+    # speculative-num-draft-tokens
+    m = re.search(r'--speculative-num-draft-tokens\s+(\d+)', text)
+    if m:
+        params["speculative-num-draft-tokens"] = int(m.group(1))
+    return params
+
+
+def extract_weight_gb_from_cookbook(mdx_path: Path, model_name: str) -> dict[str, int]:
+    """Extract weight sizes from cookbook Hardware requirements section."""
+    try:
+        text = mdx_path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    weights: dict[str, int] = {}
+    name_lower = model_name.lower()
+    # Pattern: "27B FP8: ~27GB for weights" or "35B-A3B FP8: ~35GB"
+    for prec in ["bf16", "fp8", "nvfp4"]:
+        pattern = rf'{re.escape(name_lower)}\s+{prec}[^~]*~(\d+)\s*GB'
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            weights[prec] = int(m.group(1))
+    return weights
+
+def generate_new_model_card(hf_id: str, info: dict, sglang_repo: str = "") -> dict[str, Any]:
+    """Generate a complete model card from HF config + cookbook."""
     is_moe = info.get("is_moe", False)
     arch = "moe" if is_moe else "dense"
+    model_name = hf_id.split("/")[-1]
+
+    # Try to find cookbook mdx for this model
+    cookbook_flags = {}
+    cookbook_mtp = {}
+    cookbook_weights = {}
+    if sglang_repo:
+        mdx = find_cookbook_mdx(sglang_repo, hf_id)
+        if mdx:
+            print(f"    [cookbook] found: {mdx.name}")
+            cookbook_flags = extract_default_flags_from_cookbook(mdx)
+            cookbook_mtp = extract_mtp_params_from_cookbook(mdx)
+            cookbook_weights = extract_weight_gb_from_cookbook(mdx, model_name)
+        else:
+            print(f"    [cookbook] not found for {hf_id}")
+
+    # Detect quantization scheme
+    quant_method = info.get("quant_method", "none")
+    block_size = info.get("block_size")
+    scheme = "fine-grained" if block_size else "per-tensor"
+
+    # Detect arch subtype
+    model_type = info.get("model_type", "")
+    architectures = info.get("architectures", [])
+    arch_str = " ".join(architectures).lower() if architectures else model_type.lower()
+    if "mamba" in arch_str or "gdn" in arch_str or "deltanet" in arch_str:
+        arch = "moe_hybrid_gdn" if is_moe else "dense_hybrid_gdn"
+    elif "mla" in arch_str or "deepseek" in arch_str:
+        arch = "moe" if is_moe else "dense"
+    elif is_moe:
+        arch = "moe"
 
     card: dict[str, Any] = {
         "last_updated": datetime.now().strftime("%Y-%m-%d"),
         "hf_model_id": hf_id,
-        "family": "[AUTO-fill]",
-        "parameter_count_b": None,
+        "family": model_name.split("-")[0].lower(),
         "arch": arch,
-        "hybrid_mamba": False,  # needs manual check
-        "default_precision": info.get("quant_method", "none"),
-        "weight_gb": {},
-        "_auto_generated": True,
-        "_todo": "Fill family, weight_gb, default_flags, mtp_params, hybrid_mamba from cookbook",
-        "quantization": {
-            "method": info.get("quant_method", "none"),
-            "scheme": "[AUTO-detect]",
-            "block_size": info.get("block_size"),
-        },
-        "architecture": {
-            "is_moe": is_moe,
-            "intermediate_size": info.get("intermediate_size"),
-            "num_hidden_layers": info.get("num_hidden_layers"),
-            "hidden_size": info.get("hidden_size"),
-            "vocab_size": info.get("vocab_size"),
-        },
-        "capabilities": {
-            "supports_mtp": info.get("has_mtp", False),
-        },
-        "default_flags": {
-            "_todo": "Fill from cookbook deployment command (reasoning-parser, tool-call-parser, etc.)",
-        },
-        "deployment": {
-            "model_format": "huggingface",
-            "weight_size_gb": None,
-            "model_path": None,
-        },
-        "source": f"https://huggingface.co/{hf_id}",
-        "notes": "[AUTO] Auto-discovered from SGLang cookbook. Manual completion required.",
+        "hybrid_mamba": "hybrid" in arch or "gdn" in arch,
+        "default_precision": quant_method if quant_method != "none" else "bf16",
     }
 
-    if is_moe:
-        card["architecture"]["num_experts"] = info.get("num_experts")
-        card["architecture"]["moe_intermediate_size"] = info.get("moe_intermediate_size")
-        card["num_experts"] = info.get("num_experts")
+    # weight_gb from cookbook
+    if cookbook_weights:
+        card["weight_gb"] = cookbook_weights
+    else:
+        card["weight_gb"] = {}
 
+    # Modalities
+    has_vision = bool(info.get("architectures")) and any("VL" in a or "Vision" in a or "Conditional" in a for a in info.get("architectures", []))
+    card["modalities"] = {
+        "input": ["text", "image"] if has_vision else ["text"],
+        "output": ["text"],
+    }
+
+    # Quantization
+    card["quantization"] = {
+        "method": quant_method,
+        "scheme": scheme,
+    }
+    if block_size:
+        card["quantization"]["block_size"] = block_size
+    if quant_method == "fp8":
+        card["quantization"]["weight_dtype"] = "fp8"
+        card["quantization"]["activation_dtype"] = "bf16"
+
+    # Architecture
+    arch_data: dict[str, Any] = {
+        "is_moe": is_moe,
+        "num_hidden_layers": info.get("num_hidden_layers"),
+        "hidden_size": info.get("hidden_size"),
+        "vocab_size": info.get("vocab_size"),
+        "intermediate_size": info.get("intermediate_size"),
+    }
+    if is_moe:
+        arch_data["moe_intermediate_size"] = info.get("moe_intermediate_size")
+        arch_data["num_experts"] = info.get("num_experts")
+        card["num_experts"] = info.get("num_experts")
+        if info.get("num_experts"):
+            card["num_experts_per_tok"] = None  # needs config check
+    card["architecture"] = arch_data
+
+    # Context
     if info.get("max_position_embeddings"):
         card["context"] = {
             "native_context_length": info["max_position_embeddings"],
         }
+
+    # Capabilities
+    has_mtp = info.get("has_mtp", False) or bool(cookbook_mtp)
+    card["capabilities"] = {
+        "supports_reasoning": bool(cookbook_flags.get("reasoning-parser")),
+        "supports_chat_template": True,
+        "supports_tool_call": bool(cookbook_flags.get("tool-call-parser")),
+        "supports_mtp": has_mtp,
+    }
+
+    # default_flags from cookbook
+    if cookbook_flags:
+        card["default_flags"] = cookbook_flags
+    else:
+        card["default_flags"] = {}
+        if has_vision or "qwen" in model_name.lower():
+            card["default_flags"]["trust-remote-code"] = True
+
+    # mtp_params from cookbook
+    if cookbook_mtp:
+        card["mtp_params"] = cookbook_mtp
+
+    # Deployment
+    card["deployment"] = {
+        "model_format": "huggingface",
+        "weight_size_gb": cookbook_weights.get(card.get("default_precision", "fp8")),
+        "model_path": None,
+    }
+
+    card["source"] = f"https://huggingface.co/{hf_id}"
+    card["notes"] = f"Auto-synced from HF config.json + SGLang cookbook."
 
     return card
 
@@ -376,7 +527,7 @@ def main(argv: list[str] | None = None) -> int:
         if hf_id not in existing_hf_ids:
             # New model — generate card
             print(f"    [NEW] Generating model card...")
-            card = generate_new_model_card(hf_id, hf_info)
+            card = generate_new_model_card(hf_id, hf_info, args.sglang_repo)
             model_key = make_model_key(hf_id)
             # Avoid key collision
             if model_key in models:
