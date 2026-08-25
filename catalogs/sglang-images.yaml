@@ -59,6 +59,7 @@ quantization_support:
       含 NVIDIA_H20。
 version: 1
 total: 3
+
 images:
   # ── I01: SGLang v0.5.10 (CUDA 12.9.1) ─────────────────
   I01_sglang-v0.5.10:
