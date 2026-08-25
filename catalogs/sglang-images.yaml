@@ -3,6 +3,7 @@
 # valid_flags 由 scripts/sync_sglang_params.py 从源码 AST 自动提取。
 
 version: 1
+updated: 2026-08-25 16:09:57
 total: 3
 
 images:

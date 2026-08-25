@@ -31,6 +31,17 @@ from typing import Any
 
 import yaml
 
+from datetime import datetime
+
+
+def _update_yaml_meta(data: dict, section_key: str) -> None:
+    """Update version (+1), updated (timestamp), total (recount) in yaml data."""
+    data["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    data["version"] = data.get("version", 1) + 1
+    section = data.get(section_key, {})
+    data["total"] = len(section)
+
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MODELS_YAML = PROJECT_ROOT / "catalogs/models.yaml"
 
