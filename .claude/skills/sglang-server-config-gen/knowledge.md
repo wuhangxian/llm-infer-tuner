@@ -215,7 +215,9 @@
 
 ### 6.3 名额分配规则
 
-基线固定 1 条后,剩余名额(max_candidates-1)按比例分配:
+**如果 JobSpec 有 baseline 字段**:基线不算在 max_candidates 里,总候选数 = max_candidates + 1。基线放第一条(id="baseline"),AI 生成 max_candidates 条候选排在后面。预览时基线显示在第一行。
+
+**如果没有 baseline 字段**:基线占第 1 条,剩余名额(max_candidates-1)按比例分配。
 
 | 类别 | 占比 | 填充顺序 |
 |---|---|---|
