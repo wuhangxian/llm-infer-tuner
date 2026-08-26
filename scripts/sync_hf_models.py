@@ -221,11 +221,25 @@ def extract_model_info(config: dict) -> dict[str, Any]:
         modules = quant_config.get("modules_to_not_convert", []) if quant_config else []
         if modules and any("shared_expert" in str(m) or ".gate" in str(m) for m in modules):
             is_moe = True
-            # Try to infer num_experts from modules count
             if num_experts is None:
                 gate_count = sum(1 for m in modules if ".gate" in str(m) and "shared" not in str(m))
                 if gate_count > 0:
                     num_experts = gate_count
+
+    # hybrid_mamba / GDN detection: check layer_types for linear_attention,
+    # mamba_ssm_dtype, linear_num_value_heads, or gated_deltanet in architecture
+    layer_types = get("layer_types", None)
+    has_linear_attn = False
+    if layer_types and isinstance(layer_types, list):
+        has_linear_attn = any("linear" in str(lt).lower() for lt in layer_types)
+    has_mamba_ssm = get("mamba_ssm_dtype", None) is not None
+    has_linear_heads = get("linear_num_value_heads", None) is not None
+    has_gdn = has_linear_attn or has_mamba_ssm or has_linear_heads
+
+    # num_experts_per_tok
+    num_experts_per_tok = get("num_experts_per_tok", None)
+    if num_experts_per_tok is None and n_routed_experts is not None:
+        num_experts_per_tok = get("num_experts_per_tok", None)
 
     quant_config = config.get("quantization_config", text_config.get("quantization_config", {}))
     quant_method = quant_config.get("quant_method", "none") if quant_config else "none"
@@ -253,6 +267,8 @@ def extract_model_info(config: dict) -> dict[str, Any]:
         "num_experts": num_experts,
         "n_routed_experts": n_routed_experts,
         "moe_intermediate_size": moe_intermediate_size,
+        "has_gdn": has_gdn,
+        "num_experts_per_tok": num_experts_per_tok,
         "intermediate_size": intermediate_size,
         "block_size": block_size,
         "quant_method": quant_method,
@@ -404,19 +420,25 @@ def extract_mtp_params_from_cookbook(mdx_path: Path) -> dict[str, Any]:
 
 
 def extract_weight_gb_from_cookbook(mdx_path: Path, model_name: str) -> dict[str, int]:
-    """Extract weight sizes from cookbook Hardware requirements section."""
+    """Extract weight sizes from cookbook. Handles multiple formats."""
     try:
         text = mdx_path.read_text(encoding="utf-8")
     except OSError:
         return {}
     weights: dict[str, int] = {}
     name_lower = model_name.lower()
-    # Pattern: "27B FP8: ~27GB for weights" or "35B-A3B FP8: ~35GB"
+    # Pattern 1: "27B FP8: ~27GB for weights"
     for prec in ["bf16", "fp8", "nvfp4"]:
         pattern = rf'{re.escape(name_lower)}\s+{prec}[^~]*~(\d+)\s*GB'
         m = re.search(pattern, text, re.IGNORECASE)
         if m:
             weights[prec] = int(m.group(1))
+    # Pattern 2: "FP8 weights ~28.5GB" or "NVFP4 weights ~16.5GB"
+    for prec in ["fp8", "bf16", "nvfp4"]:
+        pattern = rf'{prec}\s+weights\s*~?(\d+(?:\.\d+)?)\s*GB'
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m and prec not in weights:
+            weights[prec] = int(float(m.group(1)))
     return weights
 
 def generate_new_model_card(hf_id: str, info: dict, sglang_repo: str = "") -> dict[str, Any]:
@@ -444,11 +466,12 @@ def generate_new_model_card(hf_id: str, info: dict, sglang_repo: str = "") -> di
     block_size = info.get("block_size")
     scheme = "fine-grained" if block_size else "per-tensor"
 
-    # Detect arch subtype from architectures/model_type
+    # Detect arch subtype from architectures/model_type + has_gdn
     model_type = info.get("model_type", "")
     architectures = info.get("architectures", [])
     arch_str = " ".join(architectures).lower() if architectures else model_type.lower()
-    if "mamba" in arch_str or "gdn" in arch_str or "deltanet" in arch_str or "linear" in arch_str:
+    has_gdn = info.get("has_gdn", False)
+    if has_gdn or "mamba" in arch_str or "gdn" in arch_str or "deltanet" in arch_str or "linear" in arch_str:
         arch = "moe_hybrid_gdn" if is_moe else "dense_hybrid_gdn"
     elif "deepseek" in arch_str or "dsv" in arch_str or "mla" in arch_str:
         arch = "moe"
@@ -463,7 +486,7 @@ def generate_new_model_card(hf_id: str, info: dict, sglang_repo: str = "") -> di
         "family": model_name.split("-")[0].lower(),
         "parameter_count_b": None,  # needs manual fill from cookbook
         "arch": arch,
-        "hybrid_mamba": "hybrid" in arch or "gdn" in arch,
+        "hybrid_mamba": has_gdn or "hybrid" in arch or "gdn" in arch,
         "default_precision": quant_method if quant_method != "none" else "bf16",
     }
 
@@ -707,15 +730,47 @@ def main(argv: list[str] | None = None) -> int:
             # Existing model — check for changes
             diffs = compare_and_report(models_data, hf_id, hf_info)
             all_diffs[hf_id] = diffs
+            # Update missing fields on existing models
+            for mk, mv in models.items():
+                if mv.get("hf_model_id") == hf_id:
+                    updated = False
+                    # Update hybrid_mamba from has_gdn
+                    has_gdn = hf_info.get("has_gdn", False)
+                    if has_gdn and not mv.get("hybrid_mamba"):
+                        mv["hybrid_mamba"] = True
+                        is_moe_val = mv.get("architecture",{}).get("is_moe")
+                        mv["arch"] = "moe_hybrid_gdn" if is_moe_val else "dense_hybrid_gdn"
+                        updated = True
+                        print(f"    [updated] hybrid_mamba=True, arch=" + str(mv.get("arch")))
+                    # Update default_flags from cookbook if missing
+                    ck_flags_obj = mv.get("default_flags", {})
+                    has_real_flags = any(v for v in ck_flags_obj.values() if v is not True and v) or (ck_flags_obj.get("trust-remote-code") == True and len(ck_flags_obj) > 1)
+                    if not has_real_flags or len(ck_flags_obj) <= 1:
+                        if args.sglang_repo:
+                            mdx = find_cookbook_mdx(args.sglang_repo, hf_id)
+                            if mdx:
+                                ck_flags = extract_default_flags_from_cookbook(mdx)
+                                if ck_flags and len(ck_flags) > len(ck_flags_obj):
+                                    mv["default_flags"] = ck_flags
+                                    updated = True
+                                    print(f"    [updated] default_flags={ck_flags}")
+                                ck_mtp = extract_mtp_params_from_cookbook(mdx)
+                                if ck_mtp and not mv.get("mtp_params"):
+                                    mv["mtp_params"] = ck_mtp
+                                    updated = True
+                                    print(f"    [updated] mtp_params={ck_mtp}")
+                                ck_weights = extract_weight_gb_from_cookbook(mdx, hf_id.split("/")[-1])
+                                if ck_weights and not any(v for v in mv.get("weight_gb",{}).values() if v):
+                                    mv["weight_gb"] = ck_weights
+                                    updated = True
+                                    print(f"    [updated] weight_gb={ck_weights}")
+                    if updated:
+                        mv["last_updated"] = datetime.now().strftime("%Y-%m-%d")
+                        models_changed = True
+                    break
             if diffs:
                 for d in diffs:
                     print(f"    [diff] {d}")
-                # Stamp the entry with today's date since we found changes
-                for key, val in models.items():
-                    if val.get("hf_model_id") == hf_id:
-                        val["last_updated"] = datetime.now().strftime("%Y-%m-%d")
-                        models_changed = True
-                        break
             else:
                 print("    [ok] up to date")
 

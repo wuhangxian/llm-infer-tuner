@@ -1,5 +1,5 @@
-version: 3
-updated: 2026-08-26 16:26:40
+version: 4
+updated: 2026-08-26 17:09:13
 total: 225
 models:
   # ── M01_qwen36-27b-fp8: Qwen3.6-27B-FP8 (moe_hybrid_gdn, fp8) ─────────────────────
@@ -709,14 +709,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M14_qwen3-coder-next: Qwen3-Coder-Next (moe, bf16) ─────────────────────
+  # ── M14_qwen3-coder-next: Qwen3-Coder-Next (moe_hybrid_gdn, bf16) ─────────────────────
   M14_qwen3-coder-next:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3-Coder-Next
     family: qwen3
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 148
@@ -760,14 +760,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3-Coder-Next
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M15_qwen3-next-80b-a3b-instruct: Qwen3-Next-80B-A3B-Instruct (moe, bf16) ─────────────────────
+  # ── M15_qwen3-next-80b-a3b-instruct: Qwen3-Next-80B-A3B-Instruct (moe_hybrid_gdn, bf16) ─────────────────────
   M15_qwen3-next-80b-a3b-instruct:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3-Next-80B-A3B-Instruct
     family: qwen3
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 151
@@ -816,14 +816,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M16_qwen3-next-80b-a3b-thinking: Qwen3-Next-80B-A3B-Thinking (moe, bf16) ─────────────────────
+  # ── M16_qwen3-next-80b-a3b-thinking: Qwen3-Next-80B-A3B-Thinking (moe_hybrid_gdn, bf16) ─────────────────────
   M16_qwen3-next-80b-a3b-thinking:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3-Next-80B-A3B-Thinking
     family: qwen3
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 151
@@ -978,14 +978,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Thinking
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M19_qwen3-5-397b-a17b: Qwen3.5-397B-A17B (moe, bf16) ─────────────────────
+  # ── M19_qwen3-5-397b-a17b: Qwen3.5-397B-A17B (moe_hybrid_gdn, bf16) ─────────────────────
   M19_qwen3-5-397b-a17b:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3.5-397B-A17B
     family: qwen3.5
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 751
@@ -4051,14 +4051,14 @@ models:
     source: https://huggingface.co/openai/gpt-oss-120b
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M76_minicpm-v-4-6: MiniCPM-V-4.6 (dense, bf16) ─────────────────────
+  # ── M76_minicpm-v-4-6: MiniCPM-V-4.6 (dense_hybrid_gdn, bf16) ─────────────────────
   M76_minicpm-v-4-6:
     last_updated: '2026-08-26'
     hf_model_id: openbmb/MiniCPM-V-4.6
     family: minicpm
     parameter_count_b: null
-    arch: dense
-    hybrid_mamba: false
+    arch: dense_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 2
@@ -5985,14 +5985,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M114_qwen3-5-0-8b: Qwen3.5-0.8B (dense, bf16) ─────────────────────
+  # ── M114_qwen3-5-0-8b: Qwen3.5-0.8B (dense_hybrid_gdn, bf16) ─────────────────────
   M114_qwen3-5-0-8b:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3.5-0.8B
     family: qwen3.5
     parameter_count_b: null
-    arch: dense
-    hybrid_mamba: false
+    arch: dense_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 2
@@ -6037,14 +6037,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3.5-0.8B
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M115_qwen3-5-122b-a10b: Qwen3.5-122B-A10B (moe, bf16) ─────────────────────
+  # ── M115_qwen3-5-122b-a10b: Qwen3.5-122B-A10B (moe_hybrid_gdn, bf16) ─────────────────────
   M115_qwen3-5-122b-a10b:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3.5-122B-A10B
     family: qwen3.5
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 233
@@ -6094,14 +6094,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3.5-122B-A10B
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M116_qwen3-5-122b-a10b-fp8: Qwen3.5-122B-A10B-FP8 (moe, fp8) ─────────────────────
+  # ── M116_qwen3-5-122b-a10b-fp8: Qwen3.5-122B-A10B-FP8 (moe_hybrid_gdn, fp8) ─────────────────────
   M116_qwen3-5-122b-a10b-fp8:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3.5-122B-A10B-FP8
     family: qwen3.5
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: fp8
     weight_gb:
       estimated: 118
@@ -6154,14 +6154,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3.5-122B-A10B-FP8
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M117_qwen3-5-27b: Qwen3.5-27B (dense, bf16) ─────────────────────
+  # ── M117_qwen3-5-27b: Qwen3.5-27B (dense_hybrid_gdn, bf16) ─────────────────────
   M117_qwen3-5-27b:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3.5-27B
     family: qwen3.5
     parameter_count_b: null
-    arch: dense
-    hybrid_mamba: false
+    arch: dense_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 52
@@ -6206,14 +6206,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3.5-27B
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M118_qwen3-5-27b-fp8: Qwen3.5-27B-FP8 (dense, fp8) ─────────────────────
+  # ── M118_qwen3-5-27b-fp8: Qwen3.5-27B-FP8 (dense_hybrid_gdn, fp8) ─────────────────────
   M118_qwen3-5-27b-fp8:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3.5-27B-FP8
     family: qwen3.5
     parameter_count_b: null
-    arch: dense
-    hybrid_mamba: false
+    arch: dense_hybrid_gdn
+    hybrid_mamba: true
     default_precision: fp8
     weight_gb:
       estimated: 29
@@ -6261,14 +6261,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3.5-27B-FP8
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M119_qwen3-5-2b: Qwen3.5-2B (dense, bf16) ─────────────────────
+  # ── M119_qwen3-5-2b: Qwen3.5-2B (dense_hybrid_gdn, bf16) ─────────────────────
   M119_qwen3-5-2b:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3.5-2B
     family: qwen3.5
     parameter_count_b: null
-    arch: dense
-    hybrid_mamba: false
+    arch: dense_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 4
@@ -6313,14 +6313,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3.5-2B
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M120_qwen3-5-35b-a3b: Qwen3.5-35B-A3B (moe, bf16) ─────────────────────
+  # ── M120_qwen3-5-35b-a3b: Qwen3.5-35B-A3B (moe_hybrid_gdn, bf16) ─────────────────────
   M120_qwen3-5-35b-a3b:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3.5-35B-A3B
     family: qwen3.5
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 67
@@ -6370,14 +6370,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3.5-35B-A3B
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M121_qwen3-5-35b-a3b-fp8: Qwen3.5-35B-A3B-FP8 (moe, fp8) ─────────────────────
+  # ── M121_qwen3-5-35b-a3b-fp8: Qwen3.5-35B-A3B-FP8 (moe_hybrid_gdn, fp8) ─────────────────────
   M121_qwen3-5-35b-a3b-fp8:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3.5-35B-A3B-FP8
     family: qwen3.5
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: fp8
     weight_gb:
       estimated: 35
@@ -6430,14 +6430,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3.5-35B-A3B-FP8
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M122_qwen3-5-397b-a17b-fp8: Qwen3.5-397B-A17B-FP8 (moe, fp8) ─────────────────────
+  # ── M122_qwen3-5-397b-a17b-fp8: Qwen3.5-397B-A17B-FP8 (moe_hybrid_gdn, fp8) ─────────────────────
   M122_qwen3-5-397b-a17b-fp8:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3.5-397B-A17B-FP8
     family: qwen3.5
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: fp8
     weight_gb:
       estimated: 6
@@ -6490,14 +6490,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3.5-397B-A17B-FP8
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M123_qwen3-5-4b: Qwen3.5-4B (dense, bf16) ─────────────────────
+  # ── M123_qwen3-5-4b: Qwen3.5-4B (dense_hybrid_gdn, bf16) ─────────────────────
   M123_qwen3-5-4b:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3.5-4B
     family: qwen3.5
     parameter_count_b: null
-    arch: dense
-    hybrid_mamba: false
+    arch: dense_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 9
@@ -6542,14 +6542,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3.5-4B
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M124_qwen3-5-9b: Qwen3.5-9B (dense, bf16) ─────────────────────
+  # ── M124_qwen3-5-9b: Qwen3.5-9B (dense_hybrid_gdn, bf16) ─────────────────────
   M124_qwen3-5-9b:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3.5-9B
     family: qwen3.5
     parameter_count_b: null
-    arch: dense
-    hybrid_mamba: false
+    arch: dense_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 18
@@ -6594,14 +6594,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3.5-9B
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M125_qwen36-27b: Qwen3.6-27B (dense, bf16) ─────────────────────
+  # ── M125_qwen36-27b: Qwen3.6-27B (dense_hybrid_gdn, bf16) ─────────────────────
   M125_qwen36-27b:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3.6-27B
     family: qwen3.6
     parameter_count_b: null
-    arch: dense
-    hybrid_mamba: false
+    arch: dense_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 52
@@ -6646,14 +6646,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3.6-27B
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M126_qwen36-35b-a3b: Qwen3.6-35B-A3B (moe, bf16) ─────────────────────
+  # ── M126_qwen36-35b-a3b: Qwen3.6-35B-A3B (moe_hybrid_gdn, bf16) ─────────────────────
   M126_qwen36-35b-a3b:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3.6-35B-A3B
     family: qwen3.6
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 67
@@ -6703,14 +6703,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3.6-35B-A3B
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M127_qwen3-8-2-4t-a95b: Qwen3.8-2.4T-A95B (moe, bf16) ─────────────────────
+  # ── M127_qwen3-8-2-4t-a95b: Qwen3.8-2.4T-A95B (moe_hybrid_gdn, bf16) ─────────────────────
   M127_qwen3-8-2-4t-a95b:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3.8-2.4T-A95B
     family: qwen3.8
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 4556
@@ -6755,14 +6755,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M128_qwen3-8-2-4t-a95b-fp8: Qwen3.8-2.4T-A95B-FP8 (moe, fp8) ─────────────────────
+  # ── M128_qwen3-8-2-4t-a95b-fp8: Qwen3.8-2.4T-A95B-FP8 (moe_hybrid_gdn, fp8) ─────────────────────
   M128_qwen3-8-2-4t-a95b-fp8:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3.8-2.4T-A95B-FP8
     family: qwen3.8
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: fp8
     weight_gb:
       estimated: 27
@@ -6810,14 +6810,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B-FP8
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M129_qwen3-8-27b: Qwen3.8-27B (dense, bf16) ─────────────────────
+  # ── M129_qwen3-8-27b: Qwen3.8-27B (dense_hybrid_gdn, bf16) ─────────────────────
   M129_qwen3-8-27b:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3.8-27B
     family: qwen3.8
     parameter_count_b: null
-    arch: dense
-    hybrid_mamba: false
+    arch: dense_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 52
@@ -6858,14 +6858,14 @@ models:
     source: https://huggingface.co/Qwen/Qwen3.8-27B
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M130_qwen3-8-27b-fp8: Qwen3.8-27B-FP8 (moe, fp8) ─────────────────────
+  # ── M130_qwen3-8-27b-fp8: Qwen3.8-27B-FP8 (moe_hybrid_gdn, fp8) ─────────────────────
   M130_qwen3-8-27b-fp8:
     last_updated: '2026-08-26'
     hf_model_id: Qwen/Qwen3.8-27B-FP8
     family: qwen3.8
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: fp8
     weight_gb:
       estimated: 2080
@@ -7146,14 +7146,14 @@ models:
     source: https://huggingface.co/RadixArk/Qwen3.8-2.4T-A95B-DSpark
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M136_qwen3-8-2-4t-a95b-nvfp4: Qwen3.8-2.4T-A95B-NVFP4 (moe, modelopt) ─────────────────────
+  # ── M136_qwen3-8-2-4t-a95b-nvfp4: Qwen3.8-2.4T-A95B-NVFP4 (moe_hybrid_gdn, modelopt) ─────────────────────
   M136_qwen3-8-2-4t-a95b-nvfp4:
     last_updated: '2026-08-26'
     hf_model_id: RadixArk/Qwen3.8-2.4T-A95B-NVFP4
     family: qwen3.8
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: modelopt
     weight_gb:
       estimated: 54
@@ -7199,14 +7199,14 @@ models:
     source: https://huggingface.co/RadixArk/Qwen3.8-2.4T-A95B-NVFP4
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M137_qwen3-8-27b-nvfp4: Qwen3.8-27B-NVFP4 (dense, modelopt) ─────────────────────
+  # ── M137_qwen3-8-27b-nvfp4: Qwen3.8-27B-NVFP4 (dense_hybrid_gdn, modelopt) ─────────────────────
   M137_qwen3-8-27b-nvfp4:
     last_updated: '2026-08-26'
     hf_model_id: RadixArk/Qwen3.8-27B-NVFP4
     family: qwen3.8
     parameter_count_b: null
-    arch: dense
-    hybrid_mamba: false
+    arch: dense_hybrid_gdn
+    hybrid_mamba: true
     default_precision: modelopt
     weight_gb:
       estimated: 20
@@ -7248,14 +7248,14 @@ models:
     source: https://huggingface.co/RadixArk/Qwen3.8-27B-NVFP4
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M138_qwen3-8-27b-nvfp4-bf16-lmhead: Qwen3.8-27B-NVFP4-BF16-LMHead (dense, modelopt) ─────────────────────
+  # ── M138_qwen3-8-27b-nvfp4-bf16-lmhead: Qwen3.8-27B-NVFP4-BF16-LMHead (dense_hybrid_gdn, modelopt) ─────────────────────
   M138_qwen3-8-27b-nvfp4-bf16-lmhead:
     last_updated: '2026-08-26'
     hf_model_id: RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead
     family: qwen3.8
     parameter_count_b: null
-    arch: dense
-    hybrid_mamba: false
+    arch: dense_hybrid_gdn
+    hybrid_mamba: true
     default_precision: modelopt
     weight_gb:
       estimated: 22
@@ -7516,14 +7516,14 @@ models:
     source: https://huggingface.co/amd/Kimi-K2.7-Code-MXFP4
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M143_qwen3-5-397b-a17b-mxfp4: Qwen3.5-397B-A17B-MXFP4 (moe, quark) ─────────────────────
+  # ── M143_qwen3-5-397b-a17b-mxfp4: Qwen3.5-397B-A17B-MXFP4 (moe_hybrid_gdn, quark) ─────────────────────
   M143_qwen3-5-397b-a17b-mxfp4:
     last_updated: '2026-08-26'
     hf_model_id: amd/Qwen3.5-397B-A17B-MXFP4
     family: qwen3.5
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: quark
     weight_gb:
       estimated: 11
@@ -7622,14 +7622,14 @@ models:
     source: https://huggingface.co/baidu/Unlimited-OCR
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M145_ornith-1-0-35b: Ornith-1.0-35B (moe, bf16) ─────────────────────
+  # ── M145_ornith-1-0-35b: Ornith-1.0-35B (moe_hybrid_gdn, bf16) ─────────────────────
   M145_ornith-1-0-35b:
     last_updated: '2026-08-26'
     hf_model_id: deepreinforce-ai/Ornith-1.0-35B
     family: ornith
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 65
@@ -7674,14 +7674,14 @@ models:
     source: https://huggingface.co/deepreinforce-ai/Ornith-1.0-35B
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M146_ornith-1-0-35b-fp8: Ornith-1.0-35B-FP8 (moe, compressed-tensors) ─────────────────────
+  # ── M146_ornith-1-0-35b-fp8: Ornith-1.0-35B-FP8 (moe_hybrid_gdn, compressed-tensors) ─────────────────────
   M146_ornith-1-0-35b-fp8:
     last_updated: '2026-08-26'
     hf_model_id: deepreinforce-ai/Ornith-1.0-35B-FP8
     family: ornith
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: compressed-tensors
     weight_gb:
       estimated: 35
@@ -7726,14 +7726,14 @@ models:
     source: https://huggingface.co/deepreinforce-ai/Ornith-1.0-35B-FP8
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M147_ornith-1-0-397b: Ornith-1.0-397B (moe, bf16) ─────────────────────
+  # ── M147_ornith-1-0-397b: Ornith-1.0-397B (moe_hybrid_gdn, bf16) ─────────────────────
   M147_ornith-1-0-397b:
     last_updated: '2026-08-26'
     hf_model_id: deepreinforce-ai/Ornith-1.0-397B
     family: ornith
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 739
@@ -7778,14 +7778,14 @@ models:
     source: https://huggingface.co/deepreinforce-ai/Ornith-1.0-397B
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M148_ornith-1-0-397b-fp8: Ornith-1.0-397B-FP8 (moe, compressed-tensors) ─────────────────────
+  # ── M148_ornith-1-0-397b-fp8: Ornith-1.0-397B-FP8 (moe_hybrid_gdn, compressed-tensors) ─────────────────────
   M148_ornith-1-0-397b-fp8:
     last_updated: '2026-08-26'
     hf_model_id: deepreinforce-ai/Ornith-1.0-397B-FP8
     family: ornith
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: compressed-tensors
     weight_gb:
       estimated: 11
@@ -7830,14 +7830,14 @@ models:
     source: https://huggingface.co/deepreinforce-ai/Ornith-1.0-397B-FP8
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M149_ornith-1-0-9b: Ornith-1.0-9B (dense, bf16) ─────────────────────
+  # ── M149_ornith-1-0-9b: Ornith-1.0-9B (dense_hybrid_gdn, bf16) ─────────────────────
   M149_ornith-1-0-9b:
     last_updated: '2026-08-26'
     hf_model_id: deepreinforce-ai/Ornith-1.0-9B
     family: ornith
     parameter_count_b: null
-    arch: dense
-    hybrid_mamba: false
+    arch: dense_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 18
@@ -8721,14 +8721,14 @@ models:
     source: https://huggingface.co/inclusionAI/Ling-3.0-tiny-int4
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M166_intern-s2-preview: Intern-S2-Preview (moe, bf16) ─────────────────────
+  # ── M166_intern-s2-preview: Intern-S2-Preview (moe_hybrid_gdn, bf16) ─────────────────────
   M166_intern-s2-preview:
     last_updated: '2026-08-26'
     hf_model_id: internLM/Intern-S2-Preview
     family: intern
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 68
@@ -8773,14 +8773,14 @@ models:
     source: https://huggingface.co/internLM/Intern-S2-Preview
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M167_intern-s2-mobius: Intern-S2-Mobius (moe, bf16) ─────────────────────
+  # ── M167_intern-s2-mobius: Intern-S2-Mobius (moe_hybrid_gdn, bf16) ─────────────────────
   M167_intern-s2-mobius:
     last_updated: '2026-08-26'
     hf_model_id: internlm/Intern-S2-Mobius
     family: intern
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 68
@@ -8831,14 +8831,14 @@ models:
     source: https://huggingface.co/internlm/Intern-S2-Mobius
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M168_intern-s2-mobius-fp8: Intern-S2-Mobius-FP8 (moe, fp8) ─────────────────────
+  # ── M168_intern-s2-mobius-fp8: Intern-S2-Mobius-FP8 (moe_hybrid_gdn, fp8) ─────────────────────
   M168_intern-s2-mobius-fp8:
     last_updated: '2026-08-26'
     hf_model_id: internlm/Intern-S2-Mobius-FP8
     family: intern
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: fp8
     weight_gb:
       estimated: 68
@@ -9712,14 +9712,14 @@ models:
     source: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M185_qwen3-5-397b-a17b-nvfp4-v2: Qwen3.5-397B-A17B-NVFP4-V2 (moe, modelopt_mixed) ─────────────────────
+  # ── M185_qwen3-5-397b-a17b-nvfp4-v2: Qwen3.5-397B-A17B-NVFP4-V2 (moe_hybrid_gdn, modelopt_mixed) ─────────────────────
   M185_qwen3-5-397b-a17b-nvfp4-v2:
     last_updated: '2026-08-26'
     hf_model_id: nvidia/Qwen3.5-397B-A17B-NVFP4-V2
     family: qwen3.5
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: modelopt_mixed
     weight_gb:
       estimated: 11
@@ -9770,14 +9770,14 @@ models:
     source: https://huggingface.co/nvidia/Qwen3.5-397B-A17B-NVFP4-V2
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M186_qwen36-27b-nvfp4: Qwen3.6-27B-NVFP4 (dense, modelopt) ─────────────────────
+  # ── M186_qwen36-27b-nvfp4: Qwen3.6-27B-NVFP4 (dense_hybrid_gdn, modelopt) ─────────────────────
   M186_qwen36-27b-nvfp4:
     last_updated: '2026-08-26'
     hf_model_id: nvidia/Qwen3.6-27B-NVFP4
     family: qwen3.6
     parameter_count_b: null
-    arch: dense
-    hybrid_mamba: false
+    arch: dense_hybrid_gdn
+    hybrid_mamba: true
     default_precision: modelopt
     weight_gb:
       estimated: 20
@@ -9823,14 +9823,14 @@ models:
     source: https://huggingface.co/nvidia/Qwen3.6-27B-NVFP4
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M187_qwen36-35b-a3b-nvfp4: Qwen3.6-35B-A3B-NVFP4 (moe, modelopt) ─────────────────────
+  # ── M187_qwen36-35b-a3b-nvfp4: Qwen3.6-35B-A3B-NVFP4 (moe_hybrid_gdn, modelopt) ─────────────────────
   M187_qwen36-35b-a3b-nvfp4:
     last_updated: '2026-08-26'
     hf_model_id: nvidia/Qwen3.6-35B-A3B-NVFP4
     family: qwen3.6
     parameter_count_b: null
-    arch: moe
-    hybrid_mamba: false
+    arch: moe_hybrid_gdn
+    hybrid_mamba: true
     default_precision: modelopt
     weight_gb:
       estimated: 3
@@ -9929,14 +9929,14 @@ models:
     source: https://huggingface.co/openai/gpt-oss-20b
     notes: Auto-synced from HF config.json + SGLang cookbook.
 
-  # ── M189_minicpm-v-4-6-thinking: MiniCPM-V-4.6-Thinking (dense, bf16) ─────────────────────
+  # ── M189_minicpm-v-4-6-thinking: MiniCPM-V-4.6-Thinking (dense_hybrid_gdn, bf16) ─────────────────────
   M189_minicpm-v-4-6-thinking:
     last_updated: '2026-08-26'
     hf_model_id: openbmb/MiniCPM-V-4.6-Thinking
     family: minicpm
     parameter_count_b: null
-    arch: dense
-    hybrid_mamba: false
+    arch: dense_hybrid_gdn
+    hybrid_mamba: true
     default_precision: bf16
     weight_gb:
       estimated: 2
