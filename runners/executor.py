@@ -85,8 +85,11 @@ def _load_output_len(workload: str, *, workloads_path: Path = DEFAULT_WORKLOADS_
     data = yaml.safe_load(workloads_path.read_text(encoding="utf-8")) or {}
     workloads = data.get("workloads", {}) or {}
     entry = workloads.get(workload, {}) or {}
-    output_tokens = entry.get("output_tokens", {}) or {}
-    value = output_tokens.get("value", 0)
+    output_tokens = entry.get("output_tokens", 0)
+    if isinstance(output_tokens, dict):
+        value = output_tokens.get("value", 0)
+    else:
+        value = output_tokens
     try:
         return int(value)
     except (TypeError, ValueError):
