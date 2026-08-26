@@ -1,0 +1,2 @@
+{"id":"c001","params":{"tp_size":4},"cmd":"python -m sglang.launch_server --model-path ${MODEL_PATH} --tp-size 4 --attention-backend flashinfer --mem-fraction-static 0.88 --disable-radix-cache --trust-remote-code --host 0.0.0.0 --port 30000","reasons":["手动配置:TP4+flashinfer+mf0.88"]}
+{"id":"c002","params":{"tp_size":2},"cmd":"python -m sglang.launch_server --model-path ${MODEL_PATH} --tp-size 2 --attention-backend flashinfer --mem-fraction-static 0.88 --disable-radix-cache --trust-remote-code --host 0.0.0.0 --port 30000","reasons":["手动配置:TP2+flashinfer+mf0.88"]}
