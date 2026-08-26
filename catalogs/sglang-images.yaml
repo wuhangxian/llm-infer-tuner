@@ -1,18 +1,15 @@
 # SGLang 镜像目录(一版 sglang = 一条)。key = JobSpec.image。
-# 字段:image_ref/cuda_version/attention_backends/flag_aliases/startup_floor/valid_flags。
+# 字段:image_ref/attention_backends/flag_aliases/valid_flags。
 # valid_flags 由 scripts/sync_sglang_params.py 从源码 AST 自动提取。
 
-version: 1
-updated: 2026-08-25 16:09:57
+version: 2
+updated: 2026-08-26 22:00:43
 total: 3
 
 images:
-  # ── I01: SGLang v0.5.10 (CUDA 12.9.1) ─────────────────
+  # -- I01_sglang-v0.5.10: lmsysorg/sglang:v0.5.10 --------------------------------
   I01_sglang-v0.5.10:
     image_ref: lmsysorg/sglang:v0.5.10
-    sglang_version: 0.5.10
-    cuda_version: 12.9.1
-    digest: sha256:f3558f08ca2b8c6148049767334538413efa00a73c0419f5b122b546bc0e2f23
     attention_backends:
     - aiter
     - ascend
@@ -37,13 +34,6 @@ images:
     - trtllm_mha
     - trtllm_mla
     - wave
-    startup_floor:
-      verified: true
-      force_fp16_when:
-        major_lt: 8
-      reject_when:
-        major_lt: 8
-        minor_lt: 5
     flag_aliases:
       mamba-radix-cache-strategy: mamba-scheduler-strategy
       cuda-graph-max-bs-decode: cuda-graph-max-bs
@@ -522,13 +512,10 @@ images:
     - weight_loader_prefetch_checkpoints
     - weight_loader_prefetch_num_threads
     - weight_version
-    last_updated: '2026-08-25'
-  # ── I02: SGLang v0.5.13 (CUDA 13.0.1) ─────────────────
+
+  # -- I02_sglang-v0.5.13: lmsysorg/sglang:v0.5.13 --------------------------------
   I02_sglang-v0.5.13:
     image_ref: lmsysorg/sglang:v0.5.13
-    sglang_version: 0.5.13
-    cuda_version: 13.0.1
-    digest: sha256:952ebb195c41b10dc01fa63c41c9bfc14f2ee02ffe8da71e11aeab5f3f7c7772
     attention_backends:
     - aiter
     - ascend
@@ -553,13 +540,6 @@ images:
     - trtllm_mha
     - trtllm_mla
     - wave
-    startup_floor:
-      verified: true
-      force_fp16_when:
-        major_lt: 8
-      reject_when:
-        major_lt: 8
-        minor_lt: 5
     flag_aliases:
       mamba-radix-cache-strategy: mamba-scheduler-strategy
       cuda-graph-max-bs-decode: cuda-graph-max-bs
@@ -1038,13 +1018,10 @@ images:
     - weight_loader_prefetch_checkpoints
     - weight_loader_prefetch_num_threads
     - weight_version
-    last_updated: '2026-08-25'
-  # ── I03: SGLang v0.5.16 (CUDA 13.0.1, TCR) ────────────
+
+  # -- I03_sglang-v0.5.16: hai-beijing.tencentcloudcr.com/ai/sglang:v0.5.16-cu129 --------------------------------
   I03_sglang-v0.5.16:
     image_ref: hai-beijing.tencentcloudcr.com/ai/sglang:v0.5.16-cu129
-    sglang_version: 0.5.16
-    cuda_version: 13.0.1
-    digest: sha256:7b6a35df9839fd593a94a1eaee82d7777f472225d9f3ad1f8a2e0cb2bd1785d0
     attention_backends:
     - aiter
     - ascend
@@ -1069,13 +1046,6 @@ images:
     - trtllm_mha
     - trtllm_mla
     - wave
-    startup_floor:
-      verified: true
-      force_fp16_when:
-        major_lt: 8
-      reject_when:
-        major_lt: 8
-        minor_lt: 5
     flag_aliases:
       mamba-radix-cache-strategy: mamba-scheduler-strategy
       cuda-graph-max-bs-decode: cuda-graph-max-bs
@@ -1554,4 +1524,4 @@ images:
     - weight_loader_prefetch_checkpoints
     - weight_loader_prefetch_num_threads
     - weight_version
-    last_updated: '2026-08-25'
+
