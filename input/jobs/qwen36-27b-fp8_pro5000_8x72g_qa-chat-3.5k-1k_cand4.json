@@ -6,7 +6,7 @@
   "gpu_memory_gb": 72,
   "model": "M01_qwen36-27b-fp8",
   "image": "I01_sglang-v0.5.10",
-  "workload": "W01_qa-chat-3.5k-1k",
+  "workload": "W03_input-3.5k-output-1k",
   "benchmark_method": "sglang-bench-serving",
   "sla": {
     "max_avg_ttft_ms": 2000,

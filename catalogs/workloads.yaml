@@ -2,22 +2,47 @@
 # 每个场景只需输入/输出长度;并发梯度由执行器自适应搜索,不在这里写。
 
 version: 1
-updated: 2026-08-26 16:09:57
-total: 3
+updated: 2026-08-26 17:45:00
+total: 8
 
 workloads:
 
-  # ── W01: 短问答(3.5k输入/1k输出) ─────────────────────
-  W01_qa-chat-3.5k-1k:
+  # ── W01: 1k输入/1k输出(短对话,官方标准场景) ─────────
+  W01_input-1k-output-1k:
+    input_tokens: 1000
+    output_tokens: 1000
+
+  # ── W02: 128输入/1k输出(极短输入长输出,decode主导) ───
+  W02_input-128-output-1k:
+    input_tokens: 128
+    output_tokens: 1024
+
+  # ── W03: 3.5k输入/1k输出(短问答) ─────────────────────
+  W03_input-3.5k-output-1k:
     input_tokens: 3500
     output_tokens: 1000
 
-  # ── W02: 长问答(8k输入/1k输出) ─────────────────────
-  W02_qa-chat-8k-1k:
+  # ── W04: 4k输入/1k输出(中等文档,官方常用) ────────────
+  W04_input-4k-output-1k:
+    input_tokens: 4096
+    output_tokens: 1000
+
+  # ── W05: 8k输入/1k输出(长文档总结,官方标准场景) ──────
+  W05_input-8k-output-1k:
     input_tokens: 8000
     output_tokens: 1000
 
-  # ── W03: 长上下文(32k输入/1k输出) ─────────────────────
-  W03_random-32k-1k:
+  # ── W06: 8k输入/512输出(长输入短输出,Agent场景) ──────
+  W06_input-8k-output-512:
+    input_tokens: 8000
+    output_tokens: 512
+
+  # ── W07: 32k输入/1k输出(长上下文,prefill主导) ────────
+  W07_input-32k-output-1k:
     input_tokens: 32768
     output_tokens: 1024
+
+  # ── W08: 1k输入/8k输出(短输入长生成,decode主导) ──────
+  W08_input-1k-output-8k:
+    input_tokens: 1000
+    output_tokens: 8192
