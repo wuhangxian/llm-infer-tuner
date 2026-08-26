@@ -18,9 +18,11 @@ class SLA(StrictModel):
 
 
 class BaselineConfig(StrictModel):
-    tp_size: int = Field(gt=0)
-    attention_backend: str = "flashinfer"
-    mem_fraction_static: float = Field(default=0.88, gt=0, le=1)
+    """User-specified baseline params. Any key-value pair is allowed.
+    AI will fill in missing params (default_flags, pin flags, etc.)
+    and assemble a complete launch command.
+    """
+    model_config = ConfigDict(extra="allow", str_strip_whitespace=True)
 
 
 class SearchBudget(StrictModel):

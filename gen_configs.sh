@@ -93,12 +93,12 @@ ${JOB_JSON}
 
 ## 基线配置(可选)
 
-如果 JobSpec 里有 \`baseline\` 字段,你必须在 candidates 数组最前面插入一条基线候选:
+如果 JobSpec 里有 \`baseline\` 字段(在 search.baseline 下),你必须在 candidates 数组最前面插入一条基线候选:
 - id 为 "baseline"
 - params 里加 \`"is_baseline": true\`
-- params 的 tp_size/attention_backend/mem_fraction_static 取 baseline 字段指定的值
-- 其余参数取默认值(和基线候选的 §4 pin 一致)
-- cmd 拼成完整的启动命令
+- params 取 baseline 字段里用户指定的所有参数(用户写了什么就取什么)
+- 用户没写的参数,你按 §4 pin 规则和 models.yaml 的 default_flags 补全
+- 拼成完整 cmd(格式同其他候选: --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 等)
 - 如果没有 baseline 字段,正常生成候选即可,不插基线
 
 ## 执行方式
