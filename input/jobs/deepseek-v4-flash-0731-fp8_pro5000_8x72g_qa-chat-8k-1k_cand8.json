@@ -6,7 +6,7 @@
   "gpu_memory_gb": 72,
   "model": "M03_deepseek-v4-flash-0731-fp8",
   "image": "I03_sglang-v0.5.16",
-  "workload": "qa-chat-8k-1k",
+  "workload": "W05_input-8k-output-1k",
   "benchmark_method": "sglang-bench-serving",
   "sla": {
     "max_avg_ttft_ms": 2000,

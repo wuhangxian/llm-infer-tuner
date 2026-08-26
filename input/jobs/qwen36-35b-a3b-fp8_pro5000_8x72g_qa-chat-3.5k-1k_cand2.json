@@ -6,7 +6,7 @@
   "gpu_memory_gb": 72,
   "model": "M02_qwen36-35b-a3b-fp8",
   "image": "I03_sglang-v0.5.16",
-  "workload": "qa-chat-3.5k-1k",
+  "workload": "W04_input-4k-output-1k",
   "benchmark_method": "sglang-bench-serving",
   "sla": {
     "max_avg_ttft_ms": 2000,
