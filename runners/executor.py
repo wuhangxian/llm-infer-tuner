@@ -283,37 +283,112 @@ def _make_evaluate(ctx: _CandidateContext, candidate_id: str, candidate_dir: Pat
     return evaluate
 
 
+def _detect_numa_groups(remote: RemoteRunner, gpu_count: int) -> list[list[int]]:
+    """Detect NUMA groups from nvidia-smi topo -m.
+
+    Returns a list of NUMA groups, each containing GPU IDs.
+    Example: [[0,1,2,3], [4,5,6,7]] for a dual-NUMA 8-GPU server.
+    Falls back to a single group [0,1,...,gpu_count-1] if detection fails.
+    """
+    try:
+        result = remote.run("nvidia-smi topo -m", timeout=30)
+        if not result.ok:
+            return [list(range(gpu_count))]
+        lines = result.stdout.splitlines()
+        # Parse NUMA affinity column
+        groups: dict[int, list[int]] = {}
+        for line in lines:
+            if line.startswith("GPU") and not line.startswith("GPU0"):
+                continue
+            if not line.startswith("GPU"):
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            try:
+                gpu_id = int(parts[0].replace("GPU", ""))
+            except ValueError:
+                continue
+            if gpu_id >= gpu_count:
+                continue
+            # Find NUMA Affinity column (second to last or last numeric)
+            numa_id = None
+            for part in reversed(parts):
+                try:
+                    numa_id = int(part)
+                    break
+                except ValueError:
+                    continue
+            if numa_id is not None:
+                groups.setdefault(numa_id, []).append(gpu_id)
+        if groups:
+            return list(groups.values())
+    except Exception:
+        pass
+    return [list(range(gpu_count))]
+
+
 def _allocate_gpus_and_ports(
     candidates: list[dict[str, Any]],
     gpu_count: int,
     base_port: int = 30000,
+    numa_groups: list[list[int]] | None = None,
 ) -> list[tuple[dict[str, Any], str, int]]:
-    """Assign GPU IDs and ports to each candidate.
+    """Assign GPU IDs and ports to each candidate with NUMA awareness.
 
-    Returns a list of (candidate, gpu_ids_str, port) tuples. Candidates are
-    grouped into batches that fit within gpu_count: the sum of tp_size in each
-    batch does not exceed gpu_count.
+    Same-TP candidate GPUs must stay within the same NUMA node.
+    Fills one NUMA node before moving to the next.
 
-    Example (8 GPUs, 4 candidates all TP1):
-      batch 1: cand1(GPU0, port 30000), cand2(GPU1, 30001),
-               cand3(GPU2, 30002), cand4(GPU3, 30003)
-      → 4 GPUs used, 4 idle (could fit 4 more TP1 candidates in same batch)
-
-    Example (8 GPUs, 4 candidates all TP2):
-      batch 1: cand1(GPU0,1, 30000), cand2(GPU2,3, 30001),
-               cand3(GPU4,5, 30002), cand4(GPU6,7, 30003)
+    Example (8 GPUs, NUMA=[[0,1,2,3],[4,5,6,7]], 3 candidates TP1+TP2+TP4):
+      TP1: GPU 0 (NUMA 0)
+      TP2: GPU 1,2 (NUMA 0)
+      TP4: GPU 4,5,6,7 (NUMA 1)
     """
+    if numa_groups is None:
+        numa_groups = [list(range(gpu_count))]
+
+    # Flatten with NUMA tracking: (gpu_id, numa_index)
+    # We allocate sequentially within each NUMA group
     result: list[tuple[dict[str, Any], str, int]] = []
-    gpu_cursor = 0
     port_cursor = base_port
+
+    # Track cursor per NUMA group
+    numa_cursors = [0] * len(numa_groups)  # index into each group's GPU list
+
     for candidate in candidates:
         tp_size = int(candidate.get("params", {}).get("tp_size", 1))
         tp_size = max(1, tp_size)
-        gpu_ids = list(range(gpu_cursor, gpu_cursor + tp_size))
-        gpu_cursor += tp_size
-        gpu_ids_str = "device=" + ",".join(str(g) for g in gpu_ids)
-        result.append((candidate, gpu_ids_str, port_cursor))
-        port_cursor += 1
+
+        # Find a NUMA group that has enough remaining GPUs for this tp_size
+        assigned = False
+        for ni, group in enumerate(numa_groups):
+            remaining = len(group) - numa_cursors[ni]
+            if remaining >= tp_size:
+                # Allocate from this NUMA group
+                gpu_ids = group[numa_cursors[ni]:numa_cursors[ni] + tp_size]
+                numa_cursors[ni] += tp_size
+                gpu_ids_str = "device=" + ",".join(str(g) for g in gpu_ids)
+                result.append((candidate, gpu_ids_str, port_cursor))
+                port_cursor += 1
+                assigned = True
+                break
+
+        if not assigned:
+            # No single NUMA group has enough; fall back to sequential allocation
+            all_gpus = []
+            for group in numa_groups:
+                all_gpus.extend(group[numa_cursors[numa_groups.index(group)]:])
+            if len(all_gpus) >= tp_size:
+                gpu_ids = all_gpus[:tp_size]
+                gpu_ids_str = "device=" + ",".join(str(g) for g in gpu_ids)
+                result.append((candidate, gpu_ids_str, port_cursor))
+                port_cursor += 1
+            else:
+                # Not enough GPUs at all; assign what we have
+                gpu_ids_str = "device=" + ",".join(str(g) for g in all_gpus)
+                result.append((candidate, gpu_ids_str, port_cursor))
+                port_cursor += 1
+
     return result
 
 
@@ -712,10 +787,14 @@ def run_executor(
     _log(f"{len(candidates)} candidates split into {len(batches)} batch(es) "
          f"(max {job.gpu_count} GPUs per batch)")
 
+    # Detect NUMA groups for GPU allocation (avoid cross-NUMA TP)
+    numa_groups = _detect_numa_groups(remote, job.gpu_count)
+    _log(f"NUMA groups: {numa_groups}")
+
     # ---- ROUND 1: coarse expansion over ALL candidates (batch-parallel) ----
     for batch_idx, batch in enumerate(batches):
-        # Allocate GPUs within this batch (reset cursor to 0)
-        alloc = _allocate_gpus_and_ports(batch, job.gpu_count, base_port=config.port)
+        # Allocate GPUs within this batch (NUMA-aware, reset cursor per batch)
+        alloc = _allocate_gpus_and_ports(batch, job.gpu_count, base_port=config.port, numa_groups=numa_groups)
         _log(f"round-1 batch {batch_idx + 1}/{len(batches)}: "
              f"{[c.get('id') for c in batch]}")
         outcomes = _run_batch_parallel(
@@ -763,7 +842,7 @@ def run_executor(
         top_batches.append(current_batch)
 
     for batch_idx, batch in enumerate(top_batches):
-        alloc = _allocate_gpus_and_ports(batch, job.gpu_count, base_port=config.port)
+        alloc = _allocate_gpus_and_ports(batch, job.gpu_count, base_port=config.port, numa_groups=numa_groups)
         _log(f"round-2 batch {batch_idx + 1}/{len(top_batches)}: "
              f"{[c.get('id') for c in batch]}")
         outcomes = _run_batch_parallel(
