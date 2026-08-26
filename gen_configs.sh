@@ -157,7 +157,7 @@ echo "$RAW" | jq -e '
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 N="$(wc -l < "$OUT" | tr -d ' ')"
 echo "✅ 已生成 $N 条候选 → $OUT" >&2
-echo "── 预览(id / tp / ep / att / mf / mamba / page / spec / chunk / kv / sched)──" >&2
+echo "── 预览(id / tp / ep / att / mf / mamba / page / spec / chunk / kv / sched / radix)──" >&2
 jq -r '
   "  " + .id +
   "  tp=" + (.params.tp_size|tostring) +
@@ -169,5 +169,6 @@ jq -r '
   "  spec=" + (.params.speculative_algorithm // .params["speculative-algorithm"] // .params.speculative // "none(default)") +
   "  chunk=" + (.params.chunked_prefill_size // .params["chunked-prefill-size"] // "8192(default)" | tostring) +
   "  kv=" + (.params.kv_cache_dtype // .params["kv-cache-dtype"] // "auto(default)") +
-  "  sched=" + (.params.schedule_conservativeness // .params["schedule-conservativeness"] // "1.0(default)" | tostring)
+  "  sched=" + (.params.schedule_conservativeness // .params["schedule-conservativeness"] // "1.0(default)" | tostring) +
+  "  radix=off"
 ' "$OUT" >&2
