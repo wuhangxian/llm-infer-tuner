@@ -168,7 +168,6 @@
 | `--mamba-radix-cache-strategy extra_buffer` + `--page-size != 64` | source | `FLA_CHUNK_SIZE(64) % page_size != 0` → 启动报错 |
 | `--mamba-radix-cache-strategy no_buffer` + `--page-size != 1` | source | `no_buffer`+radix cache 强制 `page_size=1`,写了别的会被忽略或报错 |
 | `--page-size` 值不在 attention 后端的允许集 | source | SGLang 不报错但自动改写并打 warning(如 flashinfer+page_size=64 不会报错但无收益;trtllm_mha+page_size=1 会被改成 64)。生成期只放后端认可的值,避免被改写后行为不可预期 |
-| `--speculative-algorithm` + `--mamba-radix-cache-strategy no_buffer` | source | 投机解码+radix cache 必须 `extra_buffer`(见 §7) |
 | `--chunked-prefill-size -1` | judgment | 关闭 chunked prefill,长输入峰值激活会爆(有生产用过,非普适,可手工 A/B 一次) |
 | `--tp-size N`(块量化下 `moe_intermediate_size/N` 或 `intermediate_size/N` 不是 `block_size` 整数倍) | measured | **启动即崩**(加载权重时 `ValueError: output_size not divisible by block_n`),非压测 OOM。细粒度 MoE 专家小最常撞;判据与算法见 §2「块量化 × TP 整除硬约束」。例:35B-A3B(moe_int=512/block=128)排除 tp=8 |
 
@@ -240,15 +239,16 @@ qwen3.6(`hybrid_mamba: true`)适用。
 **约束**:
 - `no_buffer` + radix cache → 强制 page_size=1 且关 overlap scheduler
 - `extra_buffer` 必须配 `--page-size 64`
-- `extra_buffer` + `--disable-radix-cache` → ValueError
-- 投机解码 + radix cache → 必须用 `extra_buffer`
+- `extra_buffer` + `--disable-radix-cache` → ValueError(extra_buffer 依赖 Radix Cache 存 Mamba 状态,关了没地方存。用 `no_buffer` 替代)
+- 投机解码 + `no_buffer` + `--disable-radix-cache` → **合法**(不冲突,源码无此约束)
+- 投机解码 + `extra_buffer` → **合法**(但 §4 pin 了 `--disable-radix-cache`,所以 extra_buffer 不能用,投机解码候选用 `no_buffer` 即可)
 
-**为什么两分支都要测**:extra_buffer 在非 KV-bound 场景更优;KV-bound 场景要权衡 overlap 收益 vs 并发下降。长输入正是 KV-bound,两分支必须实测对冲。
+**为什么两分支都要测**:extra_buffer 在非 KV-bound 场景更优;KV-bound 场景要权衡 overlap 收益 vs 并发下降。长输入正是 KV-bound,两分支必须实测对冲。但 §4 pin 了 `--disable-radix-cache` 后,extra_buffer 不可用,只保留 `no_buffer`。
 
 **与投机解码的交互**(§3 `--speculative-algorithm`):
-- 投机解码 + radix cache → **必须用 `extra_buffer`**(`no_buffer` + 投机解码 = ValueError)。
-- 因此当模型 `supports_mtp: true` 且候选含 `--speculative-algorithm EAGLE` 时,`--mamba-radix-cache-strategy` 只生成 `extra_buffer`,不生成 `no_buffer`。
-- 反之,非投机基线(`--speculative-algorithm` 为「无」)才可自由生成 `no_buffer` / `extra_buffer` 两条。
+- 投机解码 + `no_buffer` + `--disable-radix-cache` → **合法组合**(源码 server_args.py 无冲突)。
+- 投机解码 + `extra_buffer` + `--disable-radix-cache` → ValueError(§5 已排除)。
+- 因此:在 §4 pin 了 `--disable-radix-cache` 的情况下,投机解码候选用 `no_buffer`,正常生成,不受限制。
 
 **mamba ratio(`--mamba-full-memory-ratio`,默认 0.9)不该盲扫——有公式**:`r* ≈ S · token_equiv · dcp_size / L`。参考:L=64K→r≈0.31,L=128K→r≈0.16。S 由 cache strategy 决定(extra_buffer overlap 开→S=5,extra_buffer_lazy→S=4)。**strategy 和 ratio 不正交,别当独立笛卡尔积扫。** L≈60k 时 r*≈0.31,盲扫 0.5/0.9 会整段落在 KV-bound 区。
 - 逃生:L 很长时 r* 会低到状态池装不下一个请求,改 pin `--max-mamba-cache-size = 目标并发 × S`,别用 sub-0.15 的 r。
