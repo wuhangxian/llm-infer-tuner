@@ -17,9 +17,18 @@ class SLA(StrictModel):
     min_success_rate: float = Field(default=0.99, ge=0, le=1)
 
 
+class BaselineConfig(StrictModel):
+    tp_size: int = Field(gt=0)
+    attention_backend: str = "flashinfer"
+    mem_fraction_static: float = Field(default=0.88, gt=0, le=1)
+
+
 class SearchBudget(StrictModel):
     max_candidates: int = Field(gt=0)
     max_runtime_minutes: int = Field(gt=0)
+    baseline: BaselineConfig | None = None
+    baseline_threshold_pct: float = Field(default=0, ge=0, le=100,
+        description="Only keep candidates with goodput >= baseline * (1 + pct/100). 0 = keep all")
 
 
 class JobSpec(StrictModel):

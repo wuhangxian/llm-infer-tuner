@@ -781,6 +781,26 @@ def run_executor(
         results_by_candidate, job.sla, output_len=output_len,
         gpu_count=job.gpu_count,
     )
+
+    # Baseline filtering: if baseline_threshold_pct > 0, find baseline goodput
+    # and filter out candidates below baseline * (1 + pct/100)
+    threshold_pct = job.search.baseline_threshold_pct
+    baseline_goodput = None
+    if threshold_pct > 0:
+        for row in ranking:
+            if row["candidate_id"] == "baseline":
+                baseline_goodput = row["goodput_per_host"]
+                break
+        if baseline_goodput is not None and baseline_goodput > 0:
+            threshold = baseline_goodput * (1 + threshold_pct / 100)
+            filtered = [r for r in ranking if r["goodput_per_host"] >= threshold or r["candidate_id"] == "baseline"]
+            _log(f"Baseline filter: baseline={baseline_goodput:.0f}, threshold=+{threshold_pct}%={threshold:.0f}, kept {len(filtered)}/{len(ranking)} candidates")
+            ranking = filtered
+        elif baseline_goodput is not None and baseline_goodput == 0:
+            _log(f"Baseline failed (goodput=0), skipping threshold filter")
+        else:
+            _log(f"No baseline candidate found, skipping threshold filter")
+
     _write_json(config.results_dir / "ranking.json", ranking)
 
     return {
