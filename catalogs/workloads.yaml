@@ -9,8 +9,8 @@ workloads:
 
   # ── W01: 1k输入/1k输出(短对话,官方标准场景) ─────────
   W01_input-1k-output-1k:
-    input_tokens: 1000
-    output_tokens: 1000
+    input_tokens: 1024
+    output_tokens: 1024
 
   # ── W02: 128输入/1k输出(极短输入长输出,decode主导) ───
   W02_input-128-output-1k:
@@ -19,22 +19,22 @@ workloads:
 
   # ── W03: 3.5k输入/1k输出(短问答) ─────────────────────
   W03_input-3.5k-output-1k:
-    input_tokens: 3500
-    output_tokens: 1000
+    input_tokens: 3584
+    output_tokens: 1024
 
   # ── W04: 4k输入/1k输出(中等文档,官方常用) ────────────
   W04_input-4k-output-1k:
     input_tokens: 4096
-    output_tokens: 1000
+    output_tokens: 1024
 
   # ── W05: 8k输入/1k输出(长文档总结,官方标准场景) ──────
   W05_input-8k-output-1k:
-    input_tokens: 8000
-    output_tokens: 1000
+    input_tokens: 8192
+    output_tokens: 1024
 
   # ── W06: 8k输入/512输出(长输入短输出,Agent场景) ──────
   W06_input-8k-output-512:
-    input_tokens: 8000
+    input_tokens: 8192
     output_tokens: 512
 
   # ── W07: 32k输入/1k输出(长上下文,prefill主导) ────────
@@ -44,5 +44,5 @@ workloads:
 
   # ── W08: 1k输入/8k输出(短输入长生成,decode主导) ──────
   W08_input-1k-output-8k:
-    input_tokens: 1000
+    input_tokens: 1024
     output_tokens: 8192
