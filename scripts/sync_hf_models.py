@@ -486,7 +486,7 @@ def generate_new_model_card(hf_id: str, info: dict, sglang_repo: str = "") -> di
                 mlp_params = 3 * hidden * intermediate  # gate + up + down
                 if num_exp and is_moe:
                     mlp_params = num_exp * mlp_params
-                total_params = num_layers * (attn_params + mlp_params) + hidden * info.get("vocab_size", 0)
+                total_params = num_layers * (attn_params + mlp_params) + hidden * (info.get("vocab_size") or 0)
                 prec = quant_method if quant_method != "none" else "bf16"
                 bytes_per_param = 2 if prec in ("fp8", "fp4", "nvfp4") else 4
                 est_gb = total_params * bytes_per_param / (1024**3)
