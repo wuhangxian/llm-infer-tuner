@@ -105,9 +105,33 @@ def scan_cookbook_models(sglang_repo: str, since_date: str = "2026-05-01") -> li
             for pattern in patterns:
                 matches = re.findall(pattern, text)
                 for m in matches:
-                    # Filter out paths that look like file paths (contain /data/ or /tmp/)
                     if not m.startswith("/") and "/" in m and not m.startswith("$"):
-                        model_ids.add(m.strip("'\""))
+                        model_ids.add(m.strip(chr(39) + chr(34)))
+
+            # Pattern 2: href links
+            href_matches = re.findall(r'huggingface\.co/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)', text)
+            for m in href_matches:
+                if not any(x in m.lower() for x in ["/docs", "/datasets", "/blog", "/settings", "/license"]):
+                    model_ids.add(m)
+
+            # Pattern 3: model="org/model"
+            model_eq = re.findall(r'model=["\']([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)["\']', text)
+            for m in model_eq:
+                model_ids.add(m)
+
+    # Also scan jsx config files
+    for jsx_dir in [repo / "docs/src/snippets/configs", repo / "docs_new/src/snippets/configs"]:
+        if not jsx_dir.exists():
+            continue
+        for jsx_file in jsx_dir.rglob("*.jsx"):
+            try:
+                jsx_text = jsx_file.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            jsx_matches = re.findall(r'["\']([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+-[A-Za-z0-9]+)["\']', jsx_text)
+            for m in jsx_matches:
+                if not any(x in m.lower() for x in [".css", ".js", ".jsx", ".png", ".svg"]):
+                    model_ids.add(m)
 
     return sorted(model_ids)
 
