@@ -44,21 +44,20 @@ fi
 if [ -n "$SINGLE_FILE" ]; then
   # 单文件模式:从第一行 _meta 读所有信息
   META="$SINGLE_FILE"
-  JOB_ID="$(jq '._meta.job_id // "custom"' "$SINGLE_FILE")"
-  CONFIGS="$SINGLE_FILE"
+  JOB_ID="$(jq -r '._meta.job_id // "custom"' "$SINGLE_FILE")"
+  CONFIGS="$TMP_DIR/configs.jsonl"
   RESULTS="outputs/${JOB_ID}/results"
-  SSH_TARGET="$(jq '._meta.ssh_target' "$SINGLE_FILE")"
-  SSH_PASSWORD="$(jq '._meta.ssh_password // ""' "$SINGLE_FILE")"
-  MODEL_HOST_DIR="$(jq '._meta.model_host_dir' "$SINGLE_FILE")"
-  MODEL_CONTAINER_PATH="$(jq '._meta.model_container_path' "$SINGLE_FILE")"
-  IMAGE_REF="$(jq '._meta.image_ref' "$SINGLE_FILE")"
-  PORT="$(jq '._meta.port // 30000' "$SINGLE_FILE")"
-  REMOTE_OUTPUTS_DIR="$(jq '._meta.remote_outputs_dir // ""' "$SINGLE_FILE")"
-  TARGET_GPU_MODEL="$(jq '._meta.gpu_model // ""' "$SINGLE_FILE")"
-  TARGET_GPU_COUNT="$(jq '._meta.gpu_count // 0' "$SINGLE_FILE")"
-  TARGET_GPU_MEM="$(jq '._meta.gpu_memory_gb // 0' "$SINGLE_FILE")"
-  # 候选数 = 总行数 - 1(去掉 _meta 行)
-  MAX_CAND=$(( $(wc -l < "$SINGLE_FILE" | tr -d ' ') - 1 ))
+  SSH_TARGET="$(jq -r '._meta.ssh_target' "$SINGLE_FILE")"
+  SSH_PASSWORD="$(jq -r '._meta.ssh_password // ""' "$SINGLE_FILE")"
+  MODEL_HOST_DIR="$(jq -r '._meta.model_host_dir' "$SINGLE_FILE")"
+  MODEL_CONTAINER_PATH="$(jq -r '._meta.model_container_path' "$SINGLE_FILE")"
+  IMAGE_REF="$(jq -r '._meta.image_ref' "$SINGLE_FILE")"
+  PORT="$(jq -r '._meta.port // 30000' "$SINGLE_FILE")"
+  REMOTE_OUTPUTS_DIR="$(jq -r '._meta.remote_outputs_dir // ""' "$SINGLE_FILE")"
+  TARGET_GPU_MODEL="$(jq -r '._meta.gpu_model // ""' "$SINGLE_FILE")"
+  TARGET_GPU_COUNT="$(jq -r '._meta.gpu_count // 0' "$SINGLE_FILE")"
+
+  MAX_CAND="$(jq -c ".candidates | length" "$SINGLE_FILE")"
 
   # 写临时 job.json 和 target.json 给 executor.py
   TMP_DIR=$(mktemp -d)
