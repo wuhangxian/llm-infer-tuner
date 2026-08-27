@@ -44,26 +44,26 @@ fi
 if [ -n "$SINGLE_FILE" ]; then
   # 单文件模式:从第一行 _meta 读所有信息
   META="$SINGLE_FILE"
-  JOB_ID="$(jq '.[0]._meta.job_id // "custom"' "$SINGLE_FILE")"
+  JOB_ID="$(jq '._meta.job_id // "custom"' "$SINGLE_FILE")"
   CONFIGS="$SINGLE_FILE"
   RESULTS="outputs/${JOB_ID}/results"
-  SSH_TARGET="$(jq '.[0]._meta.ssh_target' "$SINGLE_FILE")"
-  SSH_PASSWORD="$(jq '.[0]._meta.ssh_password // ""' "$SINGLE_FILE")"
-  MODEL_HOST_DIR="$(jq '.[0]._meta.model_host_dir' "$SINGLE_FILE")"
-  MODEL_CONTAINER_PATH="$(jq '.[0]._meta.model_container_path' "$SINGLE_FILE")"
-  IMAGE_REF="$(jq '.[0]._meta.image_ref' "$SINGLE_FILE")"
-  PORT="$(jq '.[0]._meta.port // 30000' "$SINGLE_FILE")"
-  REMOTE_OUTPUTS_DIR="$(jq '.[0]._meta.remote_outputs_dir // ""' "$SINGLE_FILE")"
-  TARGET_GPU_MODEL="$(jq '.[0]._meta.gpu_model // ""' "$SINGLE_FILE")"
-  TARGET_GPU_COUNT="$(jq '.[0]._meta.gpu_count // 0' "$SINGLE_FILE")"
-  TARGET_GPU_MEM="$(jq '.[0]._meta.gpu_memory_gb // 0' "$SINGLE_FILE")"
+  SSH_TARGET="$(jq '._meta.ssh_target' "$SINGLE_FILE")"
+  SSH_PASSWORD="$(jq '._meta.ssh_password // ""' "$SINGLE_FILE")"
+  MODEL_HOST_DIR="$(jq '._meta.model_host_dir' "$SINGLE_FILE")"
+  MODEL_CONTAINER_PATH="$(jq '._meta.model_container_path' "$SINGLE_FILE")"
+  IMAGE_REF="$(jq '._meta.image_ref' "$SINGLE_FILE")"
+  PORT="$(jq '._meta.port // 30000' "$SINGLE_FILE")"
+  REMOTE_OUTPUTS_DIR="$(jq '._meta.remote_outputs_dir // ""' "$SINGLE_FILE")"
+  TARGET_GPU_MODEL="$(jq '._meta.gpu_model // ""' "$SINGLE_FILE")"
+  TARGET_GPU_COUNT="$(jq '._meta.gpu_count // 0' "$SINGLE_FILE")"
+  TARGET_GPU_MEM="$(jq '._meta.gpu_memory_gb // 0' "$SINGLE_FILE")"
   # 候选数 = 总行数 - 1(去掉 _meta 行)
   MAX_CAND=$(( $(wc -l < "$SINGLE_FILE" | tr -d ' ') - 1 ))
 
   # 写临时 job.json 和 target.json 给 executor.py
   TMP_DIR=$(mktemp -d)
-  jq '.[0]._meta | {job_id, engine:"sglang", gpu_model, gpu_count, gpu_memory_gb, model:"custom", image:"custom", workload, benchmark_method, sla, search:{max_candidates:999, max_runtime_minutes:180}}' "$SINGLE_FILE" > "$TMP_DIR/job.json"
-  jq '.[0]._meta | {gpu_model, gpu_count, gpu_memory_gb, ssh_target, ssh_password, model_host_dir, model_container_path, image_ref, port, remote_outputs_dir}' "$SINGLE_FILE" > "$TMP_DIR/target.json"
+  jq '._meta | {job_id, engine:"sglang", gpu_model, gpu_count, gpu_memory_gb, model:"custom", image:"custom", workload, benchmark_method, sla, search:{max_candidates:999, max_runtime_minutes:180}}' "$SINGLE_FILE" > "$TMP_DIR/job.json"
+  jq '._meta | {gpu_model, gpu_count, gpu_memory_gb, ssh_target, ssh_password, model_host_dir, model_container_path, image_ref, port, remote_outputs_dir}' "$SINGLE_FILE" > "$TMP_DIR/target.json"
   JOB="$TMP_DIR/job.json"
   TARGET="$TMP_DIR/target.json"
 else
