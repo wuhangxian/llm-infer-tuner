@@ -45,6 +45,7 @@ if [ -n "$SINGLE_FILE" ]; then
   # 单文件模式:从第一行 _meta 读所有信息
   META="$SINGLE_FILE"
   JOB_ID="$(jq -r '._meta.job_id // "custom"' "$SINGLE_FILE")"
+  TMP_DIR=$(mktemp -d)
   CONFIGS="$TMP_DIR/configs.jsonl"
   RESULTS="outputs/${JOB_ID}/results"
   SSH_TARGET="$(jq -r '._meta.ssh_target' "$SINGLE_FILE")"
@@ -60,7 +61,6 @@ if [ -n "$SINGLE_FILE" ]; then
   MAX_CAND="$(jq -c ".candidates | length" "$SINGLE_FILE")"
 
   # 写临时 job.json 和 target.json 给 executor.py
-  TMP_DIR=$(mktemp -d)
   jq '._meta | {job_id, engine:"sglang", gpu_model, gpu_count, gpu_memory_gb, model:"custom", image:"custom", workload, benchmark_method, sla, search:{max_candidates:999, max_runtime_minutes:180}}' "$SINGLE_FILE" > "$TMP_DIR/job.json"
   jq '._meta | {gpu_model, gpu_count, gpu_memory_gb, ssh_target, ssh_password, model_host_dir, model_container_path, image_ref, port, remote_outputs_dir}' "$SINGLE_FILE" > "$TMP_DIR/target.json"
   JOB="$TMP_DIR/job.json"
