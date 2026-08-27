@@ -65,6 +65,8 @@ if [ -n "$SINGLE_FILE" ]; then
   jq '._meta | {gpu_model, gpu_count, gpu_memory_gb, ssh_target, ssh_password, model_host_dir, model_container_path, image_ref, port, remote_outputs_dir}' "$SINGLE_FILE" > "$TMP_DIR/target.json"
   JOB="$TMP_DIR/job.json"
   TARGET="$TMP_DIR/target.json"
+  # Extract candidates into JSONL for executor
+  jq -c '.candidates[]' "$SINGLE_FILE" > "$TMP_DIR/configs.jsonl"
 else
   # 三参数模式:原来逻辑
   JOB_ID="$(jq -r '.job_id' "$JOB")"
