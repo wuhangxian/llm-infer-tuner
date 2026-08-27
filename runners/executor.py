@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -73,6 +75,8 @@ class ExecutorConfig:
     top_k: int = DEFAULT_TOP_K    # round-2 refines only the top-K candidates by round-1 goodput
     max_cap: int = DEFAULT_MAX_CAP  # upper bound on concurrency the search will probe
     ssh_password: str = ""  # optional; empty = key-based SSH
+    max_parallel: int = 8  # 批内并发跑多少个候选(每个独占容器+GPU+端口);1 = 退回串行
+    fill_host: bool = False  # round2 是否把 top-K 候选各复制成 floor(gpu/tp) 个实例整机满载实测
 
 
 def _load_job(job_path: Path) -> JobSpec:
@@ -117,6 +121,39 @@ def _load_num_prompts_multiplier(method_id: str, *, project_root: Path) -> int:
     return 4
 
 
+def _is_baseline(cand: dict[str, Any]) -> bool:
+    """候选是否为「用户基线复现」——当且仅当 params.is_baseline 为真。
+
+    无 baseline 字段的场景(gen_configs.sh:172)里第一条锚点候选没有这个标记,
+    因此被当作普通候选计入名额。判定方式与 executor.py 的 auto_flags 兜底
+    (`key == "is_baseline"`)保持一致,只认这个键的真值。
+    """
+    return bool(isinstance(cand, dict) and cand.get("params", {}).get("is_baseline"))
+
+
+def _cap_candidates(
+    candidates: list[dict[str, Any]], max_candidates: int
+) -> list[dict[str, Any]]:
+    """保留全部 baseline 候选,外加至多 max_candidates 条非 baseline 候选,顺序不变。
+
+    约定(gen_configs.sh:169):baseline 不占 max_candidates 名额,总数 =
+    max_candidates + 1。旧代码用 candidates[:max_candidates] 按裸长度截断,
+    baseline 在场时会吃掉一个名额、把最后一条真候选(如 tp=4 的 c002)静默丢弃。
+    这里改为只对非 baseline 计数。max_candidates <= 0 表示不限。
+    """
+    if max_candidates <= 0:
+        return candidates
+    result: list[dict[str, Any]] = []
+    kept = 0
+    for cand in candidates:
+        if _is_baseline(cand):
+            result.append(cand)
+        elif kept < max_candidates:
+            result.append(cand)
+            kept += 1
+    return result
+
+
 def _load_candidates(configs_path: Path, max_candidates: int) -> list[dict[str, Any]]:
     """Read candidates from configs file.
 
@@ -154,10 +191,12 @@ def _load_candidates(configs_path: Path, max_candidates: int) -> list[dict[str, 
                 continue
             if isinstance(row, dict) and "id" in row:
                 candidates.append(row)
-            if len(candidates) >= max_candidates:
-                break
+            # 不在这里按裸长度提前 break:len(candidates) 会把 baseline 也算进去,
+            # 导致 baseline 在场时少读一条真候选。configs 文件很小(max_candidates+1
+            # 行),读完全部再由 _cap_candidates 统一按「baseline 不占名额」截断,
+            # 让 JSON 与 JSONL 两条路径共用同一套截断规则。
 
-    return candidates[:max_candidates] if max_candidates > 0 else candidates
+    return _cap_candidates(candidates, max_candidates)
 
 
 def _run_result_dict(result: RunResult) -> dict[str, Any]:
@@ -194,6 +233,10 @@ class _CandidateContext:
     multiplier: int
     outputs_container_path: str
     port: int = 30000  # per-candidate port (overrides config.port in parallel mode)
+    # 整机满载(fill_host)时,本候选复制成 N 个实例的端口与 GPU 切片(一一对应)。
+    # None = 单实例,只用 port 起一个 server —— round1 粗筛与非满载路径的原行为。
+    replica_ports: list[int] | None = None
+    replica_gpus: list[str] | None = None  # 每个副本的 CUDA_VISIBLE_DEVICES 值(如 "0,1")
 
 
 def _resolve_bench_template(
@@ -213,6 +256,54 @@ def _resolve_bench_template(
         raise RuntimeError("client skill returned no benchmark commands")
     commands.sort(key=lambda bc: bc.concurrency)
     return commands[0].command
+
+
+def _aggregate_replicas(replicas: list[RunResult], *, expected: int) -> RunResult:
+    """把整机满载的 N 个相同实例、同一并发档的实测结果聚成一条 per-host 结果。
+
+    这是「整机满载实测」口径落地的核心,也是防双重计数的关键:
+    · total_throughput / request_throughput / output_throughput / completed /
+      total_output_tokens = N 个副本求和(整机真实吞吐,不再靠 floor(gpu/tp) 外推);
+    · instances = 实际参与求和的副本数,ranker 用它把外推乘数除回去(见 ranker),
+      使 per_host 恰等于这里的实测求和、N 只被计一次;
+    · 延迟(ttft/tpot)取各副本里最差的一个 —— 满载下 SLA 必须每个副本都过;
+    · success_rate / avg_output_tokens 取最差,duration 取最长;
+    · 只要有副本缺失(len<expected)或本身不健康,整体标记为失败,绝不拿"部分副本"
+      的求和冒充满载 goodput(那会高估)。
+    """
+    healthy = [r for r in replicas if r is not None and r.status == "ok"]
+    concurrency = replicas[0].concurrency if replicas else 0
+    candidate_id = replicas[0].candidate_id if replicas else "unknown"
+    tp_size = replicas[0].tp_size if replicas else 1
+    if not healthy or len(healthy) < expected:
+        agg = _health_check_failed_result(
+            candidate_id,
+            f"满载副本不齐或不健康:健康 {len(healthy)}/{expected}(C={concurrency})",
+        )
+        agg.concurrency = concurrency
+        agg.tp_size = tp_size
+        agg.instances = expected
+        return agg
+    return RunResult(
+        candidate_id=candidate_id,
+        concurrency=concurrency,
+        num_prompts=sum(r.num_prompts for r in healthy),
+        completed=sum(r.completed for r in healthy),
+        success_rate=min(r.success_rate for r in healthy),
+        request_throughput=sum(r.request_throughput for r in healthy),
+        output_throughput=sum(r.output_throughput for r in healthy),
+        total_throughput=sum(r.total_throughput for r in healthy),
+        mean_ttft_ms=max(r.mean_ttft_ms for r in healthy),
+        p99_ttft_ms=max(r.p99_ttft_ms for r in healthy),
+        mean_tpot_ms=max(r.mean_tpot_ms for r in healthy),
+        p99_tpot_ms=max(r.p99_tpot_ms for r in healthy),
+        total_output_tokens=sum(r.total_output_tokens for r in healthy),
+        avg_output_tokens=min(r.avg_output_tokens for r in healthy),
+        duration=max(r.duration for r in healthy),
+        tp_size=tp_size,
+        instances=len(healthy),
+        status="ok",
+    )
 
 
 def _health_check_failed_result(candidate_id: str, reason: str) -> RunResult:
@@ -238,64 +329,90 @@ def _health_check_failed_result(candidate_id: str, reason: str) -> RunResult:
     )
 
 
-def _make_evaluate(ctx: _CandidateContext, candidate_id: str, candidate_dir: Path, tp_size: int = 1):
+def _make_evaluate(
+    ctx: _CandidateContext,
+    candidate_id: str,
+    candidate_dir: Path,
+    tp_size: int = 1,
+    ports: list[int] | None = None,
+):
     """Build the evaluate(concurrency) -> RunResult closure the search calls.
 
-    Each call rewrites the single template for this concurrency, runs one bench in
-    the container, pulls the console + result back to candidate_dir (evidence fires
-    exactly once per real bench), and parses metrics. Any exception becomes a
-    non-qualifying RunResult so an overload collapse counts as a boundary fail
-    rather than aborting the whole search.
+    ``ports`` 是本候选要同时压的实例端口列表:
+    · 缺省(None)= 单实例,只压 ctx.port,instances=1 —— round1 粗筛的原行为,逐字不变;
+    · 整机满载 = floor(gpu/tp) 个副本端口,每档并发压全部端口、由 _aggregate_replicas
+      求和成一条 instances=N 的 per-host 结果(round2 fill_host)。
+
+    每次 evaluate 把单一模板按并发档改写,在容器里跑 bench,把 console + 结果拉回
+    candidate_dir(每个真实 bench 恰好落一份证据)并解析指标。任何异常收敛成不合格
+    RunResult,使过载塌缩记为边界失败而非中断整轮搜索。
     """
     container = ctx.container
     candidate_out = f"{ctx.outputs_container_path}/{candidate_id}"
+    bench_ports = ports if ports else [ctx.port]
+
+    def _bench_one_port(concurrency: int, port: int, tag: str) -> RunResult:
+        command_tpl, num_prompts = rewrite_bench_command(
+            ctx.bench_template, concurrency=concurrency, multiplier=ctx.multiplier
+        )
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        result_name = f"bench_c{concurrency}{tag}_{timestamp}.jsonl"
+        result_container_path = f"{candidate_out}/{result_name}"
+        base_command = substitute_placeholders(
+            command_tpl,
+            host="127.0.0.1",
+            port=port,
+            model_path=ctx.config.model_container_path,
+            job_id=ctx.job.job_id,
+            timestamp=timestamp,
+        )
+        command = _force_output_file(base_command, result_container_path)
+        _log(f"    {candidate_id}: bench C={concurrency}{tag} @port{port} (num_prompts={num_prompts}) ...")
+        bench_run = run_benchmark(container, command)
+
+        log_name = f"bench_c{concurrency}{tag}_{timestamp}.log"
+        bench_console = (
+            f"$ {command}\n"
+            f"# exit code: {bench_run.returncode}\n\n"
+            f"----- stdout -----\n{bench_run.stdout}\n"
+            f"----- stderr -----\n{bench_run.stderr}\n"
+        )
+        (candidate_dir / log_name).write_text(bench_console, encoding="utf-8")
+
+        text = container.exec(f"cat {shlex.quote(result_container_path)}").stdout
+        run_result = parse_bench_text(
+            text,
+            candidate_id=candidate_id,
+            concurrency=concurrency,
+            num_prompts=num_prompts,
+            tp_size=tp_size,
+        )
+        if run_result.status == "bad_args" and bench_run.returncode != 0:
+            tail = (bench_run.stderr or bench_run.stdout).strip().splitlines()[-3:]
+            run_result.failure_reason = (
+                f"bench exit {bench_run.returncode}; see {log_name}: "
+                + " | ".join(tail)
+            )
+        (candidate_dir / result_name).write_text(text, encoding="utf-8")
+        return run_result
 
     def evaluate(concurrency: int) -> RunResult:
         try:
-            command_tpl, num_prompts = rewrite_bench_command(
-                ctx.bench_template, concurrency=concurrency, multiplier=ctx.multiplier
-            )
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            result_name = f"bench_c{concurrency}_{timestamp}.jsonl"
-            result_container_path = f"{candidate_out}/{result_name}"
-            base_command = substitute_placeholders(
-                command_tpl,
-                host="127.0.0.1",
-                port=ctx.port,
-                model_path=ctx.config.model_container_path,
-                job_id=ctx.job.job_id,
-                timestamp=timestamp,
-            )
-            command = _force_output_file(base_command, result_container_path)
-            _log(f"    {candidate_id}: bench C={concurrency} (num_prompts={num_prompts}) ...")
-            bench_run = run_benchmark(container, command)
+            if len(bench_ports) == 1:
+                run_result = _bench_one_port(concurrency, bench_ports[0], "")
+            else:
+                # 整机满载:N 个副本端口并发各压一份(同一并发档),再求和。
+                # 底层 subprocess.run 线程安全,每个副本写各自的结果文件,互不串。
+                def _one(i_port):
+                    i, port = i_port
+                    return _bench_one_port(concurrency, port, f"_i{i}")
 
-            log_name = f"bench_c{concurrency}_{timestamp}.log"
-            bench_console = (
-                f"$ {command}\n"
-                f"# exit code: {bench_run.returncode}\n\n"
-                f"----- stdout -----\n{bench_run.stdout}\n"
-                f"----- stderr -----\n{bench_run.stderr}\n"
-            )
-            (candidate_dir / log_name).write_text(bench_console, encoding="utf-8")
-
-            text = container.exec(f"cat {shlex.quote(result_container_path)}").stdout
-            run_result = parse_bench_text(
-                text,
-                candidate_id=candidate_id,
-                concurrency=concurrency,
-                num_prompts=num_prompts,
-                tp_size=tp_size,
-            )
-            if run_result.status == "bad_args" and bench_run.returncode != 0:
-                tail = (bench_run.stderr or bench_run.stdout).strip().splitlines()[-3:]
-                run_result.failure_reason = (
-                    f"bench exit {bench_run.returncode}; see {log_name}: "
-                    + " | ".join(tail)
-                )
-            (candidate_dir / result_name).write_text(text, encoding="utf-8")
+                with ThreadPoolExecutor(max_workers=len(bench_ports)) as pool:
+                    replicas = list(pool.map(_one, enumerate(bench_ports)))
+                run_result = _aggregate_replicas(replicas, expected=len(bench_ports))
             _log(
                 f"      C={concurrency}: tput={run_result.total_throughput:.0f} "
+                f"(x{run_result.instances}) "
                 f"ttft={run_result.mean_ttft_ms:.0f}ms tpot={run_result.mean_tpot_ms:.1f}ms "
                 f"succ={run_result.success_rate:.2f} status={run_result.status}"
             )
@@ -422,6 +539,19 @@ def _allocate_gpus_and_ports(
     return result
 
 
+def _format_alloc(alloc: list[tuple[dict[str, Any], str, int]]) -> str:
+    """把一批候选的 GPU/端口分配拼成可读字符串,用于命令行展示每个候选跑在哪几张卡上。
+
+    形如: c001→GPU[0,1]@30000  c002→GPU[2,3]@30001
+    """
+    parts = []
+    for candidate, gpu_ids_str, port in alloc:
+        cid = candidate.get("id", "?")
+        gpus = gpu_ids_str.replace("device=", "")
+        parts.append(f"{cid}→GPU[{gpus}]@{port}")
+    return "  ".join(parts)
+
+
 def _run_batch_parallel(
     ctx_template: _CandidateContext,
     batch: list[tuple[dict[str, Any], str, int]],
@@ -435,11 +565,19 @@ def _run_batch_parallel(
     confirm: int,
     refine: bool,
     seeds_by_id: dict[str, list[RunResult]] | None = None,
+    fill_host: bool = False,
 ) -> dict[str, SearchOutcome]:
     """Run a batch of candidates in parallel, each in its own container.
 
     Each candidate gets its own docker container with specific GPUs and port.
-    All containers are started, health-checked, and benchmarked concurrently.
+    容器先整批一次性 start,随后每个候选的「等就绪 → 起搜索 → 压测 → 拆除」在各自
+    线程里并发跑(线程安全:底层 RemoteRunner.run / container.exec 都是 subprocess.run,
+    且每个候选独占容器+GPU+端口,互不串数据)。批内并发上限由 config.max_parallel 控制。
+
+    fill_host=True(round2 整机满载):批内每个候选独占整机,容器拿到全部 gpu_count 张卡,
+    在容器内复制成 N=floor(n_devices/tp_size) 个实例(各自 CUDA_VISIBLE_DEVICES 切片 +
+    各自端口),压测求和 —— 实测整机满载 goodput,不再靠外推。此模式下候选应各自成批
+    (调用方保证 batch 只含一个候选),批间串行。
     """
     config = ctx_template.config
     job = ctx_template.job
@@ -451,15 +589,35 @@ def _run_batch_parallel(
     # Create one container per candidate in this batch
     for candidate, gpu_ids_str, port in batch:
         candidate_id = str(candidate.get("id", "unknown"))
-        # 启动前一致性断言:分到的 device 数必须等于 tp_size,否则容器会以
-        # --tp {tp_size} 却少卡的方式崩在 CUDA "invalid device ordinal"。
         _tp_size = max(1, int(candidate.get("params", {}).get("tp_size", 1)))
-        _n_devices = len([d for d in gpu_ids_str.replace("device=", "").split(",") if d])
-        if _n_devices != _tp_size:
-            raise ValueError(
-                f"candidate {candidate_id}: tp_size={_tp_size} 需要 {_tp_size} 张 GPU,"
-                f"实际分到 {_n_devices} 张({gpu_ids_str})。拒绝启动以免 CUDA invalid device ordinal。"
-            )
+        _devices = [d for d in gpu_ids_str.replace("device=", "").split(",") if d]
+        _n_devices = len(_devices)
+        replica_ports: list[int] | None = None
+        replica_gpus: list[str] | None = None
+        if fill_host:
+            # 整机满载:容器拿到全部 device,内部复制成 N=floor(n_devices/tp) 个实例。
+            n_replicas = _n_devices // _tp_size
+            if n_replicas < 1:
+                raise ValueError(
+                    f"candidate {candidate_id}: 整机 {_n_devices} 卡放不下一个 tp_size={_tp_size} 实例。"
+                )
+            replica_ports = [port + i for i in range(n_replicas)]
+            # 容器内 GPU 从 0 连续编号(docker --gpus 已把宿主卡映射进来),
+            # 按 tp_size 连续切片分给各副本,避免跨副本共享卡。
+            replica_gpus = [
+                ",".join(str(g) for g in range(i * _tp_size, (i + 1) * _tp_size))
+                for i in range(n_replicas)
+            ]
+            _log(f"[{round_label}] {candidate_id}: 整机满载 {n_replicas} 实例 "
+                 f"(tp={_tp_size}×{n_replicas}={_n_devices}卡), 端口 {replica_ports}")
+        else:
+            # 启动前一致性断言:分到的 device 数必须等于 tp_size,否则容器会以
+            # --tp {tp_size} 却少卡的方式崩在 CUDA "invalid device ordinal"。
+            if _n_devices != _tp_size:
+                raise ValueError(
+                    f"candidate {candidate_id}: tp_size={_tp_size} 需要 {_tp_size} 张 GPU,"
+                    f"实际分到 {_n_devices} 张({gpu_ids_str})。拒绝启动以免 CUDA invalid device ordinal。"
+                )
         container_name = f"{config.container_name}-{candidate_id}"
         container_config = ContainerConfig(
             image_ref=config.image_ref,
@@ -480,6 +638,8 @@ def _run_batch_parallel(
             multiplier=multiplier,
             outputs_container_path=outputs_container_path,
             port=port,
+            replica_ports=replica_ports,
+            replica_gpus=replica_gpus,
         )
         containers.append((candidate_id, container, ctx, candidate, gpu_ids_str, port))
 
@@ -490,29 +650,61 @@ def _run_batch_parallel(
         if not started.ok or not container.is_running():
             _log(f"[{round_label}] {candidate_id}: container FAILED to start: {started.stderr.strip()}")
 
-    # Run each candidate (server lifecycle + search) — still sequential within batch
-    # but each has its own container with isolated GPUs and port
-    outcomes: dict[str, SearchOutcome] = {}
-    for candidate_id, container, ctx, candidate, gpu_ids_str, port in containers:
+    # Run each candidate (server lifecycle + search) CONCURRENTLY within the batch.
+    # 每个候选独占容器+GPU+端口,底层 subprocess.run 线程安全,故用线程池并发跑。
+    # 单个候选内部抛异常(RemoteRunner OSError 等)被收敛成 health_check_failed
+    # 结果而非中断整批;try/finally 仍保证本 batch 已启动的容器一定被 stop+remove,
+    # 不会留下孤儿容器占住 GPU/端口导致下个 batch 撞车。
+    def _run_one(entry) -> tuple[str, SearchOutcome]:
+        candidate_id, container, ctx, candidate, gpu_ids_str, port = entry
         cand_seeds = None
         if seeds_by_id and candidate_id in seeds_by_id:
             cand_seeds = seeds_by_id[candidate_id]
-        outcome = _run_candidate(
-            ctx,
-            candidate,
-            qualifies=qualifies,
-            round_label=round_label,
-            max_probes=max_probes,
-            confirm=confirm,
-            refine=refine,
-            seeds=cand_seeds,
-        )
-        outcomes[candidate_id] = outcome
+        try:
+            outcome = _run_candidate(
+                ctx,
+                candidate,
+                qualifies=qualifies,
+                round_label=round_label,
+                max_probes=max_probes,
+                confirm=confirm,
+                refine=refine,
+                seeds=cand_seeds,
+            )
+        except Exception as exc:  # noqa: BLE001 - 单候选崩溃不拖垮同批其他候选
+            _log(f"[{round_label}] {candidate_id}: 运行异常,记为失败: {exc!r}")
+            outcome = SearchOutcome(
+                results=[_health_check_failed_result(candidate_id, f"_run_candidate raised: {exc!r}")],
+                c_star=None,
+                stop_reason="health_check_failed",
+                last_pass=None,
+                first_fail=None,
+                num_evals=0,
+                newly_probed=[],
+                log=[f"_run_candidate raised: {exc!r}"],
+            )
+        return candidate_id, outcome
 
-    # Stop and remove all containers in this batch
-    for candidate_id, container, ctx, candidate, gpu_ids_str, port in containers:
-        container.stop()
-        container.remove()
+    outcomes: dict[str, SearchOutcome] = {}
+    try:
+        max_workers = max(1, min(len(containers), config.max_parallel))
+        if max_workers == 1 or len(containers) == 1:
+            for entry in containers:
+                cid, outcome = _run_one(entry)
+                outcomes[cid] = outcome
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                for cid, outcome in pool.map(_run_one, containers):
+                    outcomes[cid] = outcome
+    finally:
+        # Stop and remove all containers in this batch.
+        # 逐个吞掉单容器的清理错误,避免一个 remove 失败跳过其余容器的清理。
+        for candidate_id, container, ctx, candidate, gpu_ids_str, port in containers:
+            try:
+                container.stop()
+                container.remove()
+            except Exception as exc:  # noqa: BLE001 - 清理尽力而为,不因单个失败中断
+                _log(f"[{round_label}] {candidate_id}: 容器清理出错(已忽略): {exc}")
 
     return outcomes
 
@@ -616,23 +808,43 @@ def _run_candidate(
     # configs.jsonl may carry either the ${MODEL_PATH} placeholder or the host
     # model dir baked straight into --model-path; rewrite both to the in-container
     # mount point so the server finds the weights.
-    server_cmd = cmd.replace("${MODEL_PATH}", config.model_container_path)
-    server_cmd = server_cmd.replace(config.model_host_dir, config.model_container_path)
-    # Replace the port in the launch command with this candidate's assigned port
-    candidate_port = ctx.port
-    server_cmd = server_cmd.replace("--port 30000", f"--port {candidate_port}")
-    server_cmd = server_cmd.replace("--host 0.0.0.0 --port 30000", f"--host 0.0.0.0 --port {candidate_port}")
+    base_cmd = cmd.replace("${MODEL_PATH}", config.model_container_path)
+    base_cmd = base_cmd.replace(config.model_host_dir, config.model_container_path)
     candidate_out = f"{ctx.outputs_container_path}/{candidate_id}"
-    server_log = f"{candidate_out}/server.log"
     container.exec(f"mkdir -p {shlex.quote(candidate_out)}")
-    _log(f"[{round_label}] {candidate_id}: starting server, waiting for /health ...")
-    container.exec_detached(server_cmd, server_log)
+
+    # 副本计划:满载时用 ctx.replica_ports/replica_gpus(N 个),否则单实例 = [ctx.port]。
+    replica_ports = ctx.replica_ports or [ctx.port]
+    replica_gpus = ctx.replica_gpus or [None] * len(replica_ports)
+    n_replicas = len(replica_ports)
+    server_log = f"{candidate_out}/server.log"  # 首副本日志,崩溃诊断沿用它
+
+    for idx, (rport, rgpu) in enumerate(zip(replica_ports, replica_gpus)):
+        # 每个副本换到自己的端口;满载时再用 CUDA_VISIBLE_DEVICES 把它钉在自己那段卡上。
+        rcmd = base_cmd.replace("--host 0.0.0.0 --port 30000", f"--host 0.0.0.0 --port {rport}")
+        rcmd = rcmd.replace("--port 30000", f"--port {rport}")
+        if rgpu is not None:
+            # 必须用 `env KEY=VAL` 而非裸 `KEY=VAL cmd` 前缀:exec_detached 会拼成
+            # `nohup {rcmd} ...`,而 nohup 把第一个词当程序名 —— 裸前缀会让它去找名为
+            # "CUDA_VISIBLE_DEVICES=0" 的可执行文件,报 "No such file or directory" 而崩。
+            # env 会正确解析 KEY=VAL 环境赋值后再 exec 后面的 python。
+            rcmd = f"env CUDA_VISIBLE_DEVICES={rgpu} {rcmd}"
+        rlog = server_log if idx == 0 else f"{candidate_out}/server_i{idx}.log"
+        tag = "" if n_replicas == 1 else f" 副本 {idx + 1}/{n_replicas} (GPU={rgpu}@{rport})"
+        _log(f"[{round_label}] {candidate_id}: starting server{tag}, waiting for /health ...")
+        container.exec_detached(rcmd, rlog)
 
     def _server_alive() -> bool:
         return container.exec("pgrep -f sglang.launch_server").ok
 
-    probe = make_health_probe(container, port=candidate_port)
-    ready = wait_until_ready(probe, is_alive=_server_alive)
+    # 满载:所有副本端口都要 /health 通过才算就绪(缺一个就不能满载压测)。
+    ready = True
+    for rport in replica_ports:
+        probe = make_health_probe(container, port=rport)
+        if not wait_until_ready(probe, is_alive=_server_alive):
+            ready = False
+            break
+    candidate_port = replica_ports[0]
 
     try:
         if not ready:
@@ -657,7 +869,10 @@ def _run_candidate(
         else:
             _log(f"[{round_label}] {candidate_id}: server ready, probing concurrency ...")
             tp_size = int(candidate.get("params", {}).get("tp_size", 1))
-            evaluate = _make_evaluate(ctx, candidate_id, candidate_dir, tp_size=tp_size)
+            evaluate = _make_evaluate(
+                ctx, candidate_id, candidate_dir, tp_size=tp_size,
+                ports=(replica_ports if n_replicas > 1 else None),
+            )
             outcome = search_saturation(
                 evaluate,
                 qualifies,
@@ -699,15 +914,65 @@ def _outcome_diag(outcome: SearchOutcome) -> dict[str, Any]:
 
 
 
-def _preflight_checks(config: ExecutorConfig, remote: RemoteRunner) -> None:
-    """Verify remote connectivity, model directory, and image availability before container start."""
-    # 0. Clean up stale containers from previous runs (same job_id prefix)
-    prefix = shlex.quote(config.container_name + "%")
-    cleanup = remote.run(f"docker rm -f $(docker ps -a --filter name={prefix} -q) 2>/dev/null || true")
-    if cleanup.ok and cleanup.stdout.strip():
-        _log(f"Cleaned up stale containers: {cleanup.stdout.strip()}")
+def _reclaim_host(config: ExecutorConfig, remote: RemoteRunner) -> None:
+    """开跑前强制清场,独占整机。
 
-    # 1. SSH
+    目标机默认视为本 job 独占使用。开跑前把机器上一切可能占用 GPU / 端口的东西
+    全部清掉,原因有二:
+      (a) 别人或上一轮跑的压测若还在,会和本次候选抢显存/算力,测出的吞吐/延迟
+          全是脏数据;
+      (b) 更关键的——可能是**死进程**(僵死的 sglang/python 崩了但没退干净)
+          还占着显存不释放,只做"检测到负载就报错退出"会让你永远卡在那台机器上,
+          所以这里直接强杀,而不是退出。
+
+    清三样,每步都 `|| true` 兜底,任何一步失败都不阻塞后续:
+      1. **所有 docker 容器**(不限本 job 前缀)—— docker rm -f 全删。
+      2. **所有还占着显存的 GPU 计算进程** —— 按 nvidia-smi 查出的 PID kill -9,
+         死进程/僵尸一并强杀。
+      3. **将要用的端口段**(port .. port+gpu_count-1)上的 LISTEN 进程 —— fuser -k。
+    """
+    _log("⚠️  强制清场(独占整机):即将清掉目标机上所有容器 + 占显存的 GPU 进程 + 占端口进程")
+
+    # 1. 删所有容器(不限前缀:独占整机,别人的容器也一并清)
+    rm = remote.run(
+        "before=$(docker ps -aq 2>/dev/null | wc -l); "
+        "docker ps -aq 2>/dev/null | xargs -r docker rm -f >/dev/null 2>&1; "
+        "after=$(docker ps -aq 2>/dev/null | wc -l); "
+        'echo "removed=$((before-after)) remaining=$after"',
+        timeout=180,
+    )
+    _log(f"  容器清理: {rm.stdout.strip() or rm.stderr.strip() or '(无输出)'}")
+
+    # 2. 强杀所有占显存的 GPU 计算进程(死进程/僵尸一并 kill -9)
+    kill_gpu = remote.run(
+        "pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null "
+        "| tr -cd '0-9\\n' | grep -E '^[0-9]+$' | sort -u); "
+        'if [ -n "$pids" ]; then '
+        'echo "$pids" | xargs -r kill -9 2>/dev/null; '
+        'echo "killed_gpu_pids=$(echo $pids | tr \'\\n\' \' \')"; '
+        'else echo "killed_gpu_pids=(none)"; fi',
+        timeout=60,
+    )
+    _log(f"  GPU 进程清理: {kill_gpu.stdout.strip() or kill_gpu.stderr.strip() or '(无输出)'}")
+
+    # 3. 清将要用的端口段上的 LISTEN 进程(容器删完后一般已释放,这里兜底)
+    start_port = int(config.port)
+    span = max(int(config.target_gpu_count), 1)
+    end_port = start_port + span - 1
+    clear_ports = remote.run(
+        f"for p in $(seq {start_port} {end_port}); do fuser -k ${{p}}/tcp 2>/dev/null || true; done; "
+        f'echo "cleared_ports={start_port}-{end_port}"',
+        timeout=60,
+    )
+    _log(f"  端口清理: {clear_ports.stdout.strip() or '(无输出)'}")
+
+    # 给 GPU 驱动一点时间回收被杀进程的显存,避免紧接着起容器时显存还没释放
+    time.sleep(3)
+
+
+def _preflight_checks(config: ExecutorConfig, remote: RemoteRunner) -> None:
+    """Verify remote connectivity, forcibly reclaim the host, then check model dir and image."""
+    # 1. SSH(先确认能连上,再动手清场)
     probe = remote.run("echo ok")
     if not probe.ok or probe.stdout.strip() != "ok":
         detail = probe.stderr.strip()
@@ -715,6 +980,9 @@ def _preflight_checks(config: ExecutorConfig, remote: RemoteRunner) -> None:
             f"SSH connection failed: {config.ssh_target}\n{detail}"
         )
     _log(f"SSH OK: {config.ssh_target}")
+
+    # 1.5 强制清场,独占整机(取代原来只清本 job 前缀容器的做法)
+    _reclaim_host(config, remote)
 
     # 2. Model dir
     q = shlex.quote(config.model_host_dir)
@@ -745,6 +1013,19 @@ def _preflight_checks(config: ExecutorConfig, remote: RemoteRunner) -> None:
         _log(f"Image local: {config.image_ref}")
 
 
+def _norm_gpu(name: str) -> str:
+    """归一化 GPU 型号名以便比较。
+
+    job.json 用 catalog key(带前缀,如 ``G24_pro5000``),target.json 用裸型号名
+    (如 ``pro5000``),两者指同一张卡。剥掉 ``G<NN>_`` 前缀(gpu.yaml 里每个 key 的
+    后缀全局唯一),再归一大小写/空格/连字符,兼容 ``PRO 5000`` 之类写法。
+    注意:仅剥前缀,不做别名全解析,故 ``pro5000`` vs ``pro6000`` 仍判为不同,
+    真正的硬件不匹配依旧会被拦住。
+    """
+    stripped = re.sub(r"(?i)^G\d+_", "", name.strip())
+    return stripped.lower().replace(" ", "").replace("-", "")
+
+
 def _check_hardware_match(job: JobSpec, config: ExecutorConfig) -> None:
     """Verify target.json GPU fields match job.json requirements before any remote work.
 
@@ -754,7 +1035,7 @@ def _check_hardware_match(job: JobSpec, config: ExecutorConfig) -> None:
     if not config.target_gpu_model:
         _log("⚠️  target.json 缺少 gpu_model 字段,跳过硬件校验")
         return
-    if config.target_gpu_model != job.gpu_model:
+    if _norm_gpu(config.target_gpu_model) != _norm_gpu(job.gpu_model):
         raise SystemExit(
             f"❌ GPU 型号不匹配: job 要求 {job.gpu_model}, "
             f"target 提供 {config.target_gpu_model}"
@@ -880,7 +1161,7 @@ def run_executor(
         # Allocate GPUs within this batch (NUMA-aware, reset cursor per batch)
         alloc = _allocate_gpus_and_ports(batch, job.gpu_count, base_port=config.port, numa_groups=numa_groups)
         _log(f"round-1 batch {batch_idx + 1}/{len(batches)}: "
-             f"{[c.get('id') for c in batch]}")
+             + _format_alloc(alloc))
         outcomes = _run_batch_parallel(
             ctx_template, alloc, remote, outputs_host_dir, outputs_container_path,
             qualifies=qualifies,
@@ -910,25 +1191,39 @@ def run_executor(
     candidate_by_id = {str(c.get("id", "unknown")): c for c in candidates}
     top_candidates = [candidate_by_id[cid] for cid in top_ids if cid in candidate_by_id]
 
-    # Split top-K into batches too
+    # Split top-K into batches.
+    # · fill_host:每个候选独占整机、各自成批,批间串行(N 副本满载实测)。
+    # · 否则:沿用「按 tp_size 把多个候选拼满 gpu_count」的粗筛式并行分批。
     top_batches: list[list[dict[str, Any]]] = []
-    current_batch = []
-    current_gpus_used = 0
-    for candidate in top_candidates:
-        tp_size = int(candidate.get("params", {}).get("tp_size", 1))
-        if current_gpus_used + tp_size > job.gpu_count and current_batch:
+    if config.fill_host:
+        top_batches = [[c] for c in top_candidates]
+    else:
+        current_batch = []
+        current_gpus_used = 0
+        for candidate in top_candidates:
+            tp_size = int(candidate.get("params", {}).get("tp_size", 1))
+            if current_gpus_used + tp_size > job.gpu_count and current_batch:
+                top_batches.append(current_batch)
+                current_batch = []
+                current_gpus_used = 0
+            current_batch.append(candidate)
+            current_gpus_used += tp_size
+        if current_batch:
             top_batches.append(current_batch)
-            current_batch = []
-            current_gpus_used = 0
-        current_batch.append(candidate)
-        current_gpus_used += tp_size
-    if current_batch:
-        top_batches.append(current_batch)
 
     for batch_idx, batch in enumerate(top_batches):
-        alloc = _allocate_gpus_and_ports(batch, job.gpu_count, base_port=config.port, numa_groups=numa_groups)
+        if config.fill_host:
+            # 满载:把整机全部 GPU 交给这一个候选(容器内再切成 N 副本)。
+            all_devices = "device=" + ",".join(str(g) for g in range(job.gpu_count))
+            alloc = [(batch[0], all_devices, config.port)]
+        else:
+            alloc = _allocate_gpus_and_ports(batch, job.gpu_count, base_port=config.port, numa_groups=numa_groups)
         _log(f"round-2 batch {batch_idx + 1}/{len(top_batches)}: "
-             f"{[c.get('id') for c in batch]}")
+             + _format_alloc(alloc))
+        # 满载 round2 的结果是 instances=N 的实测求和;round1 种子是 instances=1 的
+        # 单实例外推。二者口径不同,绝不能混进同一候选的 results 里让 ranker 选到被
+        # 高估的单实例种子 —— 满载模式下不喂种子,round2 从头实测。
+        seeds = None if config.fill_host else results_by_candidate
         outcomes = _run_batch_parallel(
             ctx_template, alloc, remote, outputs_host_dir, outputs_container_path,
             qualifies=qualifies,
@@ -936,7 +1231,8 @@ def run_executor(
             max_probes=ROUND2_MAX_PROBES,
             confirm=ROUND2_CONFIRM,
             refine=True,
-            seeds_by_id=results_by_candidate,
+            seeds_by_id=seeds,
+            fill_host=config.fill_host,
         )
         for candidate_id, outcome in outcomes.items():
             results_by_candidate[candidate_id] = outcome.results
@@ -1033,6 +1329,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--target-gpu-model", default="")
     parser.add_argument("--target-gpu-count", type=int, default=0)
     parser.add_argument("--target-gpu-memory-gb", type=float, default=0.0)
+    parser.add_argument(
+        "--fill-host", action="store_true",
+        help="round2 把每个 top-K 候选复制成 floor(gpu_count/tp_size) 个实例整机满载、"
+             "多端口并发压测求和,得到实测整机 goodput(而非单实例 × 实例数 纸面外推)。"
+             "round1 仍单实例粗筛。",
+    )
+    parser.add_argument(
+        "--max-parallel", type=int, default=8,
+        help="批内候选并发上限(每候选独占容器+GPU+端口)。",
+    )
     args = parser.parse_args(argv)
 
     config = ExecutorConfig(
@@ -1055,6 +1361,8 @@ def main(argv: list[str] | None = None) -> int:
         target_gpu_model=args.target_gpu_model,
         target_gpu_count=args.target_gpu_count,
         target_gpu_memory_gb=args.target_gpu_memory_gb,
+        fill_host=args.fill_host,
+        max_parallel=args.max_parallel,
     )
     summary = run_executor(config)
     print(json.dumps(summary, ensure_ascii=False, indent=2))

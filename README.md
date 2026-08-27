@@ -11,22 +11,22 @@
 ### 0. 前置
 
 - Python 3.11+ + [uv](https://github.com/astral-sh/uv)
-- `jq`、`claude` CLI
+- `jq`、`tclaude` CLI
 - 目标 GPU 机器:SSH 可达、已装 docker、已备好模型权重和 sglang 镜像
 
 ```bash
 uv sync
 ```
 
-### 1. 配置凭证
+### 1. 登录 tclaude
 
 ```bash
-cp .env.example .env
-vim .env           # 填 ANTHROPIC_BASE_URL 和 ANTHROPIC_AUTH_TOKEN
-chmod 600 .env
+tclaude login
+tclaude --version
 ```
 
-`.env` 已被 `.gitignore` 排除。脚本启动时自动加载。
+`gen_configs.sh` 通过 tclaude 自己的网关和登录态调用模型。项目仍会加载可选的
+`.env` 文件,供其他需要直连 API 的工具使用;它不会覆盖 tclaude 的网关。
 
 ---
 
@@ -37,10 +37,38 @@ chmod 600 .env
 **第一步:AI 生成候选配置**
 
 ```bash
+# 不指定时默认使用 claude-hy3
 ./gen_configs.sh input/jobs/<job>.json
+
+# 临时选择其他 tclaude 模型
+./gen_configs.sh --model claude-opus-4-8 input/jobs/<job>.json
+./gen_configs.sh --model 'claude-glm-5.2[1m]' input/jobs/<job>.json
 ```
 
-AI 读 knowledge.md + catalogs(gpu/models/workloads/images),推导 TP/attention/mem-fraction/投机解码等参数,生成候选配置到 `outputs/<job_id>/configs.json`。
+AI 读 knowledge.md + catalogs(gpu/models/workloads/images),推导 TP/attention/mem-fraction/投机解码等参数,生成候选配置到 `outputs/<job_id>/configs.jsonl`。
+
+#### tclaude 超时与重试防护
+
+`gen_configs.sh` 默认给每次 tclaude 调用设置 600 秒软超时。超时后先终止本次 tclaude 进程组，再使用**同一个模型和完全相同的参数重试 1 次**；不会自动切换到 Opus 或其他模型。第二次仍超时会以退出码 `124` 结束，按 `Ctrl-C` 会清理子进程并以 `130` 结束。
+
+```bash
+# 单次软超时改为 15 分钟
+GEN_TIMEOUT_SECONDS=900 ./gen_configs.sh input/jobs/<job>.json
+
+# TERM 后最多等 15 秒再强制 KILL
+GEN_TIMEOUT_GRACE_SECONDS=15 ./gen_configs.sh input/jobs/<job>.json
+
+# 禁止自动重试
+GEN_MAX_RETRIES=0 ./gen_configs.sh input/jobs/<job>.json
+```
+
+默认值及范围：
+
+- `GEN_TIMEOUT_SECONDS=600`，可设为 `1..86400`。
+- `GEN_TIMEOUT_GRACE_SECONDS=10`，可设为 `1..300`。
+- `GEN_MAX_RETRIES=1`，可设为 `0..10`。
+
+每次运行、每次尝试的 stdout/stderr 都分别保存在 `claude-raw-outputs/`，文件名包含运行 ID 和 `attempt-N`。失败或中断不会覆盖已有的正式 `configs.jsonl`；新候选只有在完整解析成功后才原子替换正式输出。
 
 **第二步:远程压测 + 排名**
 

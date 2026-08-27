@@ -36,14 +36,19 @@ def passes_sla(result: RunResult, sla: SLA) -> bool:
 
 
 def _instances_per_host(tp_size: int, gpu_count: int) -> float:
-    """How many server instances fit on one host (gpu_count / tp_size).
+    """How many server instances fit on one host (floor(gpu_count / tp_size)).
 
     A TP2 job on an 8-GPU host can run 4 instances; TP8 runs 1.  The per-host
     goodput is single-instance throughput × instances_per_host.
+
+    必须向下取整:半个实例在物理上放不下。例如 6 卡跑 TP4,只能放 1 个实例
+    (剩 2 卡不够再起一个),而非 1.5 个——否则 per-host goodput 会被高估 50%,
+    在非 2 的幂主机上把真正打包更优的候选(如 TP3×2)挤下去。
+    tp_size > gpu_count 时返回 0(单主机连一个实例都放不下)。
     """
     if tp_size <= 0:
         return 1.0
-    return gpu_count / tp_size
+    return float(gpu_count // tp_size)
 
 
 def _best_qualifying(
@@ -66,7 +71,14 @@ def _best_qualifying(
         healthy, _ = data_health_check(result, output_len=output_len)
         if not healthy or not passes_sla(result, sla):
             continue
-        raw = result.total_throughput
+        # total_throughput 是 result.instances 个并发实例的实测求和。
+        # 先除回单实例吞吐,再乘"整机能放几个实例",得到 per-host goodput:
+        #   per_host = (total / instances) × floor(gpu/tp)
+        # · round1 单实例(instances=1):= single × floor —— 纸面外推,只用于粗筛选 top-K。
+        # · round2 整机满载(instances=floor(gpu/tp)):= (S/N)×N = S —— 外推乘数被实测实例数
+        #   除掉、塌成 ×1,得到的就是实测满载求和。这样 N 只被计一次,绝不会 S×N 双重计数。
+        measured = max(1, int(getattr(result, "instances", 1)))
+        raw = result.total_throughput / measured
         per_host = raw * _instances_per_host(result.tp_size, gpu_count)
         if best_concurrency is None or per_host > best_per_host:
             best_raw = raw

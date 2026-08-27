@@ -75,8 +75,12 @@ class _FakeContainer:
         self.current: str | None = None          # candidate whose server is up
         self.alive = False
         self.bench_calls: list[tuple[str, int, int]] = []  # (candidate, C, num_prompts)
+        # 满载测试要证明「同一并发档打到了 N 个不同副本端口」,单独记录 (candidate, C, port),
+        # 不动 bench_calls 的三元组形状(现有用例仍按 (cand, conc, num_prompts) 解包)。
+        self.bench_ports: list[tuple[str, int, int]] = []
         self.last_bench_jsonl = ""
         self._result_files: dict[str, str] = {}   # container path -> jsonl text
+        self.launched_cmds: list[str] = []        # 每次 exec_detached 收到的 server 启动命令
 
     # -- lifecycle no-ops the executor calls on the container object ------------
     def start(self, *, timeout=None) -> _FakeResult:
@@ -94,6 +98,17 @@ class _FakeContainer:
     def exec_detached(self, command: str, log_container_path: str, *, timeout=None):
         # launching a candidate's server: infer which candidate from the -v mount
         # path baked into the launch cmd is not available, so track by outputs dir
+        self.launched_cmds.append(command)
+        # 复刻真实 nohup 陷阱:exec_detached 会拼成 `nohup {command} ...`,nohup 把
+        # 第一个词当程序名。裸 `CUDA_VISIBLE_DEVICES=0 python...` 前缀会让 nohup 去找名为
+        # "CUDA_VISIBLE_DEVICES=0" 的可执行文件而失败(线上就是这么崩的)。正确写法是
+        # `env CUDA_VISIBLE_DEVICES=0 python...`。这里模拟该判定:裸 KEY=VAL 前缀 → 启动失败。
+        first_word = command.strip().split(None, 1)[0] if command.strip() else ""
+        if "=" in first_word:
+            self.alive = False
+            return _FakeResult(returncode=1, stderr=(
+                f"nohup: failed to run command '{first_word}': No such file or directory"
+            ))
         self.alive = True
         return _FakeResult(stdout="1234\n")
 
@@ -124,8 +139,12 @@ class _FakeContainer:
         conc = _flag_int(parts, "--max-concurrency")
         num_prompts = _flag_int(parts, "--num-prompts")
         out_path = _flag_str(parts, "--output-file")
-        cand = self.current or "unknown"
+        # 候选身份从 --output-file 路径("/workspace/outputs/<cid>/bench_...jsonl")的
+        # 父目录名取,而非共享的 self.current —— 后者在批内并发跑时会被兄弟候选覆盖,
+        # 导致压测结果串到错误候选(真实环境每候选独占容器,天然不共享)。
+        cand = Path(out_path).parent.name if out_path else (self.current or "unknown")
         self.bench_calls.append((cand, conc, num_prompts))
+        self.bench_ports.append((cand, conc, _flag_int(parts, "--port")))
 
         cstar = self.cstar.get(cand, 0)
         qualifies = conc <= cstar
@@ -369,6 +388,102 @@ def test_round2_reuses_round1_seeds_no_rebench(tmp_path, workloads_output_len):
     assert ranking[0]["candidate_id"] == "solo"
     assert ranking[0]["best_concurrency"] == 10
     assert ranking[0]["goodput_per_host"] == 1000.0 * 8  # gpu_count=8, tp_size=1
+
+
+def _write_configs_with_params(tmp_path: Path, params_by_id: dict[str, dict]) -> Path:
+    """Like _write_configs but每个候选带自定义 params(满载测试要 tp_size)。"""
+    path = tmp_path / "configs.jsonl"
+    lines = []
+    for cid, params in params_by_id.items():
+        lines.append(
+            json.dumps(
+                {
+                    "id": cid,
+                    "params": params,
+                    "cmd": f"python -m sglang.launch_server --model-path ${{MODEL_PATH}} # {cid}",
+                    "reasons": [],
+                }
+            )
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def test_round2_fill_host_benches_n_replicas_no_double_count(tmp_path, workloads_output_len):
+    """round2 满载(fill_host):top-K 候选被复制成 floor(gpu/tp) 个副本、各占端口并发实测求和。
+
+    钉死三件事:
+      1. 同一并发档确实打到了 N 个不同副本端口(是真并发实测,不是纸面外推);
+      2. 副本数恰为 floor(gpu_count/tp_size)=4,不多不少;
+      3. goodput = (ΣN 副本吞吐 / N) × floor(gpu/tp),N 只被计一次 —— 绝不是 ΣN × floor
+         的双重计数。tp=2、8 卡下 c*=8:per_host = 3200,而非 3200×4=12800。
+    """
+    cstar = {"full": 8}
+    job_path = _write_job(tmp_path)                       # gpu_count=8
+    configs_path = _write_configs_with_params(tmp_path, {"full": {"tp_size": 2}})
+    results_dir = tmp_path / "results"
+
+    config = ExecutorConfig(
+        job_path=job_path,
+        configs_path=configs_path,
+        results_dir=results_dir,
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=1,
+        top_k=1,
+        max_cap=256,
+        fill_host=True,          # <-- 只 round2 满载
+    )
+
+    remote = _FakeRemote()
+    client = _FakeClient()
+    container = _FakeContainer(cstar)
+    import runners.executor as exmod
+    original_container = exmod.Container
+    exmod.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=remote, client=client)
+    finally:
+        exmod.Container = original_container
+
+    ranking = summary["ranking"]
+    assert ranking[0]["candidate_id"] == "full"
+    assert ranking[0]["best_concurrency"] == 8
+
+    # tp=2, gpu=8 -> floor(8/2)=4 副本。per_host = (4×800 / 4) × 4 = 3200。
+    # 若双重计数会是 4×800 × 4 = 12800。
+    assert ranking[0]["tp_size"] == 2
+    assert ranking[0]["instances_per_host"] == 4.0
+    assert ranking[0]["goodput_per_host"] == 3200.0
+
+    # round2 满载:c*=8 这一档必须打满 4 个不同副本端口 30000..30003
+    #(round1 单实例也在 30000 压过 8,取并集仍是这 4 个)。
+    ports_at_cstar = {p for cand, conc, p in container.bench_ports
+                      if cand == "full" and conc == 8}
+    assert ports_at_cstar == {30000, 30001, 30002, 30003}, ports_at_cstar
+    # 恰好 4 副本,不多起(没有 30004+)。
+    assert max(p for _c, _conc, p in container.bench_ports) == 30003
+
+    # 落盘证据:round2 结果的 instances 记为 4(供防双重计数复核)。
+    r2 = json.loads((results_dir / "full" / "run_result.r2.json").read_text(encoding="utf-8"))
+    passing = [row for row in r2 if row.get("status") == "ok"]
+    assert passing, "round2 应有健康的满载结果"
+    assert all(row["instances"] == 4 for row in passing)
+
+    # 回归:满载副本的启动命令必须用 `env CUDA_VISIBLE_DEVICES=N` 而非裸前缀,
+    # 否则 exec_detached 拼 `nohup {cmd}` 时 nohup 会把 "CUDA_VISIBLE_DEVICES=N" 当程序名而崩
+    #(线上真实故障:nohup: failed to run command 'CUDA_VISIBLE_DEVICES=0')。
+    gpu_pinned = [c for c in container.launched_cmds if "CUDA_VISIBLE_DEVICES" in c]
+    assert gpu_pinned, "满载应有钉卡的副本启动命令"
+    for cmd in gpu_pinned:
+        assert cmd.strip().startswith("env CUDA_VISIBLE_DEVICES="), (
+            f"副本启动命令必须以 `env CUDA_VISIBLE_DEVICES=` 开头(nohup 安全),实际: {cmd[:60]}"
+        )
+        # 且第一个词不能是裸 KEY=VAL(那正是 nohup 会当成程序名的东西)。
+        assert "=" not in cmd.strip().split(None, 1)[0]
 
 
 def _index_of(summary: dict, candidate_id: str) -> int:

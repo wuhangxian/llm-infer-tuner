@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "job_id": "qwen38-27b-tp1-custom",
+    "job_id": "qwen38-27b-tp1-custom_20260828_01",
     "gpu_model": "G24_pro5000",
     "gpu_count": 8,
     "gpu_memory_gb": 72,

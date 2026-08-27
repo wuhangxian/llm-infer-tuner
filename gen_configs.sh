@@ -1,15 +1,19 @@
 #!/bin/bash
 # gen_configs.sh —— 第一阶段:生成 SGLang 启动配置候选。
 #
-# 用法:  ./gen_configs.sh <job.json> [out.json]
-#        默认输出 outputs/<job_id>/configs.json。
+# 用法:  ./gen_configs.sh [--model MODEL] <job.json> [out.json]
+#        默认输出 outputs/<job_id>/configs.jsonl。
 #
-# 脚本分 6 步,其中只有第 4 步调 AI(claude)做调优决策,其余全是确定性代码。
+# 脚本分 6 步,其中只有第 4 步调 AI(tclaude)做调优决策,其余全是确定性代码。
 # cmd 里的 --model-path 恒为占位符 ${MODEL_PATH}(路径是机器事实,非调优决策),
 # 第二步由 targets.json 填入。故 configs.jsonl 机器无关,可跨机搬运。
 set -euo pipefail
 
-# Load .env for claude API credentials
+usage() {
+  echo "用法: ./gen_configs.sh [--model MODEL] <job.json> [out.json]" >&2
+}
+
+# Load .env for optional API-related environment settings.
 if [ -f .env ]; then
   set -a
   . ./.env
@@ -19,19 +23,76 @@ fi
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 第 1 步:前置检查
 # ─────────────────────────────────────────────────────────────────────────
-# 脚本启动前先确认四样东西在不在,任何一个缺了就直接退出,不往下跑:
+# 脚本启动前确认依赖和输入都在,任何一个缺了就直接退出,不往下跑:
 #   • jq        — 命令行 JSON 处理工具,后面第 2/5/6 步都要用它读/写/解析 JSON
 #   • job.json  — 你传进来的参数路径对不对,文件在不在
 #   • SKILL.md  — AI 的流程说明书,在 .claude/skills/sglang-server-config-gen/ 下
-#   • claude    — AI CLI,第 4 步要用它生成配置,没装就跑不了
+#   • tclaude   — AI CLI,第 4 步要用它生成配置,没装就跑不了
+#   • python3 + tclaude_guard.py — 超时/重试/信号与子进程回收
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-JOB="${1:?用法: ./gen_configs.sh <job.json> [out.json]}"
+MODEL="claude-hy3"
+MODEL_SOURCE="默认"
+POSITIONAL=()
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --model)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "❌ --model 需要非空模型名" >&2
+        usage
+        exit 2
+      fi
+      MODEL="$2"
+      MODEL_SOURCE="命令行"
+      shift 2
+      ;;
+    --model=*)
+      MODEL="${1#--model=}"
+      if [ -z "$MODEL" ]; then
+        echo "❌ --model 需要非空模型名" >&2
+        usage
+        exit 2
+      fi
+      MODEL_SOURCE="命令行"
+      shift
+      ;;
+    --)
+      shift
+      while [ "$#" -gt 0 ]; do
+        POSITIONAL+=("$1")
+        shift
+      done
+      ;;
+    -*)
+      echo "❌ 未知选项: $1" >&2
+      usage
+      exit 2
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [ "${#POSITIONAL[@]}" -lt 1 ] || [ "${#POSITIONAL[@]}" -gt 2 ]; then
+  usage
+  exit 2
+fi
+
+JOB="${POSITIONAL[0]}"
+OUT_ARG="${POSITIONAL[1]:-}"
+TCLAUDE_ARGS=(--model "$MODEL")
+
 command -v jq >/dev/null || { echo "❌ 需要 jq" >&2; exit 1; }
+command -v python3 >/dev/null || { echo "❌ 需要 python3" >&2; exit 1; }
 [ -f "$JOB" ] || { echo "❌ job 文件不存在: $JOB" >&2; exit 1; }
 
 SKILL_DIR=".claude/skills/sglang-server-config-gen"
 [ -f "$SKILL_DIR/SKILL.md" ] || { echo "❌ 找不到 skill: $SKILL_DIR/SKILL.md(请在 repo 根运行)" >&2; exit 1; }
-command -v claude >/dev/null || { echo "❌ claude 不在 PATH" >&2; exit 1; }
+command -v tclaude >/dev/null || { echo "❌ tclaude 不在 PATH" >&2; exit 1; }
+TCLAUDE_GUARD="runners/tclaude_guard.py"
+[ -f "$TCLAUDE_GUARD" ] || { echo "❌ 找不到 tclaude guard: $TCLAUDE_GUARD" >&2; exit 1; }
 
 # 模型路径恒为占位符 —— 第一步机器无关,不绑死任何机器的物理路径。
 MODEL_PATH='${MODEL_PATH}'
@@ -44,13 +105,16 @@ MODEL_PATH='${MODEL_PATH}'
 # 如果用户传了第二个参数,就用那个路径覆盖默认路径。
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 JOB_ID="$(jq -r '.job_id' "$JOB")"
-OUT="${2:-outputs/${JOB_ID}/configs.json}"
+# 默认输出名必须与 run_executor.sh 默认查找的路径(outputs/<job_id>/configs.jsonl)一致,
+# 否则默认两步流程会在 run_executor 的存在性检查处报「configs 不存在」直接退出。
+# 内容是单个 {candidates:[...]} JSON 对象,executor._load_candidates 两种格式都能读。
+OUT="${OUT_ARG:-outputs/${JOB_ID}/configs.jsonl}"
 mkdir -p "$(dirname "$OUT")"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 第 3 步:拼接 prompt
 # ─────────────────────────────────────────────────────────────────────────
-# 把三部分组装成一段完整的 prompt,后面第 4 步把它喂给 claude:
+# 把三部分组装成一段完整的 prompt,后面第 4 步把它喂给 tclaude:
 #
 #   1. job.json 的完整内容
 #      — 模型/卡型/负载/SLA/镜像等,让 AI 知道这次要调什么
@@ -63,11 +127,11 @@ mkdir -p "$(dirname "$OUT")"
 #      — 候选数 ≤ max_candidates
 #
 #   3. 输出 JSON Schema
-#      — 约束 claude 返回 {candidates:[...]} 结构
+#      — 约束 tclaude 返回 {candidates:[...]} 结构
 #      — 每条候选含 id + params + cmd + reasons 四个字段
 #      — 第 5 步 jq 再拆成一行一候选的 JSONL
 #
-# prompt 里还告诉 claude 该按顺序读 4 个知识库文件:
+# prompt 里还告诉 tclaude 该按顺序读 4 个知识库文件:
 #   ① SKILL.md     — 流程入口:该读什么、推导步骤、输出契约
 #   ② knowledge.md — 全部调优经验(§0-§9)
 #   ③ catalogs/    — gpu.yaml + models.yaml + workloads.yaml(按 job 里的 ID 查表)
@@ -95,10 +159,15 @@ ${JOB_JSON}
 
 如果 JobSpec 里有 \`baseline\` 字段(在 search.baseline 下):
 - 你必须在 candidates 数组**最前面**插入一条基线候选,id 为 "baseline",params 里加 \`"is_baseline": true\`
-- params 取 baseline 字段里用户指定的所有参数,用户没写的你按 §4 pin 和 default_flags 补全
-- 拼成完整 cmd
+- **严格模式(重要)**:基线是"用户基线复现",不是调优候选。params **只放** baseline 字段里用户显式写的参数,原样保留、不增不改(\`is_baseline\` 标记除外)。
+  用户没写的参数**一律不补**——不补 §4 pin(含 --schedule-policy 等)、不补 §3 各轴搜索默认档、不补 §4 default_flags 里的 parser 类 flag。让 SGLang 用它自己的内部默认(即命令里根本不出现该 flag)。
+- **唯一例外(硬启动依赖,不补则 server 直接崩,故必须补)**:
+  1. 若 catalogs/models.yaml 该模型 \`default_flags\` 含 \`trust-remote-code: true\`,即使用户没写也必须补 \`--trust-remote-code\`(CLI 安全开关,模型默认无法翻成 true)。
+  2. 若用户写了 \`mamba_radix_cache_strategy: extra_buffer\` 但没写 \`page_size\`,必须补 \`--page-size 64\`(\`FLA_CHUNK_SIZE(64) % page_size == 0\` 硬约束,否则启动报错)。
+  这两个例外若要补,必须同时写进 baseline 的 params(不能只写进 cmd),使 executor 兜底路径也一致。除此之外不补任何默认 flag。
+- 基线的 cmd 严格 = {用户在 baseline 里列的 flag} + {上面必要的硬启动依赖例外} + {运行时占位符:\`--model-path \${MODEL_PATH}\` \`--host 0.0.0.0\` \`--port 30000\`}。用户写的某 flag 值恰好等于模型默认时,仍照写(尊重显式意图)。
 - **基线不算在 max_candidates 名额里**,总候选数 = max_candidates + 1
-- 你正常生成 max_candidates 条候选,排在基线后面
+- 你正常生成 max_candidates 条候选,排在基线后面(**这 max_candidates 条是正常调优候选,仍按 §3/§4 正常补全 pin 和 default_flags,严格模式只约束 baseline 那一条**)
 
 如果没有 baseline 字段:正常生成 max_candidates 条候选(第一条是基线锚点),不额外插基线。
 
@@ -107,6 +176,13 @@ ${JOB_JSON}
 请按 \`${SKILL_DIR}/SKILL.md\` 的流程执行:读 knowledge.md + catalogs/*.yaml(含 sglang-images.yaml),
 按其中的约束和推导步骤生成候选配置。所有调优判据、硬约束、输出格式
 都在 SKILL.md 和 knowledge.md 里,这里不重复。
+
+## 探索边界(必须遵守,直接影响耗时)
+
+- **输出格式的唯一权威是本 prompt 末尾的 JSON Schema 和 SKILL.md**。禁止为"对齐格式"去读 \`outputs/\`、\`claude-raw-outputs/\` 里任何历史生成结果(configs.json/configs.jsonl/ranking.json/*.jsonl raw)。那些是过往产物、可能过时或来自不同 job,不是格式标准,参照它们只会拖慢并引入不一致。
+- **只读你推导所必需的输入**:SKILL.md、knowledge.md、catalogs/*.yaml(按 job 里的 ID 查表)。不要浏览 sibling job、不要翻别的 job 的 job.json/结果、不要 git log。本 job 的 JobSpec 已在上文给全。
+- **不要参考任何"之前跑过的类似 job"的候选或压测排名来做本次决策**。每个 job 独立按知识库推导;历史结果不构成本次判据。
+- 拿到查表所需事实后**尽快进入推导与产出**,不要做超出上述范围的探索性文件浏览。
 
 ## 运行时信息(知识库里没有的)
 
@@ -117,47 +193,250 @@ ${JOB_JSON}
 EOF
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 第 4 步:调 claude(AI 决策,约 2 分钟)
+# 第 4 步:调 tclaude(AI 决策,约 2 分钟)
 # ─────────────────────────────────────────────────────────────────────────
-# 用 claude -p "$PROMPT" 非交互模式调用 AI。关键参数:
-#   --add-dir .           让 claude 能读项目根下的 catalogs/ 等
-#   --add-dir $SKILL_DIR  让 claude 能读 SKILL.md/knowledge.md
-#   --json-schema         约束 claude 返回 {candidates:[...]} 结构
-#   --output-format json  让 claude 输出 JSON(而非纯文本)
+# 用 tclaude -p "$PROMPT" 非交互模式调用 AI。关键参数:
+#   --add-dir .           让 tclaude 能读项目根下的 catalogs/ 等
+#   --add-dir $SKILL_DIR  让 tclaude 能读 SKILL.md/knowledge.md
+#   --json-schema         约束 tclaude 返回 {candidates:[...]} 结构
+#   --output-format json  让 tclaude 输出 JSON(而非纯文本)
 # AI 读知识库 → 查表(gpu/model/workload/image)→ 推导 TP/attention/mem-fraction
 # → 生成一批候选,每条含 params + cmd + reasons。
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-echo "ℹ️  模型路径在命令里保留占位符 \${MODEL_PATH}(机器无关);第二步由 targets.json 填入实际路径。" >&2
-echo "ℹ️  输出 → $OUT" >&2
-echo "▶ 调 claude 生成配置(读 skill+knowledge+catalogs,几分钟)…" >&2
-RAW="$(claude -p "$PROMPT" \
-  --output-format json \
-  --json-schema "$SCHEMA" \
-  --add-dir . \
-  --add-dir "$SKILL_DIR" \
-  --dangerously-skip-permissions)"
+# GEN_STREAM=1(默认)走真流式 stream-json:边生成边把「读了哪个文件 / 在想什么 /
+#   正在产出候选」实时打到命令行,不再是黑盒;完整事件流(NDJSON)落盘便于回溯。
+# GEN_STREAM=0 回退旧行为:--output-format json,一次性返回单个 JSON 对象。
+# 两条路径都保留 --json-schema(已实测:stream-json 末尾 result 事件仍带 structured_output)。
+GEN_STREAM="${GEN_STREAM:-1}"
+GEN_TIMEOUT_SECONDS="${GEN_TIMEOUT_SECONDS:-600}"
+GEN_TIMEOUT_GRACE_SECONDS="${GEN_TIMEOUT_GRACE_SECONDS:-10}"
+GEN_MAX_RETRIES="${GEN_MAX_RETRIES:-1}"
 
-# 保存 claude 原始返回到 claude-raw-outputs/(方便调试和回溯,不进 git)
+validate_decimal_range() {
+  local name="$1" value="$2" minimum="$3" maximum="$4"
+  if ! [[ "$value" =~ ^(0|[1-9][0-9]*)$ ]]; then
+    echo "❌ $name 必须是十进制整数(不允许前导零): $value" >&2
+    return 2
+  fi
+  local decimal_value=$((10#$value))
+  if [ "$decimal_value" -lt "$minimum" ] || [ "$decimal_value" -gt "$maximum" ]; then
+    echo "❌ $name 必须在 $minimum..$maximum 之间: $value" >&2
+    return 2
+  fi
+}
+
+validate_decimal_range GEN_TIMEOUT_SECONDS "$GEN_TIMEOUT_SECONDS" 1 86400 || exit $?
+validate_decimal_range GEN_TIMEOUT_GRACE_SECONDS "$GEN_TIMEOUT_GRACE_SECONDS" 1 300 || exit $?
+validate_decimal_range GEN_MAX_RETRIES "$GEN_MAX_RETRIES" 0 10 || exit $?
+MAX_ATTEMPTS=$((10#$GEN_MAX_RETRIES + 1))
+
 RAW_DIR="claude-raw-outputs"
 mkdir -p "$RAW_DIR"
-echo "$RAW" > "$RAW_DIR/${JOB_ID}.json"
-echo "ℹ️  原始返回 → $RAW_DIR/${JOB_ID}.json" >&2
+
+SUCCESS_PATH_FILE="$(mktemp "$RAW_DIR/.${JOB_ID}.success.XXXXXX")"
+rm -f -- "$SUCCESS_PATH_FILE"
+OUT_TMP=""
+INTERRUPTED=0
+
+cleanup_temporary_files() {
+  local rc=$?
+  [ -z "$SUCCESS_PATH_FILE" ] || rm -f -- "$SUCCESS_PATH_FILE"
+  [ -z "$OUT_TMP" ] || rm -f -- "$OUT_TMP"
+  return "$rc"
+}
+
+record_interrupt() {
+  INTERRUPTED=1
+}
+
+trap cleanup_temporary_files EXIT
+trap record_interrupt INT
+
+echo "ℹ️  模型路径在命令里保留占位符 \${MODEL_PATH}(机器无关);第二步由 targets.json 填入实际路径。" >&2
+echo "ℹ️  tclaude 模型 → $MODEL ($MODEL_SOURCE)" >&2
+echo "ℹ️  防护 → 单次软超时 ${GEN_TIMEOUT_SECONDS}s, TERM→KILL 宽限 ${GEN_TIMEOUT_GRACE_SECONDS}s, 最多尝试 ${MAX_ATTEMPTS} 次" >&2
+echo "ℹ️  输出 → $OUT" >&2
+
+GUARD_ARGS=(
+  python3 "$TCLAUDE_GUARD"
+  --timeout-seconds "$GEN_TIMEOUT_SECONDS"
+  --grace-seconds "$GEN_TIMEOUT_GRACE_SECONDS"
+  --max-retries "$GEN_MAX_RETRIES"
+  --raw-dir "$RAW_DIR"
+  --job-id "$JOB_ID"
+  --success-path-file "$SUCCESS_PATH_FILE"
+)
+
+if [ "$GEN_STREAM" != "0" ]; then
+  # ── 默认:真流式 ─────────────────────────────────────────────────────
+  echo "▶ 调 tclaude 生成配置(流式,实时显示读库+推导过程,通常 2-6 分钟)…" >&2
+  echo "────────────────────────────────────────────────────────────" >&2
+
+  TCLAUDE_COMMAND=(
+    tclaude -p "$PROMPT" "${TCLAUDE_ARGS[@]}"
+    --output-format stream-json
+    --verbose
+    --include-partial-messages
+    --json-schema "$SCHEMA"
+    --add-dir .
+    --add-dir "$SKILL_DIR"
+    --dangerously-skip-permissions
+  )
+
+  # set -euo pipefail 下临时关 -e；必须第一时间完整保存 PIPESTATUS，
+  # 否则后续任何命令都会覆盖 guard/renderer 的真实退出码。
+  set +e
+  "${GUARD_ARGS[@]}" --stdout-suffix jsonl --forward-stdout -- "${TCLAUDE_COMMAND[@]}" \
+  | jq -R --unbuffered -rj '
+      # 每行一个事件 → 只渲染「进度骨架」到 stderr:一个动作一行,不刷屏。
+      # -R:把每行当原始字符串读,再 fromjson —— tclaude 每行是完整 JSON,
+      # 不加 -R 则 jq 直接解析,fromjson(只吃字符串)会全行失败被 // empty 吞掉。
+      #
+      # 刻意「只打工具动作 + 首尾标记」,不打模型思考文字:
+      #   1) 旧版把 text_delta 增量逐字流出 → 文字一个字一个字蹦;
+      #   2) 又用 💭 把同一段话前 140 字再回显一遍 → 每句出现两次、还被截断错行。
+      # 两者叠加就是「乱码」观感。用户只想知道「生成到哪一步」,工具动作行(读了
+      # 哪个库、写没写文件、有没有产出候选)本身就是步骤,故只留这些;思考文字全删。
+      (fromjson? // empty) as $e | $e |
+      if .type=="assistant" then
+        ( .message.content[]? |
+          if .type=="tool_use" then
+            ( .name ) as $n |
+            ( if   $n=="Read"             then "📖 读 "  + ((.input.file_path // "?") | sub(".*/";""))
+              elif $n=="Grep"             then "🔎 搜 "  + (.input.pattern // "")
+              elif $n=="Glob"             then "🗂  列 "  + (.input.pattern // "")
+              elif $n=="Bash"             then "💻 "     + (.input.description // .input.command // "")
+              elif $n=="Write"            then "📝 写候选文件"
+              elif $n=="StructuredOutput" then "✍️  产出候选(结构化输出)…"
+              else "🔧 " + $n end ) + "\n"
+          else empty end )
+      elif .type=="result" then
+        ( if .is_error then "\n❌ 出错: " + (.subtype // "unknown") + "\n"
+          else "\n✅ 生成完毕\n" end )
+      else empty end
+    ' >&2
+  PIPELINE_STATUS=("${PIPESTATUS[@]}")
+  set -e
+  GUARD_RC="${PIPELINE_STATUS[0]}"
+  RENDER_RC="${PIPELINE_STATUS[1]}"
+
+  echo "────────────────────────────────────────────────────────────" >&2
+  if [ "$INTERRUPTED" -ne 0 ] || [ "$GUARD_RC" -eq 130 ]; then
+    echo "❌ 用户中断 tclaude 生成；不会重试或修改正式输出" >&2
+    exit 130
+  fi
+  if [ "$GUARD_RC" -ne 0 ]; then
+    echo "❌ tclaude guard 退出码 $GUARD_RC；上方已列出本次 attempt 日志" >&2
+    [ ! -e "$OUT" ] || echo "ℹ️  已有输出未修改: $OUT" >&2
+    exit "$GUARD_RC"
+  fi
+  if [ "$RENDER_RC" -ne 0 ]; then
+    echo "❌ 流式进度渲染失败，退出码 $RENDER_RC；正式输出未修改" >&2
+    exit "$RENDER_RC"
+  fi
+else
+  # ── 回退:旧的单 JSON 对象行为(GEN_STREAM=0)────────────────────────
+  echo "▶ 调 tclaude 生成配置(非流式,读 skill+knowledge+catalogs,几分钟)…" >&2
+  TCLAUDE_COMMAND=(
+    tclaude -p "$PROMPT" "${TCLAUDE_ARGS[@]}"
+    --output-format json
+    --json-schema "$SCHEMA"
+    --add-dir .
+    --add-dir "$SKILL_DIR"
+    --dangerously-skip-permissions
+  )
+  set +e
+  "${GUARD_ARGS[@]}" --stdout-suffix json -- "${TCLAUDE_COMMAND[@]}"
+  GUARD_RC=$?
+  set -e
+  if [ "$INTERRUPTED" -ne 0 ] || [ "$GUARD_RC" -eq 130 ]; then
+    echo "❌ 用户中断 tclaude 生成；不会重试或修改正式输出" >&2
+    exit 130
+  fi
+  if [ "$GUARD_RC" -ne 0 ]; then
+    echo "❌ tclaude guard 退出码 $GUARD_RC；上方已列出本次 attempt 日志" >&2
+    [ ! -e "$OUT" ] || echo "ℹ️  已有输出未修改: $OUT" >&2
+    exit "$GUARD_RC"
+  fi
+fi
+
+if [ ! -s "$SUCCESS_PATH_FILE" ] || ! IFS= read -r RAW_FILE < "$SUCCESS_PATH_FILE"; then
+  echo "❌ guard 成功但没有写入 success-path: $SUCCESS_PATH_FILE" >&2
+  exit 1
+fi
+if [ ! -s "$RAW_FILE" ]; then
+  echo "❌ guard 指向的成功 raw 不存在或为空: $RAW_FILE" >&2
+  exit 1
+fi
+echo "ℹ️  成功 attempt 原始返回 → $RAW_FILE" >&2
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 第 5 步:拆 JSONL
+# 第 5 步:拆 JSONL(两种落盘格式统一处理,保留空/坏结果保护)
 # ─────────────────────────────────────────────────────────────────────────
-# claude 返回的是一整个 JSON 对象,需要 jq 拆成一行一候选(JSONL 格式):
-#   • claude --output-format json 把结果包在 .result 或 .structured_output 里
-#   • .result 可能是字符串(需 fromjson 解开),也可能是对象(直接用)
-#   • .structured_output 是结构化输出(优先取)
-#   • .candidates[] 遍历数组每个元素逐个输出,-c 压成一行
-#   • -e 如果结果为 null/false 就报错退出(校验 claude 返回了有效数据)
-# 最终写入 configs.jsonl,每行一个独立 JSON,第二步 executor 读 candidates 数组。
+# 流式($RAW_FILE 是多行 NDJSON):逐行 fromjson 容错 → 取最后一条 type==result
+#   事件 → 沿用旧取值链(structured_output 优先,退回 result 字符串则 fromjson)。
+# 回退($RAW_FILE 是单个 JSON 对象):直接走旧取值链。
+# 两条路径最终都产出 {candidates:[...]};-e / error() 保证空/坏结果非零退出,
+# 先解析进同目录临时文件,成功后原子替换;失败时保留既有正式输出。
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-echo "$RAW" | jq -e '
-  ( .structured_output // (.result | if type=="string" then fromjson else . end) // . )
-  | {candidates: .candidates}
-' > "$OUT"
+OUT_DIR="$(dirname -- "$OUT")"
+OUT_BASENAME="$(basename -- "$OUT")"
+OUT_TMP="$(mktemp "$OUT_DIR/.${OUT_BASENAME}.tmp.XXXXXX")"
+
+if [ "$GEN_STREAM" != "0" ]; then
+  if [ ! -s "$RAW_FILE" ]; then
+    echo "❌ tclaude 未产生任何输出(NDJSON 为空):$RAW_FILE" >&2
+    exit 1
+  fi
+  # 软预检:找一下 result 事件,找不到只提示、不退出 —— 真正的成败由下面带 -e 的
+  # 解析步骤裁决(它取不到 candidates 会非零退出)。
+  #   为什么不在这里硬 exit:大候选集(如 cand32/cand64)的 result 事件是一行几万
+  #   字符的巨型 JSON,常是全文件最长行。tclaude 流式写盘时,本检测可能卡在「成功
+  #   标记已出、巨型行尚未落盘完整」的缝隙里跑,fromjson? 遇半截行被 ? 静默吞掉,
+  #   于是误判「没有 result 事件」并 exit —— 结果候选明明生成成功,却丢了预览还报错。
+  #   下面第 398 行的 `inputs | fromjson?` 解析是权威裁决,预检不必抢在它前面硬杀。
+  if ! jq -R 'fromjson? // empty | select(.type=="result")' "$RAW_FILE" | grep -q .; then
+    echo "⚠️  预检未在 NDJSON 里立刻看到 result 事件(大候选集落盘竞态常见),交由解析步骤裁决…" >&2
+  fi
+  set +e
+  jq -R -e '
+    [ inputs | fromjson? // empty | select(.type=="result") ] | last
+    | if (.is_error == true) then error("tclaude 返回 is_error: \(.subtype)") else . end
+    | ( .structured_output // (.result | if type=="string" then fromjson else . end) )
+    | {candidates: .candidates}
+  ' "$RAW_FILE" > "$OUT_TMP"
+  PARSE_RC=$?
+  set -e
+  if [ "$INTERRUPTED" -ne 0 ] || [ "$PARSE_RC" -eq 130 ]; then
+    echo "❌ 用户在候选解析阶段中断；已有输出未修改" >&2
+    exit 130
+  fi
+  if [ "$PARSE_RC" -ne 0 ]; then
+    echo "❌ 从最后一条 result 事件解析 candidates 失败(candidates 缺失/为 null?):$RAW_FILE" >&2
+    [ ! -e "$OUT" ] || echo "ℹ️  已有输出未修改: $OUT" >&2
+    exit 1
+  fi
+else
+  set +e
+  jq -e '
+    ( .structured_output // (.result | if type=="string" then fromjson else . end) // . )
+    | {candidates: .candidates}
+  ' "$RAW_FILE" > "$OUT_TMP"
+  PARSE_RC=$?
+  set -e
+  if [ "$INTERRUPTED" -ne 0 ] || [ "$PARSE_RC" -eq 130 ]; then
+    echo "❌ 用户在候选解析阶段中断；已有输出未修改" >&2
+    exit 130
+  fi
+  if [ "$PARSE_RC" -ne 0 ]; then
+    echo "❌ 解析 candidates 失败:$RAW_FILE" >&2
+    [ ! -e "$OUT" ] || echo "ℹ️  已有输出未修改: $OUT" >&2
+    exit 1
+  fi
+fi
+
+mv -f -- "$OUT_TMP" "$OUT"
+OUT_TMP=""
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 第 6 步:预览输出
@@ -166,7 +445,9 @@ echo "$RAW" | jq -e '
 # mem-fraction 拼成一行预览打印到 stderr,让用户一眼看到结果概貌,
 # 不用手动 cat 文件。
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-N="$(wc -l < "$OUT" | tr -d ' ')"
+# 候选数必须用 jq 数 .candidates 长度,不能用 wc -l:输出是多行 pretty-print JSON
+# (一条候选占十几行),wc -l 会把总行数(如 33 条≈620 行)误当成候选数。
+N="$(jq '.candidates | length' "$OUT")"
 echo "✅ 已生成 $N 条候选 → $OUT" >&2
 echo "── 预览(id / tp / ep / att / mf / mamba / page / spec / chunk / kv / sched / radix)──" >&2
 jq -r '.candidates[] | 
