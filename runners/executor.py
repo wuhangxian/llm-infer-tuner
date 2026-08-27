@@ -526,6 +526,9 @@ def _run_candidate(
     config = ctx.config
     candidate_id = str(candidate.get("id", "unknown"))
     cmd = str(candidate.get("cmd", ""))
+    # Support cmd_parts array format (each element is one argument)
+    if not cmd and candidate.get("cmd_parts"):
+        cmd = " ".join(str(p) for p in candidate["cmd_parts"])
     candidate_dir = config.results_dir / candidate_id
     candidate_dir.mkdir(parents=True, exist_ok=True)
 
