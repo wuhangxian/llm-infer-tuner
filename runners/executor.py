@@ -118,21 +118,46 @@ def _load_num_prompts_multiplier(method_id: str, *, project_root: Path) -> int:
 
 
 def _load_candidates(configs_path: Path, max_candidates: int) -> list[dict[str, Any]]:
-    """Read the first ``max_candidates`` config rows (each row: id/params/cmd/reasons)."""
+    """Read candidates from configs file.
+
+    Supports two formats:
+    - JSON: {"candidates": [...]} — reads the candidates array
+    - JSONL: one JSON object per line — reads each line
+    """
+    text = configs_path.read_text(encoding="utf-8")
     candidates: list[dict[str, Any]] = []
-    for line in configs_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            candidates.append(row)
-        if len(candidates) >= max_candidates:
-            break
-    return candidates
+
+    # Try JSON format first (single object with candidates array)
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict) and "candidates" in data:
+            candidates = data["candidates"]
+        elif isinstance(data, list):
+            candidates = data
+        elif isinstance(data, dict) and "id" in data:
+            candidates = [data]
+        else:
+            # Might be JSONL fallback
+            candidates = []
+    except json.JSONDecodeError:
+        pass
+
+    # If JSON parse failed or no candidates found, try JSONL
+    if not candidates:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict) and "id" in row:
+                candidates.append(row)
+            if len(candidates) >= max_candidates:
+                break
+
+    return candidates[:max_candidates] if max_candidates > 0 else candidates
 
 
 def _run_result_dict(result: RunResult) -> dict[str, Any]:

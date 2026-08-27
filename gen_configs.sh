@@ -1,8 +1,8 @@
 #!/bin/bash
 # gen_configs.sh —— 第一阶段:生成 SGLang 启动配置候选。
 #
-# 用法:  ./gen_configs.sh <job.json> [out.jsonl]
-#        默认输出 outputs/<job_id>/configs.jsonl。
+# 用法:  ./gen_configs.sh <job.json> [out.json]
+#        默认输出 outputs/<job_id>/configs.json。
 #
 # 脚本分 6 步,其中只有第 4 步调 AI(claude)做调优决策,其余全是确定性代码。
 # cmd 里的 --model-path 恒为占位符 ${MODEL_PATH}(路径是机器事实,非调优决策),
@@ -25,7 +25,7 @@ fi
 #   • SKILL.md  — AI 的流程说明书,在 .claude/skills/sglang-server-config-gen/ 下
 #   • claude    — AI CLI,第 4 步要用它生成配置,没装就跑不了
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-JOB="${1:?用法: ./gen_configs.sh <job.json> [out.jsonl]}"
+JOB="${1:?用法: ./gen_configs.sh <job.json> [out.json]}"
 command -v jq >/dev/null || { echo "❌ 需要 jq" >&2; exit 1; }
 [ -f "$JOB" ] || { echo "❌ job 文件不存在: $JOB" >&2; exit 1; }
 
@@ -44,7 +44,7 @@ MODEL_PATH='${MODEL_PATH}'
 # 如果用户传了第二个参数,就用那个路径覆盖默认路径。
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 JOB_ID="$(jq -r '.job_id' "$JOB")"
-OUT="${2:-outputs/${JOB_ID}/configs.jsonl}"
+OUT="${2:-outputs/${JOB_ID}/configs.json}"
 mkdir -p "$(dirname "$OUT")"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -78,11 +78,11 @@ mkdir -p "$(dirname "$OUT")"
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 JOB_JSON="$(cat "$JOB")"
 
-# 输出结构约束:一个 {candidates:[...]} 对象,第 5 步 jq 再拆成 jsonl
+# 输出结构约束:一个 {candidates:[...]} 对象
 SCHEMA='{"type":"object","required":["candidates"],"properties":{"candidates":{"type":"array","items":{"type":"object","required":["id","params","cmd","reasons"],"properties":{"id":{"type":"string"},"params":{"type":"object"},"cmd":{"type":"string"},"reasons":{"type":"array","items":{"type":"string"}}}}}}}'
 
 read -r -d '' PROMPT <<EOF || true
-# llm-infer-tuner 一步出 SGLang 启动配置(JSONL)
+# llm-infer-tuner 一步出 SGLang 启动配置(JSON)
 
 你要为下面这个 job 生成一组**可直接执行**的 SGLang 启动配置候选。
 
@@ -152,12 +152,12 @@ echo "ℹ️  原始返回 → $RAW_DIR/${JOB_ID}.json" >&2
 #   • .structured_output 是结构化输出(优先取)
 #   • .candidates[] 遍历数组每个元素逐个输出,-c 压成一行
 #   • -e 如果结果为 null/false 就报错退出(校验 claude 返回了有效数据)
-# 最终写入 configs.jsonl,每行一个独立 JSON,方便第二步 executor 逐行读取。
+# 最终写入 configs.jsonl,每行一个独立 JSON,第二步 executor 读 candidates 数组。
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo "$RAW" | jq -e '
   ( .structured_output // (.result | if type=="string" then fromjson else . end) // . )
-  | .candidates[]
-' -c > "$OUT"
+  | {candidates: .candidates}
+' > "$OUT"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 第 6 步:预览输出
@@ -169,7 +169,7 @@ echo "$RAW" | jq -e '
 N="$(wc -l < "$OUT" | tr -d ' ')"
 echo "✅ 已生成 $N 条候选 → $OUT" >&2
 echo "── 预览(id / tp / ep / att / mf / mamba / page / spec / chunk / kv / sched / radix)──" >&2
-jq -r '
+jq -r '.candidates[] | 
   "  " + .id +
   "  tp=" + (.params.tp_size|tostring) +
   "  ep=" + (.params.ep_size // 1 | tostring) +
