@@ -323,8 +323,8 @@ def _detect_numa_groups(remote: RemoteRunner, gpu_count: int) -> list[list[int]]
         # Parse NUMA affinity column
         groups: dict[int, list[int]] = {}
         for line in lines:
-            if line.startswith("GPU") and not line.startswith("GPU0"):
-                continue
+            # 表头行以空白缩进开头,天然被下面这条跳过;
+            # 不能用 not startswith("GPU0") 过滤,否则会误删 GPU1~GPU7(以及 16 卡机的 GPU10+)。
             if not line.startswith("GPU"):
                 continue
             parts = line.split()
@@ -409,10 +409,15 @@ def _allocate_gpus_and_ports(
                 result.append((candidate, gpu_ids_str, port_cursor))
                 port_cursor += 1
             else:
-                # Not enough GPUs at all; assign what we have
-                gpu_ids_str = "device=" + ",".join(str(g) for g in all_gpus)
-                result.append((candidate, gpu_ids_str, port_cursor))
-                port_cursor += 1
+                # 卡数 < tp_size:绝不静默降级成少卡启动,否则容器会以
+                # --tp {tp_size} 却只暴露 len(all_gpus) 张卡的方式崩在
+                # "CUDA error: invalid device ordinal"。显式报错挡在远程启动之前。
+                raise ValueError(
+                    f"candidate {candidate.get('id', '?')}: tp_size={tp_size} "
+                    f"但只能分到 {len(all_gpus)} 张 GPU"
+                    f"(gpu_count={gpu_count},NUMA={numa_groups}),拒绝以少卡静默启动。"
+                    f"请减小 tp_size 或提供足够的 GPU。"
+                )
 
     return result
 
@@ -446,6 +451,15 @@ def _run_batch_parallel(
     # Create one container per candidate in this batch
     for candidate, gpu_ids_str, port in batch:
         candidate_id = str(candidate.get("id", "unknown"))
+        # 启动前一致性断言:分到的 device 数必须等于 tp_size,否则容器会以
+        # --tp {tp_size} 却少卡的方式崩在 CUDA "invalid device ordinal"。
+        _tp_size = max(1, int(candidate.get("params", {}).get("tp_size", 1)))
+        _n_devices = len([d for d in gpu_ids_str.replace("device=", "").split(",") if d])
+        if _n_devices != _tp_size:
+            raise ValueError(
+                f"candidate {candidate_id}: tp_size={_tp_size} 需要 {_tp_size} 张 GPU,"
+                f"实际分到 {_n_devices} 张({gpu_ids_str})。拒绝启动以免 CUDA invalid device ordinal。"
+            )
         container_name = f"{config.container_name}-{candidate_id}"
         container_config = ContainerConfig(
             image_ref=config.image_ref,
