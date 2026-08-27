@@ -530,6 +530,45 @@ def _extract_failure_reason(log_path: Path) -> str:
     return "(empty server log)"
 
 
+def _build_cmd_from_params(params: dict, model_path_placeholder: str = "${MODEL_PATH}", port: int = 30000) -> str:
+    """Build a complete launch_server command from a params dict.
+
+    Rules:
+    - Field name tp_size -> flag --tp-size (underscore to hyphen)
+    - Boolean true -> bare flag (--trust-remote-code)
+    - Boolean false -> omit
+    - None/null -> omit
+    - --model-path, --host, --port auto-appended if not in params
+    - --disable-radix-cache auto-appended if disable_radix_cache is true
+    """
+    # Auto-included flags that should not be duplicated
+    auto_flags = {"model_path", "host", "port"}
+
+    parts = ["python -m sglang.launch_server"]
+
+    # Always add model-path first
+    parts.append(f"--model-path {model_path_placeholder}")
+
+    for key, val in params.items():
+        if key in auto_flags or key == "is_baseline":
+            continue
+        flag = "--" + key.replace("_", "-")
+        if val is True:
+            parts.append(flag)
+        elif val is False or val is None:
+            continue
+        else:
+            parts.append(f"{flag} {val}")
+
+    # Auto-append host and port if not specified
+    if not any(k == "host" for k in params):
+        parts.append("--host 0.0.0.0")
+    if not any(k == "port" for k in params):
+        parts.append(f"--port {port}")
+
+    return " ".join(parts)
+
+
 def _run_candidate(
     ctx: _CandidateContext,
     candidate: dict[str, Any],
@@ -554,6 +593,9 @@ def _run_candidate(
     # Support cmd_parts array format (each element is one argument)
     if not cmd and candidate.get("cmd_parts"):
         cmd = " ".join(str(p) for p in candidate["cmd_parts"])
+    # If no cmd/cmd_parts, build from params dict automatically
+    if not cmd and candidate.get("params"):
+        cmd = _build_cmd_from_params(candidate["params"], port=ctx.port)
     candidate_dir = config.results_dir / candidate_id
     candidate_dir.mkdir(parents=True, exist_ok=True)
 

@@ -22,42 +22,25 @@
     {
       "id": "c001",
       "params": {
-        "tp_size": 4
+        "tp_size": 4,
+        "attention_backend": "flashinfer",
+        "mem_fraction_static": 0.88,
+        "disable_radix_cache": true,
+        "trust_remote_code": true
       },
-      "reasons": [
-        "TP4+flashinfer+mf0.88"
-      ],
-      "cmd_parts": [
-        "python -m sglang.launch_server",
-        "--model-path ${MODEL_PATH}",
-        "--tp-size 4",
-        "--attention-backend flashinfer",
-        "--mem-fraction-static 0.88",
-        "--disable-radix-cache",
-        "--trust-remote-code",
-        "--host 0.0.0.0",
-        "--port 30000"
-      ]
+      "reasons": ["TP4+flashinfer+mf0.88"]
     },
     {
       "id": "c002",
       "params": {
-        "tp_size": 2
+        "tp_size": 2,
+        "attention_backend": "triton",
+        "mem_fraction_static": 0.88,
+        "disable_radix_cache": true,
+        "trust_remote_code": true,
+        "kv_cache_dtype": "fp8_e4m3"
       },
-      "reasons": [
-        "TP2+flashinfer+mf0.88"
-      ],
-      "cmd_parts": [
-        "python -m sglang.launch_server",
-        "--model-path ${MODEL_PATH}",
-        "--tp-size 2",
-        "--attention-backend flashinfer",
-        "--mem-fraction-static 0.88",
-        "--disable-radix-cache",
-        "--trust-remote-code",
-        "--host 0.0.0.0",
-        "--port 30000"
-      ]
+      "reasons": ["TP2+triton+kv_fp8"]
     }
   ]
 }
