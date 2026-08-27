@@ -24,7 +24,7 @@ command -v jq >/dev/null || { echo "❌ 需要 jq" >&2; exit 1; }
 # 检测模式:单文件 vs 三参数
 # ─────────────────────────────────────────────────────────────────────────
 SINGLE_FILE=""
-if [ $# -eq 1 ] && [[ "$1" == *.jsonl ]]; then
+if [ $# -eq 1 ] && [[ "$1" == *.json ]]; then
   SINGLE_FILE="$1"
   [ -f "$SINGLE_FILE" ] || { echo "❌ 文件不存在: $SINGLE_FILE" >&2; exit 1; }
 elif [ $# -ge 2 ]; then
@@ -44,26 +44,26 @@ fi
 if [ -n "$SINGLE_FILE" ]; then
   # 单文件模式:从第一行 _meta 读所有信息
   META="$SINGLE_FILE"
-  JOB_ID="$(jq -s '.[0]._meta.job_id // "custom"' "$SINGLE_FILE")"
+  JOB_ID="$(jq '.[0]._meta.job_id // "custom"' "$SINGLE_FILE")"
   CONFIGS="$SINGLE_FILE"
   RESULTS="outputs/${JOB_ID}/results"
-  SSH_TARGET="$(jq -s '.[0]._meta.ssh_target' "$SINGLE_FILE")"
-  SSH_PASSWORD="$(jq -s '.[0]._meta.ssh_password // ""' "$SINGLE_FILE")"
-  MODEL_HOST_DIR="$(jq -s '.[0]._meta.model_host_dir' "$SINGLE_FILE")"
-  MODEL_CONTAINER_PATH="$(jq -s '.[0]._meta.model_container_path' "$SINGLE_FILE")"
-  IMAGE_REF="$(jq -s '.[0]._meta.image_ref' "$SINGLE_FILE")"
-  PORT="$(jq -s '.[0]._meta.port // 30000' "$SINGLE_FILE")"
-  REMOTE_OUTPUTS_DIR="$(jq -s '.[0]._meta.remote_outputs_dir // ""' "$SINGLE_FILE")"
-  TARGET_GPU_MODEL="$(jq -s '.[0]._meta.gpu_model // ""' "$SINGLE_FILE")"
-  TARGET_GPU_COUNT="$(jq -s '.[0]._meta.gpu_count // 0' "$SINGLE_FILE")"
-  TARGET_GPU_MEM="$(jq -s '.[0]._meta.gpu_memory_gb // 0' "$SINGLE_FILE")"
+  SSH_TARGET="$(jq '.[0]._meta.ssh_target' "$SINGLE_FILE")"
+  SSH_PASSWORD="$(jq '.[0]._meta.ssh_password // ""' "$SINGLE_FILE")"
+  MODEL_HOST_DIR="$(jq '.[0]._meta.model_host_dir' "$SINGLE_FILE")"
+  MODEL_CONTAINER_PATH="$(jq '.[0]._meta.model_container_path' "$SINGLE_FILE")"
+  IMAGE_REF="$(jq '.[0]._meta.image_ref' "$SINGLE_FILE")"
+  PORT="$(jq '.[0]._meta.port // 30000' "$SINGLE_FILE")"
+  REMOTE_OUTPUTS_DIR="$(jq '.[0]._meta.remote_outputs_dir // ""' "$SINGLE_FILE")"
+  TARGET_GPU_MODEL="$(jq '.[0]._meta.gpu_model // ""' "$SINGLE_FILE")"
+  TARGET_GPU_COUNT="$(jq '.[0]._meta.gpu_count // 0' "$SINGLE_FILE")"
+  TARGET_GPU_MEM="$(jq '.[0]._meta.gpu_memory_gb // 0' "$SINGLE_FILE")"
   # 候选数 = 总行数 - 1(去掉 _meta 行)
   MAX_CAND=$(( $(wc -l < "$SINGLE_FILE" | tr -d ' ') - 1 ))
 
   # 写临时 job.json 和 target.json 给 executor.py
   TMP_DIR=$(mktemp -d)
-  jq -s '.[0]._meta | {job_id, engine:"sglang", gpu_model, gpu_count, gpu_memory_gb, model:"custom", image:"custom", workload, benchmark_method, sla, search:{max_candidates:999, max_runtime_minutes:180}}' "$SINGLE_FILE" > "$TMP_DIR/job.json"
-  jq -s '.[0]._meta | {gpu_model, gpu_count, gpu_memory_gb, ssh_target, ssh_password, model_host_dir, model_container_path, image_ref, port, remote_outputs_dir}' "$SINGLE_FILE" > "$TMP_DIR/target.json"
+  jq '.[0]._meta | {job_id, engine:"sglang", gpu_model, gpu_count, gpu_memory_gb, model:"custom", image:"custom", workload, benchmark_method, sla, search:{max_candidates:999, max_runtime_minutes:180}}' "$SINGLE_FILE" > "$TMP_DIR/job.json"
+  jq '.[0]._meta | {gpu_model, gpu_count, gpu_memory_gb, ssh_target, ssh_password, model_host_dir, model_container_path, image_ref, port, remote_outputs_dir}' "$SINGLE_FILE" > "$TMP_DIR/target.json"
   JOB="$TMP_DIR/job.json"
   TARGET="$TMP_DIR/target.json"
 else
