@@ -103,9 +103,6 @@ def script_project(tmp_path: Path) -> ScriptProject:
     count_file = tmp_path / "tclaude.count"
     models_file = tmp_path / "tclaude.models"
 
-    fake_claude = bin_dir / "claude"
-    fake_claude.write_text("#!/bin/bash\nexit 99\n")
-    fake_claude.chmod(0o755)
 
     real_jq = shutil.which("jq")
     assert real_jq is not None
@@ -188,6 +185,30 @@ def script_project(tmp_path: Path) -> ScriptProject:
     )
     fake_tclaude.chmod(0o755)
 
+    # 公开 claude CLI 的假实现:与 tclaude 契约一致,记录参数以便断言 --agent claude 路径。
+    fake_claude = bin_dir / "claude"
+    fake_claude.write_text(
+        "#!/bin/bash\n"
+        'printf "%s\\n" "$@" > "$FAKE_TCLAUDE_ARGS_FILE"\n'
+        'previous=""\n'
+        'for arg in "$@"; do\n'
+        '  if [ "$previous" = "--model" ]; then '
+        'printf "%s\\n" "$arg" >> "$FAKE_TCLAUDE_MODELS_FILE"; fi\n'
+        '  previous="$arg"\n'
+        'done\n'
+        "stream=0\n"
+        'for arg in "$@"; do\n'
+        '  [ "$arg" = "stream-json" ] && stream=1\n'
+        "done\n"
+        "if [ \"$stream\" = 1 ]; then\n"
+        f"  printf '%s\\n' '{stream_init}'\n"
+        f"  printf '%s\\n' '{stream_payload}'\n"
+        "else\n"
+        f"  printf '%s\\n' '{payload}'\n"
+        "fi\n"
+    )
+    fake_claude.chmod(0o755)
+
     env = os.environ.copy()
     env.update(
         {
@@ -218,6 +239,38 @@ def test_model_option_preserves_gateway_model_name(script_project: ScriptProject
     assert argv[argv.index("--model") + 1] == "claude-glm-5.2[1m]"
     assert (script_project.root / "custom.jsonl").is_file()
     assert "tclaude 模型 → claude-glm-5.2[1m] (命令行)" in completed.stderr
+
+
+def test_agent_claude_omits_model_by_default(script_project: ScriptProject) -> None:
+    """--agent claude 且不指定 --model:不硬塞腾讯别名 claude-hy3,交给 claude 自身默认。"""
+    completed, argv = script_project.run("--agent", "claude", output_name="pub.jsonl")
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--model" not in argv
+    assert "claude-hy3" not in argv
+    assert "claude 模型 →" in completed.stderr
+    assert (script_project.root / "pub.jsonl").is_file()
+
+
+def test_agent_claude_with_explicit_model(script_project: ScriptProject) -> None:
+    """--agent claude --model X:把 X 原样传给公开 claude CLI。"""
+    completed, argv = script_project.run(
+        "--agent", "claude", "--model", "claude-opus-4-8", output_name="pub2.jsonl"
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert argv[argv.index("--model") + 1] == "claude-opus-4-8"
+
+
+def test_unknown_agent_rejected(script_project: ScriptProject) -> None:
+    """未支持的 agent(如 codex)在调用任何 CLI 前就被挡下。"""
+    completed, recorded = script_project.invoke(
+        "--agent", "codex", str(script_project.job)
+    )
+
+    assert completed.returncode == 2
+    assert "未知 --agent" in completed.stderr
+    assert recorded == []
 
 
 @pytest.mark.parametrize(

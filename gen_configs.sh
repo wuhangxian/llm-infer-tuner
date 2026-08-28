@@ -1,16 +1,23 @@
 #!/bin/bash
 # gen_configs.sh —— 第一阶段:生成 SGLang 启动配置候选。
 #
-# 用法:  ./gen_configs.sh [--model MODEL] <job.json> [out.json]
+# 用法:  ./gen_configs.sh [--agent tclaude|claude] [--model MODEL] <job.json> [out.json]
 #        默认输出 outputs/<job_id>/configs.jsonl。
 #
-# 脚本分 6 步,其中只有第 4 步调 AI(tclaude)做调优决策,其余全是确定性代码。
+# --agent 选用哪个 Claude Code CLI:
+#   tclaude(默认)—— 腾讯内网网关,默认模型别名 claude-hy3(仅腾讯员工可用)
+#   claude        —— 公开 CLI,走 `claude login` 或 ANTHROPIC_API_KEY;不指定
+#                    --model 时用 claude 自身默认模型(不硬塞腾讯别名)
+# tclaude 与 claude 命令行契约完全一致(tclaude 内嵌 @anthropic-ai/claude-code),
+# 故只需切 binary 名与默认模型,其余逻辑(stream-json / json-schema 解析)通用。
+#
+# 脚本分 6 步,其中只有第 4 步调 AI 做调优决策,其余全是确定性代码。
 # cmd 里的 --model-path 恒为占位符 ${MODEL_PATH}(路径是机器事实,非调优决策),
 # 第二步由 targets.json 填入。故 configs.jsonl 机器无关,可跨机搬运。
 set -euo pipefail
 
 usage() {
-  echo "用法: ./gen_configs.sh [--model MODEL] <job.json> [out.json]" >&2
+  echo "用法: ./gen_configs.sh [--agent tclaude|claude] [--model MODEL] <job.json> [out.json]" >&2
 }
 
 # Load .env for optional API-related environment settings.
@@ -30,12 +37,31 @@ fi
 #   • tclaude   — AI CLI,第 4 步要用它生成配置,没装就跑不了
 #   • python3 + tclaude_guard.py — 超时/重试/信号与子进程回收
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-MODEL="claude-hy3"
-MODEL_SOURCE="默认"
+AGENT="tclaude"          # 默认走腾讯内网 CLI,保持既有行为不变
+MODEL=""                 # 空 = 用户未显式指定,解析后按 agent 决定默认值
+MODEL_SOURCE=""
 POSITIONAL=()
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --agent)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "❌ --agent 需要值(tclaude 或 claude)" >&2
+        usage
+        exit 2
+      fi
+      AGENT="$2"
+      shift 2
+      ;;
+    --agent=*)
+      AGENT="${1#--agent=}"
+      if [ -z "$AGENT" ]; then
+        echo "❌ --agent 需要值(tclaude 或 claude)" >&2
+        usage
+        exit 2
+      fi
+      shift
+      ;;
     --model)
       if [ "$#" -lt 2 ] || [ -z "$2" ]; then
         echo "❌ --model 需要非空模型名" >&2
@@ -82,7 +108,34 @@ fi
 
 JOB="${POSITIONAL[0]}"
 OUT_ARG="${POSITIONAL[1]:-}"
-TCLAUDE_ARGS=(--model "$MODEL")
+
+# 校验 --agent 只能是 tclaude / claude(挡住 codex 等尚未支持的值,免得组出无效命令)
+case "$AGENT" in
+  tclaude|claude) ;;
+  *)
+    echo "❌ 未知 --agent: $AGENT(仅支持 tclaude | claude)" >&2
+    usage
+    exit 2
+    ;;
+esac
+
+# 默认模型按 agent 决定:
+#   tclaude —— 补腾讯网关别名 claude-hy3(公开 claude 不认这个别名)
+#   claude  —— 不补默认模型,交给 claude 自身默认(用户可用 --model 覆盖)
+if [ -z "$MODEL_SOURCE" ]; then
+  if [ "$AGENT" = "tclaude" ]; then
+    MODEL="claude-hy3"
+    MODEL_SOURCE="默认"
+  else
+    MODEL_SOURCE="claude 默认"
+  fi
+fi
+
+# 只有拿到具体模型名时才传 --model;claude 未指定时留空,用其自身默认
+AGENT_MODEL_ARGS=()
+if [ -n "$MODEL" ]; then
+  AGENT_MODEL_ARGS=(--model "$MODEL")
+fi
 
 command -v jq >/dev/null || { echo "❌ 需要 jq" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "❌ 需要 python3" >&2; exit 1; }
@@ -90,9 +143,9 @@ command -v python3 >/dev/null || { echo "❌ 需要 python3" >&2; exit 1; }
 
 SKILL_DIR=".claude/skills/sglang-server-config-gen"
 [ -f "$SKILL_DIR/SKILL.md" ] || { echo "❌ 找不到 skill: $SKILL_DIR/SKILL.md(请在 repo 根运行)" >&2; exit 1; }
-command -v tclaude >/dev/null || { echo "❌ tclaude 不在 PATH" >&2; exit 1; }
+command -v "$AGENT" >/dev/null || { echo "❌ $AGENT 不在 PATH" >&2; exit 1; }
 TCLAUDE_GUARD="runners/tclaude_guard.py"
-[ -f "$TCLAUDE_GUARD" ] || { echo "❌ 找不到 tclaude guard: $TCLAUDE_GUARD" >&2; exit 1; }
+[ -f "$TCLAUDE_GUARD" ] || { echo "❌ 找不到 guard: $TCLAUDE_GUARD" >&2; exit 1; }
 
 # 模型路径恒为占位符 —— 第一步机器无关,不绑死任何机器的物理路径。
 MODEL_PATH='${MODEL_PATH}'
@@ -253,7 +306,7 @@ trap cleanup_temporary_files EXIT
 trap record_interrupt INT
 
 echo "ℹ️  模型路径在命令里保留占位符 \${MODEL_PATH}(机器无关);第二步由 targets.json 填入实际路径。" >&2
-echo "ℹ️  tclaude 模型 → $MODEL ($MODEL_SOURCE)" >&2
+echo "ℹ️  $AGENT 模型 → ${MODEL:-<$AGENT 自身默认>} ($MODEL_SOURCE)" >&2
 echo "ℹ️  防护 → 单次软超时 ${GEN_TIMEOUT_SECONDS}s, TERM→KILL 宽限 ${GEN_TIMEOUT_GRACE_SECONDS}s, 最多尝试 ${MAX_ATTEMPTS} 次" >&2
 echo "ℹ️  输出 → $OUT" >&2
 
@@ -269,11 +322,11 @@ GUARD_ARGS=(
 
 if [ "$GEN_STREAM" != "0" ]; then
   # ── 默认:真流式 ─────────────────────────────────────────────────────
-  echo "▶ 调 tclaude 生成配置(流式,实时显示读库+推导过程,通常 2-6 分钟)…" >&2
+  echo "▶ 调 $AGENT 生成配置(流式,实时显示读库+推导过程,通常 2-6 分钟)…" >&2
   echo "────────────────────────────────────────────────────────────" >&2
 
   TCLAUDE_COMMAND=(
-    tclaude -p "$PROMPT" "${TCLAUDE_ARGS[@]}"
+    "$AGENT" -p "$PROMPT" "${AGENT_MODEL_ARGS[@]}"
     --output-format stream-json
     --verbose
     --include-partial-messages
@@ -336,9 +389,9 @@ if [ "$GEN_STREAM" != "0" ]; then
   fi
 else
   # ── 回退:旧的单 JSON 对象行为(GEN_STREAM=0)────────────────────────
-  echo "▶ 调 tclaude 生成配置(非流式,读 skill+knowledge+catalogs,几分钟)…" >&2
+  echo "▶ 调 $AGENT 生成配置(非流式,读 skill+knowledge+catalogs,几分钟)…" >&2
   TCLAUDE_COMMAND=(
-    tclaude -p "$PROMPT" "${TCLAUDE_ARGS[@]}"
+    "$AGENT" -p "$PROMPT" "${AGENT_MODEL_ARGS[@]}"
     --output-format json
     --json-schema "$SCHEMA"
     --add-dir .

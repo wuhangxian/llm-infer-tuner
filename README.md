@@ -13,7 +13,7 @@
 | 层级 | 你能做什么 | 前置条件 | 大约耗时 |
 |------|-----------|---------|---------|
 | **L0 装环境 + 跑测试** | 装依赖,跑全套单测,确认代码是活的 | 只需 Python 3.11+ / uv / jq | ~1 分钟 |
-| **L1 AI 生成配置** | 让 AI 读知识库生成一批 SGLang 启动候选 | 额外需 `tclaude` 已登录 | 每次调用 ~1-10 分钟 |
+| **L1 AI 生成配置** | 让 AI 读知识库生成一批 SGLang 启动候选 | 额外需 `tclaude` 或公开 `claude` CLI 已登录 | 每次调用 ~1-10 分钟 |
 | **L2 真机压测 + 排名** | SSH 到 GPU 机器,起服务、压测、出排名 | 额外需一台可 SSH 的 GPU 机器(装 docker、有模型权重和镜像) | 每个 job 十几分钟起 |
 
 ### L0 —— 30 秒验证代码可用(无需 GPU、无需 tclaude)
@@ -41,22 +41,29 @@ L1 / L2 的完整跑法见下面「快速开始」和「两种使用方式」。
 ### 0. 前置(按层级递增)
 
 - **L0(跑测试)**:Python 3.11+ + [uv](https://github.com/astral-sh/uv) + `jq`
-- **L1(AI 生成)**:额外需 `tclaude` CLI(已登录)
+- **L1(AI 生成)**:额外需一个 Claude Code CLI(已登录)——`tclaude`(腾讯内网)**或**公开的 `claude`(`claude login` / `ANTHROPIC_API_KEY`)。用 `--agent` 选,详见下文。
 - **L2(真机压测)**:额外需一台目标 GPU 机器 —— SSH 可达、已装 docker、已备好模型权重和 sglang 镜像
 
 ```bash
 uv sync
 ```
 
-### 1. 登录 tclaude(L1/L2 才需要;只跑 L0 可跳过)
+### 1. 登录 AI CLI(L1/L2 才需要;只跑 L0 可跳过)
+
+项目支持两个命令行契约完全一致的 Claude Code CLI,用 `--agent` 选:
 
 ```bash
-tclaude login
-tclaude --version
+# 腾讯内网(默认,仅腾讯员工):
+tclaude login && tclaude --version
+
+# 或公开 claude(任何人):二选一登录方式
+claude login                       # 交互登录
+export ANTHROPIC_API_KEY=sk-...    # 或用 API key
+claude --version
 ```
 
-`gen_configs.sh` 通过 tclaude 自己的网关和登录态调用模型。项目仍会加载可选的
-`.env` 文件,供其他需要直连 API 的工具使用;它不会覆盖 tclaude 的网关。
+`gen_configs.sh` 通过所选 CLI 自己的网关和登录态调用模型。项目仍会加载可选的
+`.env` 文件,供其他需要直连 API 的工具使用;它不会覆盖 CLI 的网关。
 
 ---
 
@@ -67,13 +74,21 @@ tclaude --version
 **第一步:AI 生成候选配置**
 
 ```bash
-# 不指定时默认使用 claude-hy3
+# 默认 agent=tclaude,默认模型 claude-hy3(腾讯内网)
 ./gen_configs.sh input/jobs/<job>.json
 
-# 临时选择其他 tclaude 模型
+# 用公开 claude CLI(非腾讯员工):不指定 --model 时用 claude 自身默认模型
+./gen_configs.sh --agent claude input/jobs/<job>.json
+./gen_configs.sh --agent claude --model claude-opus-4-8 input/jobs/<job>.json
+
+# 仍用 tclaude,临时选择其他网关模型
 ./gen_configs.sh --model claude-opus-4-8 input/jobs/<job>.json
 ./gen_configs.sh --model 'claude-glm-5.2[1m]' input/jobs/<job>.json
 ```
+
+> `--agent tclaude|claude` 选用哪个 CLI(默认 `tclaude`)。两者命令行契约一致
+> (tclaude 内嵌 `@anthropic-ai/claude-code`),故只切 binary 与默认模型。
+> L2 的压测命令生成同理默认用公开 `claude`,可用环境变量 `BENCH_AGENT=tclaude` 切回内网。
 
 AI 读 knowledge.md + catalogs(gpu/models/workloads/images),推导 TP/attention/mem-fraction/投机解码等参数,生成候选配置到 `outputs/<job_id>/configs.jsonl`。
 
