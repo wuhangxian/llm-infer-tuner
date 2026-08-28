@@ -277,8 +277,6 @@ llm-infer-tuner/
 ├── gen_configs.sh              # 第一步入口:AI 生成候选配置
 ├── run_executor.sh             # 第二步入口:远程压测 + 排名(支持单文件模式)
 ├── update.sh                   # 一键更新脚本(同步 SGLang 参数 + 模型信息)
-├── .env.example                # 凭证模板
-├── .env                        # 你的凭证(gitignore)
 │
 ├── input/
 │   ├── jobs/                   # AI 模式输入(job.json + target.json)
