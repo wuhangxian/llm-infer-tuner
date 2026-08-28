@@ -30,7 +30,7 @@ uv run python -m pytest tests/ -q        # 跑全套单测
 122 passed in ~30s
 ```
 
-**这一步不碰任何 GPU、不发任何网络请求**,纯确定性逻辑(配置拼装、并发搜索、goodput 排名、schema 校验)全部覆盖。带教想快速确认"代码是不是能跑",跑这一条就够了。
+**这一步不碰任何 GPU、不发任何网络请求**,纯确定性逻辑(配置拼装、并发搜索、goodput 排名、schema 校验)全部覆盖。想快速确认"代码是不是能跑",跑这一条就够了。
 
 L1 / L2 的完整跑法见下面「快速开始」和「两种使用方式」。**没有 GPU 机器时,L2 无法本地演示**(执行器必须连真机 SSH,没有 dry-run 模式)——这是设计如此,不是缺陷。
 
@@ -51,6 +51,8 @@ uv sync
 ### 1. 登录 tclaude(L1/L2 才需要;只跑 L0 可跳过)
 
 ```bash
+#腾讯内部
+npm install -g @tencent/tclaude --engine-strict --registry=https://mirrors.tencent.com/npm
 tclaude login
 tclaude --version
 ```
