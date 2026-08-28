@@ -2345,7 +2345,7 @@ models:
     hybrid_mamba: true
     default_precision: fp8
     weight_gb:
-      estimated: 2080
+      estimated: 26
     modalities:
       input:
       - text
