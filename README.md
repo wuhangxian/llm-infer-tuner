@@ -6,19 +6,49 @@
 
 ---
 
+## 先看这里(拿到手第一步)
+
+这个项目分三层能力,**门槛依次升高**。你不必有 GPU 机器也能验证核心逻辑。先确认你在哪一层:
+
+| 层级 | 你能做什么 | 前置条件 | 大约耗时 |
+|------|-----------|---------|---------|
+| **L0 装环境 + 跑测试** | 装依赖,跑全套单测,确认代码是活的 | 只需 Python 3.11+ / uv / jq | ~1 分钟 |
+| **L1 AI 生成配置** | 让 AI 读知识库生成一批 SGLang 启动候选 | 额外需 `tclaude` 已登录 | 每次调用 ~1-10 分钟 |
+| **L2 真机压测 + 排名** | SSH 到 GPU 机器,起服务、压测、出排名 | 额外需一台可 SSH 的 GPU 机器(装 docker、有模型权重和镜像) | 每个 job 十几分钟起 |
+
+### L0 —— 30 秒验证代码可用(无需 GPU、无需 tclaude)
+
+```bash
+cd llm-infer-tuner
+uv sync                                  # 装依赖(pydantic/pyyaml/typer 等)
+uv run python -m pytest tests/ -q        # 跑全套单测
+```
+
+预期看到:
+
+```
+122 passed in ~30s
+```
+
+**这一步不碰任何 GPU、不发任何网络请求**,纯确定性逻辑(配置拼装、并发搜索、goodput 排名、schema 校验)全部覆盖。带教想快速确认"代码是不是能跑",跑这一条就够了。
+
+L1 / L2 的完整跑法见下面「快速开始」和「两种使用方式」。**没有 GPU 机器时,L2 无法本地演示**(执行器必须连真机 SSH,没有 dry-run 模式)——这是设计如此,不是缺陷。
+
+---
+
 ## 快速开始
 
-### 0. 前置
+### 0. 前置(按层级递增)
 
-- Python 3.11+ + [uv](https://github.com/astral-sh/uv)
-- `jq`、`tclaude` CLI
-- 目标 GPU 机器:SSH 可达、已装 docker、已备好模型权重和 sglang 镜像
+- **L0(跑测试)**:Python 3.11+ + [uv](https://github.com/astral-sh/uv) + `jq`
+- **L1(AI 生成)**:额外需 `tclaude` CLI(已登录)
+- **L2(真机压测)**:额外需一台目标 GPU 机器 —— SSH 可达、已装 docker、已备好模型权重和 sglang 镜像
 
 ```bash
 uv sync
 ```
 
-### 1. 登录 tclaude
+### 1. 登录 tclaude(L1/L2 才需要;只跑 L0 可跳过)
 
 ```bash
 tclaude login

@@ -142,9 +142,21 @@
 | `--schedule-conservativeness` | `[0.3, 1.0, 1.3]` | official | 官方唯一给出闭环判据的调度参数(见 §6) |
 | `--page-size` | `[1, 32, 64]` | official | KV cache 分页大小,调大减少页表管理开销(尤其 MoE 高并发)。**按 attention 后端联动生成,非独立铺**:flashinfer/triton → 只生成 [1](调大无收益,SGLang 不强制改写);mamba `no_buffer` → 只生成 [1](`no_buffer`+radix cache 强制 page_size=1);mamba `extra_buffer` → 只生成 [64](`FLA_CHUNK_SIZE(64) % page_size == 0` 硬约束);trtllm_mha → [16,32,64](但 SM120 用不了 trtllm_mha)。cookbook 证据:Qwen3-Coder MoE 推荐 32,DeepSeek-V3.2 用 64/128。⚠️ **版本核对**:换 SGLang 版本时需核对 `server_args.py` 中 `_handle_page_size` 及后端约束是否变化 |
 | `--mamba-radix-cache-strategy` | 暂不搜索 | official | **TODO: 暂用 SGLang 默认值 `no_buffer`,不生成此轴的候选**。原因:① SGLang 默认 `auto`→`no_buffer`,源码注释说 extra_buffer "needs more verification";② cookbook 用的参数名 `--mamba-radix-cache-strategy` 与 SGLang CLI 实际参数名 `--mamba-scheduler-strategy` 不一致,需确认;③ extra_buffer 几乎全好处(cookbook: 非KV-bound场景严格优于no_buffer),但显存代价和 KV-bound 场景的并发下降需实测。**后续启用时**:确认 CLI 参数名 → 改成首选 extra_buffer + no_buffer 对照 → 补 `--disable-overlap-schedule` 约束(no_buffer必须配) |
-| `--speculative-algorithm` | `[无, EAGLE]` | official | **仅 `capabilities.supports_mtp: true` 模型生成**。「无」是对照基线(不写这组 flag);EAGLE 从 `mtp_params` 取配套值(`num-steps`/`eagle-topk`/`num-draft-tokens`)。cookbook 5/7 Qwen 模型推荐,延迟可降 2-3 倍。放 §6 F 阶段搜,先跑通非投机基线 |
+| `--speculative-algorithm` | `[无, EAGLE]` | official | **仅 `capabilities.supports_mtp: true` 模型生成**。「无」是对照基线(不写这组 flag);EAGLE 从 `mtp_params` 取配套值(`num-steps`/`eagle-topk`/`num-draft-tokens`)。cookbook 5/7 Qwen 模型推荐,延迟可降 2-3 倍。放 §6 F 阶段搜,先跑通非投机基线。⚠️ **只默认铺 EAGLE/NEXTN 这类自带 MTP 权重的算法**;DSPARK 等需外挂 draft 模型的算法**必须**在卡里配 `speculative-draft-model-path` 才可发,否则启动即崩(见 §5 draft-model 排除项) |
 
 **kv-cache-dtype 按算力过滤**(`source` v0.5.10):choices=`[auto, fp8_e5m2, fp8_e4m3, bf16, fp4_e2m1]`;`fp8_*` 无 SM 门槛(CUDA 11.8+),`fp4_e2m1` 需 CUDA≥12.8 + PyTorch 2.8.0+。默认池保守取 `[auto, fp8_e4m3]`,更激进精度要搜在 job 里显式给。
+
+### 3a. 混合架构(`hybrid_mamba: true`)显存上界压缩 — `measured`
+
+混合 GDN/Mamba 模型的 **SSM state cache 分配在 `--mem-fraction-static` 池之外**(实测 M55_qwen3-8-27b-fp8 单实例 SSM 状态池 ~17GB),等于先从卡上扣掉一大块,再让 `mem-fraction-static` 去分剩下的显存。此时沿用 dense 模型的 `[0.80, 0.84, 0.88, 0.92]` 上界会**在启动 / CUDA graph capture 阶段直接崩**(`cudaErrorIllegalState: operation cannot be performed in the present state` 是 capture 期非干净 OOM,不是压测期 `torch.OutOfMemoryError`)。故对 `hybrid_mamba: true` 模型:
+
+| 轴 | dense 默认档 | **hybrid_mamba 覆盖档** | 理由 |
+|---|---|---|---|
+| `--mem-fraction-static` | `[0.80, 0.84, 0.88, 0.92]` | **`[0.78, 0.82, 0.86]`(上界 0.86)** | SSM 状态池吃掉池外显存,≥0.88 实测启动/capture 崩 |
+| `--chunked-prefill-size` | `[4096, 8192, 16384]` | **`[4096, 8192]`(上界 8192)** | prefill 激活峰值叠加 SSM 池后 16384 触发 capture 期 OOM |
+
+- **前提**:models.yaml 该卡必须记 `ssm_state_gb`(单实例 SSM 状态池 GB)。缺该字段时,保守按混合架构覆盖档生成,并在 reasons 里标注"ssm_state_gb 缺失,用保守上界"。
+- 这条覆盖 §7 里"免费杠杆→0.92"的旧建议:**那条只适用于纯 KV 池的 dense 模型**;hybrid_mamba 的池外 SSM 分配使得 0.92 不再是空闲显存,而是超发。
 
 ---
 
@@ -164,6 +176,7 @@
 | `--speculative-eagle-topk > 1` | source | overlap scheduler 与 trtllm_mha 都只支持 topk=1,固定为 1 |
 | `--enable-mixed-chunk` + 投机解码 | source | 源码里 assert 冲突 |
 | `--speculative-algorithm` + `supports_mtp: false` | official | 模型没有 MTP 权重(`mtp.safetensors`),启动直接报错 |
+| `--speculative-algorithm`(DSPARK / 任何 dense-draft 算法)不带 `--speculative-draft-model-path` | source | DSPARK 等 draft-model 类算法**硬依赖**外部 draft 权重路径,缺则启动即崩:`ValueError: DSpark dense speculative decoding requires setting --speculative-draft-model-path`。**只有 EAGLE/NEXTN 这类自带 MTP 权重的算法可裸发**(draft 就在主权重里);凡是需要外挂 draft 模型的算法,models.yaml 卡里 `mtp_params` 未同时声明 `speculative-draft-model-path` 时,一律不发该投机候选,回落非投机基线 |
 | `--mamba-radix-cache-strategy` + `hybrid_mamba: false` | official | 非 GDN 模型没有 mamba 层,参数被忽略,等于白跑 |
 | `--mamba-radix-cache-strategy extra_buffer` + `--page-size != 64` | source | `FLA_CHUNK_SIZE(64) % page_size != 0` → 启动报错 |
 | `--mamba-radix-cache-strategy no_buffer` + `--page-size != 1` | source | `no_buffer`+radix cache 强制 `page_size=1`,写了别的会被忽略或报错 |
@@ -254,7 +267,7 @@ qwen3.6(`hybrid_mamba: true`)适用。
 
 **mamba ratio(`--mamba-full-memory-ratio`,默认 0.9)不该盲扫——有公式**:`r* ≈ S · token_equiv · dcp_size / L`。参考:L=64K→r≈0.31,L=128K→r≈0.16。S 由 cache strategy 决定(extra_buffer overlap 开→S=5,extra_buffer_lazy→S=4)。**strategy 和 ratio 不正交,别当独立笛卡尔积扫。** L≈60k 时 r*≈0.31,盲扫 0.5/0.9 会整段落在 KV-bound 区。
 - 逃生:L 很长时 r* 会低到状态池装不下一个请求,改 pin `--max-mamba-cache-size = 目标并发 × S`,别用 sub-0.15 的 r。
-- 免费杠杆优先:启动日志显示大量闲置显存时,先提 mem-fraction(→0.92)再动 split。
+- 免费杠杆优先:启动日志显示大量闲置显存时,先提 mem-fraction 再动 split。⚠️ **但混合架构上界是 0.86 不是 0.92**(见 §3a):SSM 状态池分配在 mem-fraction 池外,启动日志看到的"闲置显存"其实要留给 SSM 池,提到 0.92 会在 capture 期崩。所谓"闲置"对 hybrid_mamba 是假象。
 
 > 本 case(qa-chat-3.5k-1k,输入仅 3500)**不是长上下文**,mamba 池压力小;混合架构缓存策略仍值得 A/B,但 ratio 公式的极端逃生场景用不到。
 

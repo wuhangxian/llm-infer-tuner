@@ -52,6 +52,66 @@ COOKBOOK_DIRS = [
     "docs_new/cookbook/autoregressive",
 ]
 
+# HF namespace prefixes that are NOT model owners — an "org/name" match whose
+# first segment is one of these is a doc/dataset/blog URL path, not a model ID.
+_HF_RESERVED_PREFIXES = {
+    "docs", "datasets", "blog", "settings", "license", "spaces", "models",
+    "api", "join", "pricing", "tasks", "collections", "organizations",
+    "posts", "learn", "chat", "inference-endpoints",
+}
+# A valid HF path segment: starts alnum, then alnum plus . _ - (no trailing junk).
+_HF_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# File-extension tails that mark a captured token as an asset path, not a model.
+_ASSET_EXTS = (".css", ".js", ".jsx", ".ts", ".tsx", ".png", ".svg",
+               ".jpg", ".jpeg", ".gif", ".json", ".md", ".mdx", ".html")
+
+
+def _clean(s: Any) -> Any:
+    """Strip whitespace and stray quote/backtick/backslash wrappers from a flag
+    value scraped out of cookbook prose. Non-strings pass through unchanged.
+
+    Cookbook mdx often wraps CLI values in inline code (`qwen3`) or trailing
+    punctuation; ``.strip('"')`` alone leaves the backtick, which then lands in
+    models.yaml as ``reasoning-parser: qwen3`` and crashes the server at launch.
+
+    A backtick never legitimately appears in a flag value, so any backtick marks
+    where the real value ended and markdown formatting began (``auto`**``,
+    ``EAGLE3`:``, ``dots`)``) — truncate there, then strip the usual wrappers.
+    """
+    if not isinstance(s, str):
+        return s
+    s = s.strip()
+    if s.startswith("`"):
+        s = s[1:]              # drop a leading inline-code backtick before splitting
+    s = s.split("`", 1)[0]     # cut at the first (closing) backtick, dropping markdown tail
+    return s.strip().strip("'\"\\").strip()
+
+
+def _normalize_model_id(raw: str) -> str | None:
+    """Validate/clean a scraped ``org/name`` token; return None if it's garbage.
+
+    Rejects: local paths, env-var refs, reserved HF namespaces (docs/datasets/…),
+    asset paths (…/foo.css), and anything not matching the strict segment shape
+    after stripping stray quote/backtick tails. Returns the cleaned ``org/name``
+    or None so callers can drop non-models instead of minting junk cards.
+    """
+    if not isinstance(raw, str):
+        return None
+    m = raw.strip().strip("`'\"\\").strip()
+    if not m or m.startswith(("/", "$", "~", "http://", "https://")):
+        return None
+    parts = m.split("/")
+    if len(parts) != 2:
+        return None
+    org, name = parts
+    if org.lower() in _HF_RESERVED_PREFIXES:
+        return None
+    if not _HF_SEGMENT_RE.match(org) or not _HF_SEGMENT_RE.match(name):
+        return None
+    if name.lower().endswith(_ASSET_EXTS):
+        return None
+    return f"{org}/{name}"
+
 
 def scan_cookbook_models(sglang_repo: str, since_date: str = "2026-05-01") -> list[str]:
     """Scan SGLang cookbook mdx files added since since_date for model IDs."""
@@ -105,19 +165,23 @@ def scan_cookbook_models(sglang_repo: str, since_date: str = "2026-05-01") -> li
             for pattern in patterns:
                 matches = re.findall(pattern, text)
                 for m in matches:
-                    if not m.startswith("/") and "/" in m and not m.startswith("$"):
-                        model_ids.add(m.strip(chr(39) + chr(34)))
+                    norm = _normalize_model_id(m)
+                    if norm:
+                        model_ids.add(norm)
 
             # Pattern 2: href links
             href_matches = re.findall(r'huggingface\.co/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)', text)
             for m in href_matches:
-                if not any(x in m.lower() for x in ["/docs", "/datasets", "/blog", "/settings", "/license"]):
-                    model_ids.add(m)
+                norm = _normalize_model_id(m)
+                if norm:
+                    model_ids.add(norm)
 
             # Pattern 3: model="org/model"
             model_eq = re.findall(r'model=["\']([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)["\']', text)
             for m in model_eq:
-                model_ids.add(m)
+                norm = _normalize_model_id(m)
+                if norm:
+                    model_ids.add(norm)
 
     # Also scan jsx config files
     for jsx_dir in [repo / "docs/src/snippets/configs", repo / "docs_new/src/snippets/configs"]:
@@ -130,8 +194,9 @@ def scan_cookbook_models(sglang_repo: str, since_date: str = "2026-05-01") -> li
                 continue
             jsx_matches = re.findall(r'["\']([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+-[A-Za-z0-9]+)["\']', jsx_text)
             for m in jsx_matches:
-                if not any(x in m.lower() for x in [".css", ".js", ".jsx", ".png", ".svg"]):
-                    model_ids.add(m)
+                norm = _normalize_model_id(m)
+                if norm:
+                    model_ids.add(norm)
 
     return sorted(model_ids)
 
@@ -305,8 +370,12 @@ def save_models_yaml(data: dict) -> None:
         model_name = hf_id.split("/")[-1] if "/" in hf_id else hf_id
         arch = val.get("arch", "unknown")
         prec = val.get("default_precision", "unknown")
-        # Comment divider
-        lines.append(f"  # ── {key}: {model_name} ({arch}, {prec}) ─" + "─" * 20)
+        # Comment divider; auto/unreviewed cards get a visible tag so the yaml is
+        # greppable for cards still needing manual completion.
+        tag = ""
+        if val.get("source") == "auto" or val.get("needs_review"):
+            tag = " [AUTO needs_review]"
+        lines.append(f"  # ── {key}: {model_name} ({arch}, {prec}){tag} ─" + "─" * 20)
         # Dump this single model entry
         single = {key: val}
         dumped = yaml.dump(single, default_flow_style=False, allow_unicode=True, sort_keys=False, indent=2)
@@ -382,11 +451,11 @@ def extract_default_flags_from_cookbook(mdx_path: Path) -> dict[str, Any]:
     # reasoning-parser
     m = re.search(r'--reasoning-parser\s+(\S+)', text)
     if m:
-        flags["reasoning-parser"] = m.group(1).strip('\"')
+        flags["reasoning-parser"] = _clean(m.group(1))
     # tool-call-parser
     m = re.search(r'--tool-call-parser\s+(\S+)', text)
     if m:
-        flags["tool-call-parser"] = m.group(1).strip('\"')
+        flags["tool-call-parser"] = _clean(m.group(1))
     # trust-remote-code
     if "--trust-remote-code" in text:
         flags["trust-remote-code"] = True
@@ -403,7 +472,13 @@ def extract_mtp_params_from_cookbook(mdx_path: Path) -> dict[str, Any]:
     # speculative-algorithm
     m = re.search(r'--speculative-algorithm\s+(\S+)', text)
     if m:
-        params["speculative-algorithm"] = m.group(1).strip('\"')
+        params["speculative-algorithm"] = _clean(m.group(1))
+    # speculative-draft-model-path (draft-model algos like DSPARK hard-require this)
+    m = re.search(r'--speculative-draft-model-path[=\s]+(\S+)', text)
+    if m:
+        dp = _normalize_model_id(m.group(1))
+        if dp:
+            params["speculative-draft-model-path"] = dp
     # speculative-num-steps
     m = re.search(r'--speculative-num-steps\s+(\d+)', text)
     if m:
@@ -481,6 +556,8 @@ def generate_new_model_card(hf_id: str, info: dict, sglang_repo: str = "") -> di
         arch = "dense"
 
     card: dict[str, Any] = {
+        "source": "auto",          # provenance: machine-generated, not hand-verified
+        "needs_review": True,       # a human must confirm flags/params before trusting
         "last_updated": datetime.now().strftime("%Y-%m-%d"),
         "hf_model_id": hf_id,
         "family": model_name.split("-")[0].lower(),
@@ -600,7 +677,7 @@ def generate_new_model_card(hf_id: str, info: dict, sglang_repo: str = "") -> di
         "model_path": None,  # fill after haihub download
     }
 
-    card["source"] = f"https://huggingface.co/{hf_id}"
+    card["source_url"] = f"https://huggingface.co/{hf_id}"
     card["notes"] = f"Auto-synced from HF config.json + SGLang cookbook."
 
     return card
@@ -651,8 +728,11 @@ def save_diff_report(all_diffs: dict[str, list[str]], new_models: list[str]) -> 
              "Auto-generated by sync_hf_models.py\n\n"]
     if new_models:
         lines.append(f"## New Models Discovered ({len(new_models)})\n")
+        lines.append("Each was added to models.yaml as an `[AUTO needs_review]` card "
+                     "(`source: auto`, `needs_review: true`). Confirm default_flags / "
+                     "mtp_params / hybrid_mamba before trusting.\n")
         for m in new_models:
-            lines.append(f"- {m} — added to models.yaml as [AUTO] card, needs manual completion")
+            lines.append(f"- {m}")
         lines.append("")
     has_diffs = False
     for hf_id, diffs in all_diffs.items():
@@ -734,6 +814,19 @@ def main(argv: list[str] | None = None) -> int:
             for mk, mv in models.items():
                 if mv.get("hf_model_id") == hf_id:
                     updated = False
+                    # Self-heal already-dirty flag/param values (stray backticks
+                    # etc). The has_real_flags guard below treats a dirty value as
+                    # "real" and won't re-fetch, so existing pollution never heals
+                    # unless we clean it in place here.
+                    for _obj_key in ("default_flags", "mtp_params"):
+                        _obj = mv.get(_obj_key)
+                        if isinstance(_obj, dict):
+                            for _k, _v in list(_obj.items()):
+                                _cv = _clean(_v)
+                                if _cv != _v:
+                                    _obj[_k] = _cv
+                                    updated = True
+                                    print(f"    [cleaned] {_obj_key}.{_k}: {_v!r} -> {_cv!r}")
                     # Update hybrid_mamba from has_gdn
                     has_gdn = hf_info.get("has_gdn", False)
                     if has_gdn and not mv.get("hybrid_mamba"):
