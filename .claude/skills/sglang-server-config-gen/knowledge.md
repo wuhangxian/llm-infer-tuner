@@ -140,8 +140,8 @@
 | `--max-running-requests` | `[8, 16, 32]` | judgment | 适用长输入(60k+);BBuf 的 [64,96,128] 是 8k dataset,不可直接迁 |
 | `--kv-cache-dtype` | `[auto, fp8_e4m3]` | measured | 长输入 KV 是主瓶颈,fp8 腰斩 kv/token;需配精度验证 |
 | `--schedule-conservativeness` | `[0.3, 1.0, 1.3]` | official | 官方唯一给出闭环判据的调度参数(见 §6) |
-| `--page-size` | `[1, 32, 64]` | official | KV cache 分页大小,调大减少页表管理开销(尤其 MoE 高并发)。**按 attention 后端联动生成,非独立铺**:flashinfer/triton → 只生成 [1](调大无收益,SGLang 不强制改写);mamba `no_buffer` → 只生成 [1](`no_buffer`+radix cache 强制 page_size=1);mamba `extra_buffer` → 只生成 [64](`FLA_CHUNK_SIZE(64) % page_size == 0` 硬约束);trtllm_mha → [16,32,64](但 SM120 用不了 trtllm_mha)。cookbook 证据:Qwen3-Coder MoE 推荐 32,DeepSeek-V3.2 用 64/128。⚠️ **版本核对**:换 SGLang 版本时需核对 `server_args.py` 中 `_handle_page_size` 及后端约束是否变化 |
-| `--mamba-radix-cache-strategy` | 暂不搜索 | official | **TODO: 暂用 SGLang 默认值 `no_buffer`,不生成此轴的候选**。原因:① SGLang 默认 `auto`→`no_buffer`,源码注释说 extra_buffer "needs more verification";② cookbook 用的参数名 `--mamba-radix-cache-strategy` 与 SGLang CLI 实际参数名 `--mamba-scheduler-strategy` 不一致,需确认;③ extra_buffer 几乎全好处(cookbook: 非KV-bound场景严格优于no_buffer),但显存代价和 KV-bound 场景的并发下降需实测。**后续启用时**:确认 CLI 参数名 → 改成首选 extra_buffer + no_buffer 对照 → 补 `--disable-overlap-schedule` 约束(no_buffer必须配) |
+| `--page-size` | `[1, 32, 64]` | official | KV cache 分页大小,调大减少页表管理开销(尤其 MoE 高并发)。**按 attention 后端联动生成,非独立铺**:flashinfer/triton → 只生成 [1](调大无收益,SGLang 不强制改写);mamba `no_buffer` → 只生成 [1](`no_buffer`+radix cache 强制 page_size=1);trtllm_mha → [16,32,64](但 SM120 用不了 trtllm_mha)。(注:`extra_buffer` 那档 [64] 已随 extra_buffer 被 §5 彻底排除,不再生成。)cookbook 证据:Qwen3-Coder MoE 推荐 32,DeepSeek-V3.2 用 64/128。⚠️ **版本核对**:换 SGLang 版本时需核对 `server_args.py` 中 `_handle_page_size` 及后端约束是否变化 |
+| `--mamba-radix-cache-strategy` | **不搜索,恒 `no_buffer`** | official+judgment | **此轴不铺候选,固定用 `no_buffer`**。原因:① §4 无条件钉死关 radix,而唯一的另一档 `extra_buffer` 硬依赖 radix cache(关 radix 即启动 ValueError),已在 §5 彻底排除 → 该轴只剩 `no_buffer` 一个合法值,没有可搜的第二档;② SGLang 默认 `auto`→`no_buffer`,与本口径一致;③ `no_buffer` 本就强制 page_size=1 且关 overlap scheduler。故 mamba 策略**不是搜索轴**,不进候选数计算(§6.2)。 |
 | `--speculative-algorithm` | `[无, EAGLE]` | official | **仅 `capabilities.supports_mtp: true` 模型生成**。「无」是对照基线(不写这组 flag);EAGLE 从 `mtp_params` 取配套值(`num-steps`/`eagle-topk`/`num-draft-tokens`)。cookbook 5/7 Qwen 模型推荐,延迟可降 2-3 倍。放 §6 F 阶段搜,先跑通非投机基线。⚠️ **只默认铺 EAGLE/NEXTN 这类自带 MTP 权重的算法**;DSPARK 等需外挂 draft 模型的算法**必须**在卡里配 `speculative-draft-model-path` 才可发,否则启动即崩(见 §5 draft-model 排除项) |
 
 **kv-cache-dtype 按算力过滤**(`source` v0.5.10):choices=`[auto, fp8_e5m2, fp8_e4m3, bf16, fp4_e2m1]`;`fp8_*` 无 SM 门槛(CUDA 11.8+),`fp4_e2m1` 需 CUDA≥12.8 + PyTorch 2.8.0+。默认池保守取 `[auto, fp8_e4m3]`,更激进精度要搜在 job 里显式给。
@@ -162,7 +162,7 @@
 
 ## 4. 固定不搜的参数(pin)
 
-- `--disable-radix-cache`(即 `disable_radix_cache: true`)— `judgment`。**默认每个候选都 pin**,关闭 prefix/radix cache 测纯推理性能。理由:① 压测用 `random-ids` + `--random-range-ratio 1.0` + 固定 seed,同一并发档复测会生成**完全相同**的 prompt,radix cache 会命中前缀让第二次 prefill 几乎白嫖,ttft 断崖式下降,**污染吞吐/延迟对比**(复测比首测"变快"是缓存作弊,不是配置更好);② W04 等独立请求(无共享前缀)radix 命中率≈0,开着只增显存/页表开销。**例外**:仅当 workload 明确声明大量共享前缀(AI-coding 同 codebase / 同 system prompt)时才不 pin,与 `--schedule-policy lpm` 联动。执行器已支持:候选带 `disable_radix_cache: true` 会自动拼成 `--disable-radix-cache`。
+- `--disable-radix-cache`(即 `disable_radix_cache: true`)— `judgment`。**无条件钉死:每个候选都 pin,任何 workload、任何时候都关 radix/prefix cache,没有例外。** 理由:① 压测用 `random-ids` + `--random-range-ratio 1.0` + 固定 seed,同一并发档复测会生成**完全相同**的 prompt,radix cache 会命中前缀让第二次 prefill 几乎白嫖,ttft 断崖式下降,**污染吞吐/延迟对比**(复测比首测"变快"是缓存作弊,不是配置更好);② 独立请求 radix 命中率≈0,开着只增显存/页表开销;③ 团队定论:寻优只认纯推理性能,缓存收益是上线层的事、不进候选对比。执行器已支持:候选带 `disable_radix_cache: true` 会自动拼成 `--disable-radix-cache`。**连带**:任何硬依赖 radix cache 的策略(如 mamba `extra_buffer`,靠 radix 存 Mamba 状态)与本条冲突 → **彻底排除、永不生成**(见 §5、§7)。
 - `--schedule-policy lpm` — `official`。官方原文 "If the workload has many shared prefixes, try `--schedule-policy lpm`"。**仅当 workload 有大量共享前缀时 pin**(AI-coding 同 codebase / 同 system prompt 场景符合)。**若请求前缀不共享(如 random 独立请求),用默认 fcfs,不要 pin lpm。**
 - 模型专属 flag(`reasoning-parser` / `tool-call-parser` / `trust-remote-code`)从 `catalogs/models.yaml` 的 `default_flags` 原样取,别自己编 parser 名。
 
@@ -179,7 +179,8 @@
 | `--speculative-algorithm` + `supports_mtp: false` | official | 模型没有 MTP 权重(`mtp.safetensors`),启动直接报错 |
 | `--speculative-algorithm`(DSPARK / 任何 dense-draft 算法)不带 `--speculative-draft-model-path` | source | DSPARK 等 draft-model 类算法**硬依赖**外部 draft 权重路径,缺则启动即崩:`ValueError: DSpark dense speculative decoding requires setting --speculative-draft-model-path`。**只有 EAGLE/NEXTN 这类自带 MTP 权重的算法可裸发**(draft 就在主权重里);凡是需要外挂 draft 模型的算法,models.yaml 卡里 `mtp_params` 未同时声明 `speculative-draft-model-path` 时,一律不发该投机候选,回落非投机基线 |
 | `--mamba-radix-cache-strategy` + `hybrid_mamba: false` | official | 非 GDN 模型没有 mamba 层,参数被忽略,等于白跑 |
-| `--mamba-radix-cache-strategy extra_buffer` + `--page-size != 64` | source | `FLA_CHUNK_SIZE(64) % page_size != 0` → 启动报错 |
+| `--mamba-radix-cache-strategy extra_buffer`(**任何情况**) | judgment+source | **彻底排除、永不生成**。§4 无条件 pin `--disable-radix-cache`,而 extra_buffer 硬依赖 radix cache 存 Mamba 状态,`extra_buffer` + `--disable-radix-cache` → 启动 ValueError(见 §7)。hybrid_mamba 的 mamba 策略只用 `no_buffer`。**别再生成 extra_buffer 候选**(之前 baseline 用 extra_buffer+radix off 启动崩,即此) |
+| `--mamba-radix-cache-strategy extra_buffer` + `--page-size != 64` | source | `FLA_CHUNK_SIZE(64) % page_size != 0` → 启动报错(已被上一行整体排除,保留仅作说明) |
 | `--mamba-radix-cache-strategy no_buffer` + `--page-size != 1` | source | `no_buffer`+radix cache 强制 `page_size=1`,写了别的会被忽略或报错 |
 | `--page-size` 值不在 attention 后端的允许集 | source | SGLang 不报错但自动改写并打 warning(如 flashinfer+page_size=64 不会报错但无收益;trtllm_mha+page_size=1 会被改成 64)。生成期只放后端认可的值,避免被改写后行为不可预期 |
 | `--chunked-prefill-size -1` | judgment | 关闭 chunked prefill,长输入峰值激活会爆(有生产用过,非普适,可手工 A/B 一次) |
@@ -198,7 +199,7 @@
 | 等级 | 维度 | 影响幅度 |
 |---|---|---|
 | 高影响 | TP、投机解码、attention | 投机解码延迟降 2-3 倍;TP 决定通信开销和显存利用率;attention 影响吞吐 10-30% |
-| 中影响 | mem-fraction、mamba 策略 | mem-fraction 撑高并发上限;mamba 策略影响 overlap 吞吐 |
+| 中影响 | mem-fraction | mem-fraction 撑高并发上限(mamba 策略恒 no_buffer 不搜,见 §3/§5/§7) |
 | 低影响 | chunked-prefill、schedule-conservativeness、kv-cache-dtype | 影响 5-15%,有剩余名额才铺 |
 
 ### 6.2 最优候选数计算
@@ -217,13 +218,13 @@
 - TP=[1,2,4]=3 (TP8 块量化约束砍掉)
 - 投机解码=[无,EAGLE]=2
 - attention=[flashinfer,triton]=2
-- mem-fraction=[0.84,0.88,0.92]=3
-- mamba=[no_buffer,extra_buffer]=2
-- chunked-prefill=[4096,8192,16384]=3
+- mem-fraction=[0.78,0.82,0.86]=3 (hybrid_mamba 覆盖档,见 §3a)
+- mamba=**恒 no_buffer,不搜**(extra_buffer 已彻底排除,§5/§7)→ **不进候选数计算**
+- chunked-prefill=[4096,8192]=2 (hybrid_mamba 覆盖档,见 §3a)
 - schedule=[0.3,1.0,1.3]=3
 - kv-cache=[auto,fp8_e4m3]=2
 
-基线 1 + 高影响独立 (2+1+1=4) + 交叉 (2×2=4) + 中影响 (3+2=5) + 低影响 (3+3+2=8) = 22
+基线 1 + 高影响独立 (2+1+1=4) + 交叉 (2×2=4) + 中影响 (mem-fraction 3,mamba 不搜) + 低影响 (2+3+2=7) = 19
 
 如果 max_candidates=16 < 22,按§6.3 截断。
 
@@ -236,7 +237,7 @@
 | 类别 | 占比 | 填充顺序 |
 |---|---|---|
 | 高影响 | 60% | 先 TP(不同值各1条)→ 再投机解码(开/关×不同TP交叉)→ 再attention(triton) |
-| 中影响 | 30% | mem-fraction(上下界各1)、mamba(两分支各1) |
+| 中影响 | 30% | mem-fraction(上下界各1);mamba **不搜**(恒 no_buffer,不占名额) |
 | 低影响 | 10% | 有剩余才铺,每个维度 1-2 个值 |
 
 ### 6.4 交叉优先级
@@ -253,24 +254,17 @@
 qwen3.6(`hybrid_mamba: true`)适用。
 
 **约束**:
-- `no_buffer` + radix cache → 强制 page_size=1 且关 overlap scheduler
-- `extra_buffer` 必须配 `--page-size 64`
-- `extra_buffer` + `--disable-radix-cache` → ValueError(extra_buffer 依赖 Radix Cache 存 Mamba 状态,关了没地方存。用 `no_buffer` 替代)
-- 投机解码 + `no_buffer` + `--disable-radix-cache` → **合法**(不冲突,源码无此约束)
-- 投机解码 + `extra_buffer` → **合法**(但 §4 pin 了 `--disable-radix-cache`,所以 extra_buffer 不能用,投机解码候选用 `no_buffer` 即可)
+- **mamba 缓存策略只用 `no_buffer`,不搜 `extra_buffer`**。因为 §4 无条件 pin `--disable-radix-cache`,而 `extra_buffer` + `--disable-radix-cache` → 启动 ValueError(extra_buffer 依赖 Radix Cache 存 Mamba 状态,关了没地方存)。extra_buffer 已在 §5 **彻底排除、永不生成**。
+- `no_buffer` + `--disable-radix-cache` → **合法**,且 `no_buffer` 本就强制 page_size=1 并关 overlap scheduler(与我们钉死关 radix 的口径天然一致)。
+- 投机解码 + `no_buffer` + `--disable-radix-cache` → **合法**(源码 server_args.py 无冲突),投机解码候选用 `no_buffer` 正常生成。
 
-**为什么两分支都要测**:extra_buffer 在非 KV-bound 场景更优;KV-bound 场景要权衡 overlap 收益 vs 并发下降。长输入正是 KV-bound,两分支必须实测对冲。但 §4 pin 了 `--disable-radix-cache` 后,extra_buffer 不可用,只保留 `no_buffer`。
-
-**与投机解码的交互**(§3 `--speculative-algorithm`):
-- 投机解码 + `no_buffer` + `--disable-radix-cache` → **合法组合**(源码 server_args.py 无冲突)。
-- 投机解码 + `extra_buffer` + `--disable-radix-cache` → ValueError(§5 已排除)。
-- 因此:在 §4 pin 了 `--disable-radix-cache` 的情况下,投机解码候选用 `no_buffer`,正常生成,不受限制。
+> 注:extra_buffer 在非 KV-bound 场景理论上更优,但它与"钉死关 radix"的硬约束直接冲突(靠 radix 存 Mamba 状态),故本项目一律不测;寻优只在 `no_buffer` + radix off 的口径下比。
 
 **mamba ratio(`--mamba-full-memory-ratio`,默认 0.9)不该盲扫——有公式**:`r* ≈ S · token_equiv · dcp_size / L`。参考:L=64K→r≈0.31,L=128K→r≈0.16。S 由 cache strategy 决定(extra_buffer overlap 开→S=5,extra_buffer_lazy→S=4)。**strategy 和 ratio 不正交,别当独立笛卡尔积扫。** L≈60k 时 r*≈0.31,盲扫 0.5/0.9 会整段落在 KV-bound 区。
 - 逃生:L 很长时 r* 会低到状态池装不下一个请求,改 pin `--max-mamba-cache-size = 目标并发 × S`,别用 sub-0.15 的 r。
 - 免费杠杆优先:启动日志显示大量闲置显存时,先提 mem-fraction 再动 split。⚠️ **但混合架构上界是 0.86 不是 0.92**(见 §3a):SSM 状态池分配在 mem-fraction 池外,启动日志看到的"闲置显存"其实要留给 SSM 池,提到 0.92 会在 capture 期崩。所谓"闲置"对 hybrid_mamba 是假象。
 
-> 本 case(qa-chat-3.5k-1k,输入仅 3500)**不是长上下文**,mamba 池压力小;混合架构缓存策略仍值得 A/B,但 ratio 公式的极端逃生场景用不到。
+> 本 case(qa-chat-3.5k-1k,输入仅 3500)**不是长上下文**,mamba 池压力小;缓存策略恒 `no_buffer`(不 A/B extra_buffer,见上),ratio 公式的极端逃生场景也用不到。
 
 ---
 

@@ -73,9 +73,10 @@ description: 输入一个固定 JSON(JobSpec:机型/模型/镜像/负载/SLA/预
    - PP 恒 1(单机排除 pp>1)。
    - EP:仅 MoE 生成;dense 模型(如 qwen36-27b)**不生成 ep 轴**。
 4. **铺搜索轴**(`knowledge.md §3`):mem-fraction / chunked-prefill / max-running-requests / kv-cache-dtype / schedule-conservativeness,按默认档;按算力/CUDA 过滤搜不了的值。
-5. **pin 与排除**(`knowledge.md §4-5`):**每个候选默认 pin `disable_radix_cache: true`**(测纯推理性能,防复测缓存命中污染对比;仅共享前缀 workload 才不 pin);模型 default_flags 原样取;lpm 仅共享前缀场景;排除项不生成。
+5. **pin 与排除**(`knowledge.md §4-5`):**每个候选无条件 pin `disable_radix_cache: true`**(任何 workload、任何时候都关 radix/prefix cache,没有例外——测纯推理性能,防复测缓存命中污染对比);模型 default_flags 原样取;lpm 仅共享前缀场景;排除项不生成。
+   - **无条件连带**:`--mamba-radix-cache-strategy extra_buffer` 硬依赖 radix cache 存 Mamba 状态,与钉死关 radix 冲突 → **彻底排除、永不生成**;mamba 策略恒用 `no_buffer`(见 §5/§7)。
    - **本 case workload=qa-chat 请求独立 → 用默认 fcfs,不 pin lpm;pin `disable_radix_cache: true`。**
-6. **混合架构**(`knowledge.md §7`):qwen3.6 `hybrid_mamba` → 缓存策略两分支值得 A/B(输入仅 3.5k 非长上下文,ratio 极端逃生用不到)。
+6. **混合架构**(`knowledge.md §3a/§7`):qwen3.6 `hybrid_mamba` → mamba 策略**恒 no_buffer 不搜**(extra_buffer 已排除);mem-fraction 上界压到 **0.86**、chunked-prefill 上界 **8192**(SSM 状态池在 mem-fraction 池外,沿用 dense 的 0.92/16384 会 capture 期崩)。
 7. **绝不写 `--context-length`**(`knowledge.md §0`)。
 8. **组装候选**:笛卡尔积后按 `search.max_candidates` 截断(基线优先:先出低风险基线,再铺高风险轴);每条给 server_command + 分并发 benchmark_commands + reasons + expected_risk。
 
