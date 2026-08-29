@@ -78,13 +78,13 @@ claude --version
 # 默认 agent=tclaude,默认模型 claude-hy3(腾讯内网)
 ./gen_configs.sh input/jobs/<job>.json
 
-# 用公开 claude CLI(非腾讯员工):不指定 --model 时用 claude 自身默认模型
-./gen_configs.sh --agent claude input/jobs/<job>.json
-./gen_configs.sh --agent claude --model claude-opus-4-8 input/jobs/<job>.json
-
 # 仍用 tclaude,临时选择其他网关模型
 ./gen_configs.sh --model claude-opus-4-8 input/jobs/<job>.json
 ./gen_configs.sh --model 'claude-glm-5.2[1m]' input/jobs/<job>.json
+
+# 用公开 claude CLI(非腾讯员工):不指定 --model 时用 claude 自身默认模型
+./gen_configs.sh --agent claude input/jobs/<job>.json
+./gen_configs.sh --agent claude --model claude-opus-4-8 input/jobs/<job>.json
 ```
 
 > `--agent tclaude|claude` 选用哪个 CLI(默认 `tclaude`)。两者命令行契约一致
@@ -94,9 +94,16 @@ claude --version
 
 AI 读 knowledge.md + catalogs(gpu/models/workloads/images),推导 TP/attention/mem-fraction/投机解码等参数,生成候选配置到 `outputs/<job_id>/configs.jsonl`。
 
-#### tclaude 超时与重试防护
+#### 超时与重试防护(tclaude / claude 都生效)
 
-`gen_configs.sh` 默认给每次 tclaude 调用设置 600 秒软超时。超时后先终止本次 tclaude 进程组，再使用**同一个模型和完全相同的参数重试 1 次**；不会自动切换到 Opus 或其他模型。第二次仍超时会以退出码 `124` 结束，按 `Ctrl-C` 会清理子进程并以 `130` 结束。
+这层防护由通用守护器 `runners/tclaude_guard.py` 实现,它包住的是 `--agent` 选中的 CLI 命令本身,**不区分 tclaude 还是公开 claude**——两者享受完全相同的超时、重试与信号清理(文件名叫 tclaude_guard 只是历史命名)。所以 `--agent claude` 的调用同样受保护:
+
+```bash
+# 公开 claude 也有超时重试;把单次软超时调到 15 分钟
+GEN_TIMEOUT_SECONDS=900 ./gen_configs.sh --agent claude input/jobs/<job>.json
+```
+
+`gen_configs.sh` 默认给每次 CLI 调用设置 600 秒软超时。超时后先终止本次 CLI 进程组,再使用**同一个 agent、同一个模型、完全相同的参数重试 1 次**;不会自动切换到 Opus 或其他模型、也不会在 tclaude 与 claude 之间切换。第二次仍超时会以退出码 `124` 结束,按 `Ctrl-C` 会清理子进程并以 `130` 结束。
 
 ```bash
 # 单次软超时改为 15 分钟
