@@ -162,6 +162,7 @@
 
 ## 4. 固定不搜的参数(pin)
 
+- `--disable-radix-cache`(即 `disable_radix_cache: true`)— `judgment`。**默认每个候选都 pin**,关闭 prefix/radix cache 测纯推理性能。理由:① 压测用 `random-ids` + `--random-range-ratio 1.0` + 固定 seed,同一并发档复测会生成**完全相同**的 prompt,radix cache 会命中前缀让第二次 prefill 几乎白嫖,ttft 断崖式下降,**污染吞吐/延迟对比**(复测比首测"变快"是缓存作弊,不是配置更好);② W04 等独立请求(无共享前缀)radix 命中率≈0,开着只增显存/页表开销。**例外**:仅当 workload 明确声明大量共享前缀(AI-coding 同 codebase / 同 system prompt)时才不 pin,与 `--schedule-policy lpm` 联动。执行器已支持:候选带 `disable_radix_cache: true` 会自动拼成 `--disable-radix-cache`。
 - `--schedule-policy lpm` — `official`。官方原文 "If the workload has many shared prefixes, try `--schedule-policy lpm`"。**仅当 workload 有大量共享前缀时 pin**(AI-coding 同 codebase / 同 system prompt 场景符合)。**若请求前缀不共享(如 random 独立请求),用默认 fcfs,不要 pin lpm。**
 - 模型专属 flag(`reasoning-parser` / `tool-call-parser` / `trust-remote-code`)从 `catalogs/models.yaml` 的 `default_flags` 原样取,别自己编 parser 名。
 
