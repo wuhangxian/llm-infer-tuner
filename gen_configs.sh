@@ -16,6 +16,10 @@
 # 第二步由 targets.json 填入。故 configs.jsonl 机器无关,可跨机搬运。
 set -euo pipefail
 
+# 记录整个脚本的墙钟起点(从这里到第 6 步预览完的总耗时)。
+# 用 bash 内置 SECONDS:赋 0 即从此刻开始按秒累计,零依赖、不受子进程影响。
+SECONDS=0
+
 usage() {
   echo "用法: ./gen_configs.sh [--agent tclaude|claude] [--model MODEL] <job.json> [out.json]" >&2
 }
@@ -517,3 +521,12 @@ jq -r '.candidates[] |
   "  sched=" + (.params.schedule_conservativeness // .params["schedule-conservativeness"] // "1.0(default)" | tostring) +
   "  radix=off"
 ' "$OUT" >&2
+
+# 整个脚本墙钟耗时(从文件头 SECONDS=0 到此刻),纯展示、不写进 configs.jsonl。
+# 大于 60s 时补一个「Xm Ys」的人类可读形式,方便一眼看出几分钟。
+GEN_ELAPSED="$SECONDS"
+if [ "$GEN_ELAPSED" -ge 60 ]; then
+  echo "⏱  生成耗时 ${GEN_ELAPSED}s ($((GEN_ELAPSED / 60))m $((GEN_ELAPSED % 60))s,含前置检查/AI推导/落盘/预览全流程)" >&2
+else
+  echo "⏱  生成耗时 ${GEN_ELAPSED}s(含前置检查/AI推导/落盘/预览全流程)" >&2
+fi
