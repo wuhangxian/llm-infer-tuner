@@ -10,12 +10,13 @@ from pathlib import Path
 from typing import Any
 
 # 默认用哪个 Claude Code CLI 生成压测命令。
-#   claude(默认)—— 公开 CLI,任何有 claude 登录/API key 的人可用
-#   tclaude      —— 腾讯内网 CLI
+#   tclaude(默认)—— 腾讯内网 CLI,与 L1 gen_configs.sh 的默认保持一致
+#   claude        —— 公开 CLI,任何有 claude 登录/API key 的人可用
 # 命令行契约一致(tclaude 内嵌 @anthropic-ai/claude-code),故只切 binary 名即可。
-# 通过环境变量 BENCH_AGENT / LLM_INFER_AGENT 覆盖(优先 BENCH_AGENT)。
+# 通过环境变量 BENCH_AGENT / LLM_INFER_AGENT 覆盖(优先 BENCH_AGENT);
+# run_executor.sh 的 --agent 会写进 BENCH_AGENT,故命令行选择优先于此默认。
 def _default_executable() -> str:
-    return os.environ.get("BENCH_AGENT") or os.environ.get("LLM_INFER_AGENT") or "claude"
+    return os.environ.get("BENCH_AGENT") or os.environ.get("LLM_INFER_AGENT") or "tclaude"
 
 CompletedProcess = subprocess.CompletedProcess[str]
 Runner = Callable[..., CompletedProcess]
