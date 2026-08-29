@@ -75,6 +75,7 @@ class _FakeContainer:
         self.current: str | None = None          # candidate whose server is up
         self.alive = False
         self.bench_calls: list[tuple[str, int, int]] = []  # (candidate, C, num_prompts)
+        self.warmup_calls: list[tuple[str, int, int]] = []  # 预热压测(丢弃,不计入搜索)
         # 满载测试要证明「同一并发档打到了 N 个不同副本端口」,单独记录 (candidate, C, port),
         # 不动 bench_calls 的三元组形状(现有用例仍按 (cand, conc, num_prompts) 解包)。
         self.bench_ports: list[tuple[str, int, int]] = []
@@ -143,8 +144,13 @@ class _FakeContainer:
         # 父目录名取,而非共享的 self.current —— 后者在批内并发跑时会被兄弟候选覆盖,
         # 导致压测结果串到错误候选(真实环境每候选独占容器,天然不共享)。
         cand = Path(out_path).parent.name if out_path else (self.current or "unknown")
-        self.bench_calls.append((cand, conc, num_prompts))
-        self.bench_ports.append((cand, conc, _flag_int(parts, "--port")))
+        # 预热压测(结果丢弃、不是搜索 probe)走单独的 warmup_calls,
+        # 不污染 bench_calls —— 现有用例都把 bench_calls 当"真实搜索档序列"。
+        if "_warmup" in Path(out_path).name:
+            self.warmup_calls.append((cand, conc, num_prompts))
+        else:
+            self.bench_calls.append((cand, conc, num_prompts))
+            self.bench_ports.append((cand, conc, _flag_int(parts, "--port")))
 
         cstar = self.cstar.get(cand, 0)
         qualifies = conc <= cstar
@@ -377,6 +383,13 @@ def test_round2_reuses_round1_seeds_no_rebench(tmp_path, workloads_output_len):
                 seen_first_fail = True
         else:
             round2_cs.append(conc)
+
+    # 每个 server(round-1 + round-2 各一次)都应在正式搜索前预热一次,
+    # 且预热用固定小并发 WARMUP_CONCURRENCY(结果丢弃,不进 bench_calls)。
+    assert container.warmup_calls, "server ready 后应至少预热一次"
+    assert all(c == exmod.WARMUP_CONCURRENCY for _cand, c, _np in container.warmup_calls), (
+        f"warmup 应固定用 C={exmod.WARMUP_CONCURRENCY}: {container.warmup_calls}"
+    )
 
     assert round1_cs == [1, 2, 4, 8, 16]  # coarse expansion, no bisection
     # Round 2 must NOT re-bench any C already probed in round 1.

@@ -40,6 +40,7 @@ ROUND2_MAX_PROBES = 14
 ROUND2_CONFIRM = 2      # precise: re-probe boundary passes AND fails (see search module)
 DEFAULT_TOP_K = 5
 DEFAULT_MAX_CAP = 256
+WARMUP_CONCURRENCY = 2  # server ready 后、正式搜索前的预热并发档(结果丢弃,只热 kernel)
 
 DEFAULT_WORKLOADS_PATH = Path(__file__).resolve().parents[1] / "catalogs" / "workloads.yaml"
 
@@ -336,7 +337,12 @@ def _make_evaluate(
     tp_size: int = 1,
     ports: list[int] | None = None,
 ):
-    """Build the evaluate(concurrency) -> RunResult closure the search calls.
+    """Build the (evaluate, warmup) closures the search uses.
+
+    Returns a tuple: ``evaluate(concurrency) -> RunResult`` (the closure the
+    adaptive search calls per probe) and ``warmup(concurrency=WARMUP_CONCURRENCY)
+    -> None`` (a one-shot pre-search benchmark whose result is discarded, run once
+    per server after /health passes to absorb the first-run kernel-compile spike).
 
     ``ports`` 是本候选要同时压的实例端口列表:
     · 缺省(None)= 单实例,只压 ctx.port,instances=1 —— round1 粗筛的原行为,逐字不变;
@@ -422,7 +428,31 @@ def _make_evaluate(
                 candidate_id, f"evaluate raised at C={concurrency}: {exc!r}"
             )
 
-    return evaluate
+    def warmup(concurrency: int = WARMUP_CONCURRENCY) -> None:
+        """server ready 后、正式并发搜索前跑一次预热压测,结果**丢弃不计入搜索**。
+
+        目的:吸收首次运行的 kernel 编译/JIT 尖峰(见 client knowledge §「丢弃第一条」),
+        让正式 probe 的每一档都从热 kernel 起步,不再出现「首测 ttft 断崖高、复测断崖低」。
+        用固定小并发(WARMUP_CONCURRENCY),整机满载时对所有副本端口各预热一次。
+        因候选默认已 pin `--disable-radix-cache`,预热不会给正式 probe 留下 prefix 缓存,
+        故只热 kernel、不喂缓存,保持各候选/各档横向可比。异常吞掉,预热失败不阻断搜索。
+        """
+        try:
+            for i, port in enumerate(bench_ports):
+                tag = "_warmup" if len(bench_ports) == 1 else f"_warmup_i{i}"
+                _log(
+                    f"      {candidate_id}: warmup C={concurrency} @port{port} "
+                    f"(预热,结果丢弃) ..."
+                )
+                r = _bench_one_port(concurrency, port, tag)
+                _log(
+                    f"      {candidate_id}: warmup done "
+                    f"(ttft={r.mean_ttft_ms:.0f}ms status={r.status},不计入搜索)"
+                )
+        except Exception as exc:  # 预热失败不应阻断正式搜索
+            _log(f"      {candidate_id}: warmup skipped ({exc!r})")
+
+    return evaluate, warmup
 
 
 def _detect_numa_groups(remote: RemoteRunner, gpu_count: int) -> list[list[int]]:
@@ -869,10 +899,11 @@ def _run_candidate(
         else:
             _log(f"[{round_label}] {candidate_id}: server ready, probing concurrency ...")
             tp_size = int(candidate.get("params", {}).get("tp_size", 1))
-            evaluate = _make_evaluate(
+            evaluate, warmup = _make_evaluate(
                 ctx, candidate_id, candidate_dir, tp_size=tp_size,
                 ports=(replica_ports if n_replicas > 1 else None),
             )
+            warmup()  # 正式搜索前预热一次(结果丢弃,吸收 kernel 编译尖峰)
             outcome = search_saturation(
                 evaluate,
                 qualifies,
@@ -979,7 +1010,7 @@ def _preflight_checks(config: ExecutorConfig, remote: RemoteRunner) -> None:
         raise SystemExit(
             f"SSH connection failed: {config.ssh_target}\n{detail}"
         )
-    _log(f"SSH OK: {config.ssh_target}")
+    _log(f"✅ SSH OK: {config.ssh_target}")
 
     # 1.5 强制清场,独占整机(取代原来只清本 job 前缀容器的做法)
     _reclaim_host(config, remote)
@@ -993,7 +1024,7 @@ def _preflight_checks(config: ExecutorConfig, remote: RemoteRunner) -> None:
             f"Model dir not found: {config.model_host_dir}\n{detail}"
         )
     n = len(check_dir.stdout.strip().splitlines())
-    _log(f"Model dir OK: {config.model_host_dir} ({n} files)")
+    _log(f"✅ Model dir OK: {config.model_host_dir} ({n} files)")
 
     # 3. Image
     iq = shlex.quote(config.image_ref)
@@ -1008,9 +1039,9 @@ def _preflight_checks(config: ExecutorConfig, remote: RemoteRunner) -> None:
             raise SystemExit(
                 f"Image pull failed: {config.image_ref}\n{detail}"
             )
-        _log(f"Image pulled: {config.image_ref}")
+        _log(f"✅ Image OK (已拉取到目标机): {config.image_ref}")
     else:
-        _log(f"Image local: {config.image_ref}")
+        _log(f"✅ Image OK (目标机本地已缓存): {config.image_ref}")
 
 
 def _norm_gpu(name: str) -> str:
