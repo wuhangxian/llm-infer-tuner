@@ -504,3 +504,70 @@ def _index_of(summary: dict, candidate_id: str) -> int:
         if row["candidate_id"] == candidate_id:
             return i
     raise AssertionError(f"{candidate_id} not in summary candidates")
+
+
+def test_every_launch_forces_disable_radix_and_no_extra_buffer(tmp_path, workloads_output_len):
+    """硬约束:任何候选、任何来源(cmd/params)启动命令都必须钉死关 radix,
+    且不得带与之冲突的 mamba extra_buffer。复刻用户手写 config 的形状:
+    带 extra_buffer、不带 disable-radix-cache —— 执行器必须自动纠正。"""
+    path = tmp_path / "configs.jsonl"
+    lines = [
+        # (a) cmd 整串,带 extra_buffer,没写 disable-radix —— 你手写 config 渲染后的样子
+        json.dumps({
+            "id": "cand-cmd",
+            "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} "
+                   "--tp-size 1 --mamba-radix-cache-strategy extra_buffer",
+            "reasons": [],
+        }),
+        # (b) params 字典,没写 disable_radix_cache 字段 —— 回落 SGLang 默认(radix 开)
+        json.dumps({
+            "id": "cand-params",
+            "params": {"tp_size": 1, "attention_backend": "flashinfer"},
+            "reasons": [],
+        }),
+        # (c) 手写了 disable_radix_cache=true —— 不能重复拼成两个 flag
+        json.dumps({
+            "id": "cand-already",
+            "params": {"tp_size": 1, "disable_radix_cache": True},
+            "reasons": [],
+        }),
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path),
+        configs_path=path,
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=16,
+        top_k=1,
+        max_cap=256,
+    )
+    remote = _FakeRemote()
+    client = _FakeClient()
+    container = _FakeContainer({"cand-cmd": 2, "cand-params": 2, "cand-already": 2})
+    import runners.executor as exmod
+    original_container = exmod.Container
+    exmod.Container = lambda _remote, _cfg: container
+    try:
+        run_executor(config, remote=remote, client=client)
+    finally:
+        exmod.Container = original_container
+
+    # 只看真正的 server 启动命令(排除 nohup 包装里的副本 env 前缀差异)
+    server_cmds = [c for c in container.launched_cmds if "sglang.launch_server" in c]
+    assert server_cmds, "no server launch command was captured"
+    for cmd in server_cmds:
+        assert cmd.count("--disable-radix-cache") == 1, (
+            f"每条启动命令必须带且仅带一个 --disable-radix-cache,实际:{cmd}"
+        )
+        assert "extra_buffer" not in cmd, (
+            f"启动命令不得含与关 radix 冲突的 extra_buffer,实际:{cmd}"
+        )
+        assert "--disable-radix-cache=" not in cmd, (
+            f"必须是裸 flag,不能是 =true/=false 形式,实际:{cmd}"
+        )

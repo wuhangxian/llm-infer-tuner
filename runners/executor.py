@@ -805,6 +805,32 @@ def _build_cmd_from_params(params: dict, model_path_placeholder: str = "${MODEL_
     return " ".join(parts)
 
 
+def _force_disable_radix_cache(cmd: str) -> str:
+    """无条件钉死关 radix/prefix cache —— 不论候选来自 cmd / cmd_parts / params,
+    也不论 config 有没有手写,最终启动命令都保证带且仅带一个 `--disable-radix-cache`。
+
+    为什么在这里强制、而不是靠 config 写:SGLang 默认 `disable_radix_cache=False`
+    (radix 开着),`_build_cmd_from_params` 又只翻译 params 里【列出】的字段 ——
+    config 漏写 = flag 不拼 = 回落默认 = radix 开着。团队硬约束是「任何测试一律关
+    radix」(固定 seed 复测会命中前缀,prefill 白嫖,ttft 断崖式下降污染对比),
+    故在唯一的命令汇合点统一注入,任何来源都跑不掉。
+
+    连带处理与本约束冲突的 mamba `extra_buffer`:它靠 radix cache 存 Mamba 状态,
+    `extra_buffer` + `--disable-radix-cache` 会启动 ValueError。这里把它改写成
+    `no_buffer`(SGLang 默认、与关 radix 天然兼容),避免旧 config 直接崩在启动。
+    """
+    # 1) 去掉 extra_buffer(空格式或 = 式都覆盖),改成 no_buffer
+    cmd = re.sub(
+        r"--mamba-radix-cache-strategy(=|\s+)extra_buffer",
+        r"--mamba-radix-cache-strategy\1no_buffer",
+        cmd,
+    )
+    # 2) 若已显式写了 --disable-radix-cache(可能带 =true/=false),先全部剥掉,稍后统一补
+    cmd = re.sub(r"\s*--disable-radix-cache(=\S+)?", "", cmd)
+    # 3) 统一在末尾补一个裸 flag
+    return cmd.rstrip() + " --disable-radix-cache"
+
+
 def _run_candidate(
     ctx: _CandidateContext,
     candidate: dict[str, Any],
@@ -832,6 +858,9 @@ def _run_candidate(
     # If no cmd/cmd_parts, build from params dict automatically
     if not cmd and candidate.get("params"):
         cmd = _build_cmd_from_params(candidate["params"], port=ctx.port)
+    # 无条件钉死关 radix/prefix cache（团队硬约束）——不论命令来自 cmd/cmd_parts/params，
+    # 也不论 config 有没有手写，都在此汇合点统一注入，任何来源都跑不掉。
+    cmd = _force_disable_radix_cache(cmd)
     candidate_dir = config.results_dir / candidate_id
     candidate_dir.mkdir(parents=True, exist_ok=True)
 
