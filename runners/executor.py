@@ -373,7 +373,7 @@ def _make_evaluate(
             timestamp=timestamp,
         )
         command = _force_output_file(base_command, result_container_path)
-        _log(f"    {candidate_id}: bench C={concurrency}{tag} @port{port} (num_prompts={num_prompts}) ...")
+        _log(f"    [{candidate_id}] bench C={concurrency}{tag} @port{port} (num_prompts={num_prompts}) ...")
         bench_run = run_benchmark(container, command)
 
         log_name = f"bench_c{concurrency}{tag}_{timestamp}.log"
@@ -417,7 +417,7 @@ def _make_evaluate(
                     replicas = list(pool.map(_one, enumerate(bench_ports)))
                 run_result = _aggregate_replicas(replicas, expected=len(bench_ports))
             _log(
-                f"      C={concurrency}: tput={run_result.total_throughput:.0f} "
+                f"      [{candidate_id}] C={concurrency}: tput={run_result.total_throughput:.0f} "
                 f"(x{run_result.instances}) "
                 f"ttft={run_result.mean_ttft_ms:.0f}ms tpot={run_result.mean_tpot_ms:.1f}ms "
                 f"succ={run_result.success_rate:.2f} status={run_result.status}"
@@ -441,16 +441,16 @@ def _make_evaluate(
             for i, port in enumerate(bench_ports):
                 tag = "_warmup" if len(bench_ports) == 1 else f"_warmup_i{i}"
                 _log(
-                    f"      {candidate_id}: warmup C={concurrency} @port{port} "
+                    f"      [{candidate_id}] warmup C={concurrency} @port{port} "
                     f"(预热,结果丢弃) ..."
                 )
                 r = _bench_one_port(concurrency, port, tag)
                 _log(
-                    f"      {candidate_id}: warmup done "
+                    f"      [{candidate_id}] warmup done "
                     f"(ttft={r.mean_ttft_ms:.0f}ms status={r.status},不计入搜索)"
                 )
-        except Exception as exc:  # 预热失败不应阻断正式搜索
-            _log(f"      {candidate_id}: warmup skipped ({exc!r})")
+        except Exception as exc:  # 预热失败不应阻断搜索
+            _log(f"      [{candidate_id}] warmup skipped ({exc!r})")
 
     return evaluate, warmup
 
