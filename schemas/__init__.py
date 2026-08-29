@@ -1,2 +1,2 @@
-"""Pydantic data contracts used by LLMOptAgent."""
+"""Pydantic data contracts used by llm-infer-tuner."""
 

@@ -1,0 +1,357 @@
+<title>推理参数寻优 Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+  :root{
+    --bg:#eef0f3; --surface:#ffffff; --surface-2:#f6f8fa;
+    --ink:#171c26; --muted:#5b6676; --faint:#8a94a3;
+    --line:#d9dee6; --line-strong:#c3cad4;
+    --ai:#b9741f; --ai-soft:#f3e4d0;
+    --code:#12897c; --code-soft:#d3ece8;
+    --good:#2c9256; --bad:#cf4257;
+    --shadow:0 1px 2px rgba(20,28,40,.06),0 8px 24px rgba(20,28,40,.05);
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --bg:#0d1118; --surface:#151b25; --surface-2:#111721;
+      --ink:#e9edf3; --muted:#96a2b3; --faint:#697588;
+      --line:#25303d; --line-strong:#33404f;
+      --ai:#e0a24a; --ai-soft:#3a2c17;
+      --code:#33c2b1; --code-soft:#12332f;
+      --good:#46c882; --bad:#e46b7c;
+      --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0d1118; --surface:#151b25; --surface-2:#111721;
+    --ink:#e9edf3; --muted:#96a2b3; --faint:#697588;
+    --line:#25303d; --line-strong:#33404f;
+    --ai:#e0a24a; --ai-soft:#3a2c17;
+    --code:#33c2b1; --code-soft:#12332f;
+    --good:#46c882; --bad:#e46b7c;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);
+  }
+
+  *{box-sizing:border-box}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Sans",system-ui,sans-serif;
+    line-height:1.6; margin:0;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1080px; margin:0 auto; padding:clamp(28px,5vw,64px) clamp(18px,4vw,40px) 96px}
+
+  h1,h2,h3{font-family:"Archivo",sans-serif; text-wrap:balance; line-height:1.12; margin:0}
+  .mono{font-family:"IBM Plex Mono",monospace; font-variant-numeric:tabular-nums}
+
+  .eyebrow{
+    font-family:"IBM Plex Mono",monospace; font-size:12px; font-weight:500;
+    letter-spacing:.16em; text-transform:uppercase; color:var(--code);
+    display:flex; align-items:center; gap:10px; margin:0 0 18px;
+  }
+  .eyebrow::before{content:""; width:26px; height:2px; background:var(--code)}
+
+  /* ---------- hero ---------- */
+  header{border-bottom:1px solid var(--line); padding-bottom:38px; margin-bottom:44px}
+  h1{font-size:clamp(34px,6vw,58px); font-weight:800; letter-spacing:-.02em}
+  h1 .accent{color:var(--code)}
+  .lede{font-size:clamp(17px,2.4vw,20px); color:var(--muted); max-width:60ch; margin:20px 0 0}
+  .thesis{
+    margin-top:26px; padding:16px 20px; border-radius:10px;
+    background:var(--surface); border:1px solid var(--line); box-shadow:var(--shadow);
+    font-size:17px; display:flex; flex-wrap:wrap; gap:6px 14px; align-items:baseline;
+  }
+  .thesis b{font-family:"Archivo",sans-serif; font-weight:700}
+  .thesis .ai{color:var(--ai)} .thesis .code{color:var(--code)}
+
+  /* ---------- section ---------- */
+  section{margin-top:56px}
+  h2{font-size:clamp(22px,3.4vw,30px); font-weight:700; letter-spacing:-.01em}
+  .sub{color:var(--muted); margin:10px 0 0; max-width:64ch}
+
+  /* ---------- figure ---------- */
+  figure{margin:28px 0 0}
+  .figcard{
+    background:var(--surface); border:1px solid var(--line);
+    border-radius:14px; padding:clamp(16px,3vw,30px); box-shadow:var(--shadow);
+    overflow-x:auto;
+  }
+  svg{display:block; max-width:100%; height:auto; margin:0 auto}
+  figcaption{color:var(--faint); font-size:13.5px; margin-top:16px; text-align:center; text-wrap:balance}
+
+  /* ---------- legend ---------- */
+  .legend{display:flex; flex-wrap:wrap; gap:8px 22px; margin:22px 0 0; font-size:13.5px; color:var(--muted)}
+  .legend span{display:inline-flex; align-items:center; gap:8px}
+  .dot{width:12px; height:12px; border-radius:3px; flex:none}
+  .dot.ai{background:var(--ai)} .dot.code{background:var(--code)}
+  .dot.io{background:var(--surface); border:1.5px solid var(--line-strong)}
+
+  /* ---------- two-call callout ---------- */
+  .calls{
+    display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:28px;
+  }
+  @media(max-width:640px){.calls{grid-template-columns:1fr}}
+  .call{
+    background:var(--surface); border:1px solid var(--line); border-left:3px solid var(--ai);
+    border-radius:10px; padding:18px 20px; box-shadow:var(--shadow);
+  }
+  .call .n{font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--ai); letter-spacing:.1em}
+  .call h3{font-size:16px; margin:6px 0 6px; font-weight:700}
+  .call p{margin:0; font-size:14px; color:var(--muted)}
+
+  /* ---------- stats ---------- */
+  .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-top:26px}
+  @media(max-width:720px){.stats{grid-template-columns:repeat(2,1fr)}}
+  .stat{background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:18px; box-shadow:var(--shadow)}
+  .stat .v{font-family:"Archivo",sans-serif; font-weight:800; font-size:clamp(24px,4vw,34px); letter-spacing:-.02em; font-variant-numeric:tabular-nums; line-height:1}
+  .stat .v small{font-size:15px; font-weight:600; color:var(--muted); letter-spacing:0}
+  .stat .k{color:var(--muted); font-size:13px; margin-top:8px}
+  .stat.hero-stat .v{color:var(--code)}
+
+  /* ---------- ranking bars ---------- */
+  .bars{margin-top:26px; display:flex; flex-direction:column; gap:0}
+  .barrow{
+    display:grid; grid-template-columns:132px 1fr 96px; gap:14px; align-items:center;
+    padding:9px 0; border-bottom:1px solid var(--line);
+  }
+  .barrow:last-child{border-bottom:none}
+  .barrow .lbl{display:flex; flex-direction:column; gap:2px}
+  .barrow .lbl b{font-family:"IBM Plex Mono",monospace; font-weight:600; font-size:14px}
+  .barrow .lbl span{font-size:11.5px; color:var(--faint)}
+  .track{background:var(--surface-2); border-radius:6px; height:26px; position:relative; overflow:hidden; border:1px solid var(--line)}
+  .fill{height:100%; border-radius:5px 0 0 5px; background:linear-gradient(90deg,var(--code),color-mix(in srgb,var(--code) 60%,var(--surface)))}
+  .fill.win{background:linear-gradient(90deg,var(--code),color-mix(in srgb,var(--code) 78%,#fff))}
+  .fill.zero{background:repeating-linear-gradient(45deg,var(--bad) 0 6px,transparent 6px 12px); opacity:.55; width:6px!important; border-radius:5px}
+  .barval{font-family:"IBM Plex Mono",monospace; font-variant-numeric:tabular-nums; font-weight:600; font-size:14px; text-align:right}
+  .barval.dead{color:var(--bad); font-weight:500; font-size:12.5px}
+  .crown{color:var(--code)}
+
+  /* ---------- principles ---------- */
+  .princ{display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:26px}
+  @media(max-width:640px){.princ{grid-template-columns:1fr}}
+  .p{background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:18px 20px; box-shadow:var(--shadow)}
+  .p h3{font-size:15.5px; font-weight:700; margin-bottom:6px; display:flex; align-items:center; gap:9px}
+  .p h3 .tag{font-family:"IBM Plex Mono",monospace; font-size:11px; color:var(--code); border:1px solid var(--code); border-radius:4px; padding:1px 6px}
+  .p p{margin:0; font-size:14px; color:var(--muted)}
+
+  footer{margin-top:60px; padding-top:22px; border-top:1px solid var(--line); color:var(--faint); font-size:13px}
+  code{font-family:"IBM Plex Mono",monospace; background:var(--surface-2); border:1px solid var(--line); border-radius:4px; padding:1px 6px; font-size:.9em; color:var(--ink)}
+  .ink-ai{color:var(--ai); font-weight:600}
+  .ink-code{color:var(--code); font-weight:600}
+</style>
+
+<div class="wrap">
+
+  <header>
+    <p class="eyebrow">llm-infer-tuner · SGLang 推理部署寻优</p>
+    <h1>大模型推理参数<span class="accent">自动寻优</span> Agent</h1>
+    <p class="lede">给定「模型 × 卡型 × 负载 × SLA」,自动生成一批启动配置,拿到真机压测,在延迟约束内按<b>有效吞吐</b>排名,输出可复现的最佳部署方案。人工调参从「几天试错」压缩到「一次跑通」。</p>
+    <div class="thesis">
+      <b>核心理念:</b>
+      <span><b class="ai">AI 定考什么题</b>,<b class="code">确定性代码当阅卷老师</b>。</span>
+    </div>
+  </header>
+
+  <!-- ============ MAIN FLOW ============ -->
+  <section>
+    <p class="eyebrow">系统全景</p>
+    <h2>两阶段流水线:一次生成,一次实测</h2>
+    <p class="sub">AI 只在两处被调用(下图<span class="ink-ai">琥珀</span>环节);其余起服务、压测、判定、排名全是<span class="ink-code">确定性代码</span>——可复现、可审计、换机器不必重跑 AI。</p>
+
+    <figure>
+      <div class="figcard">
+        <svg viewBox="0 0 1000 470" role="img" aria-label="两阶段流水线:输入的 job 和 target 文件进入阶段一生成配置,产出机器无关的 configs.jsonl,再进入阶段二真机压测,产出 goodput 排名。">
+          <defs>
+            <marker id="ar" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+            </marker>
+            <marker id="ar-ai" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="var(--ai)"/>
+            </marker>
+          </defs>
+
+          <!-- lane labels -->
+          <text x="230" y="26" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="12" letter-spacing="1" fill="var(--ai)">阶段一 · 本地 · 几分钟</text>
+          <text x="760" y="26" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="12" letter-spacing="1" fill="var(--code)">阶段二 · 远程真机 · 较久</text>
+          <line x1="470" y1="42" x2="470" y2="452" stroke="var(--line-strong)" stroke-width="1" stroke-dasharray="3 5"/>
+
+          <!-- INPUTS -->
+          <g font-family="IBM Plex Sans,sans-serif">
+            <rect x="24" y="60" width="200" height="66" rx="9" fill="var(--surface-2)" stroke="var(--line-strong)"/>
+            <text x="124" y="86" text-anchor="middle" font-size="13.5" font-weight="600" fill="currentColor">input/jobs/…json</text>
+            <text x="124" y="106" text-anchor="middle" font-size="11.5" fill="var(--muted)">测什么:模型/卡/负载/SLA</text>
+
+            <rect x="24" y="146" width="200" height="66" rx="9" fill="var(--surface-2)" stroke="var(--line-strong)"/>
+            <text x="124" y="172" text-anchor="middle" font-size="13.5" font-weight="600" fill="currentColor">input/targets/…json</text>
+            <text x="124" y="192" text-anchor="middle" font-size="11.5" fill="var(--muted)">在哪测:SSH/路径/镜像</text>
+          </g>
+
+          <!-- STAGE 1 box (AI) -->
+          <rect x="264" y="60" width="180" height="152" rx="11" fill="var(--ai-soft)" stroke="var(--ai)" stroke-width="1.5"/>
+          <text x="354" y="90" text-anchor="middle" font-family="Archivo,sans-serif" font-size="15" font-weight="700" fill="var(--ai)">gen_configs</text>
+          <text x="354" y="116" text-anchor="middle" font-size="11.5" font-family="IBM Plex Sans" fill="currentColor">AI 读 skill 知识库</text>
+          <text x="354" y="134" text-anchor="middle" font-size="11.5" font-family="IBM Plex Sans" fill="currentColor">+ catalogs 事实表</text>
+          <text x="354" y="158" text-anchor="middle" font-size="11.5" font-family="IBM Plex Sans" fill="var(--muted)">算并行度 · 拼启动命令</text>
+          <text x="354" y="176" text-anchor="middle" font-size="11.5" font-family="IBM Plex Sans" fill="var(--muted)">过 3 道硬校验闸</text>
+          <text x="354" y="198" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="11" fill="var(--ai)">◆ AI 调用 ①</text>
+
+          <!-- arrows input -> stage1 -->
+          <g stroke="currentColor" stroke-width="1.6" fill="none" color="var(--muted)">
+            <path d="M224,93 L258,93" marker-end="url(#ar)"/>
+          </g>
+          <!-- target skips stage1, dashed down to stage2 -->
+          <path d="M124,212 L124,414 L206,414" stroke="var(--muted)" stroke-width="1.4" fill="none" stroke-dasharray="4 4" marker-end="url(#ar)"/>
+
+          <!-- configs.jsonl artifact -->
+          <g>
+            <rect x="290" y="248" width="128" height="70" rx="9" fill="var(--surface)" stroke="var(--ai)" stroke-width="1.5" stroke-dasharray="5 4"/>
+            <text x="354" y="274" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="12.5" font-weight="600" fill="currentColor">configs.jsonl</text>
+            <text x="354" y="292" text-anchor="middle" font-size="11" font-family="IBM Plex Sans" fill="var(--muted)">机器无关候选</text>
+            <text x="354" y="308" text-anchor="middle" font-size="10.5" font-family="IBM Plex Mono" fill="var(--faint)">${MODEL_PATH} 占位</text>
+          </g>
+          <path d="M354,212 L354,244" stroke="var(--ai)" stroke-width="1.6" fill="none" marker-end="url(#ar-ai)"/>
+          <!-- configs cross the divider into stage 2 -->
+          <path d="M418,283 L560,283 L560,150 L596,150" stroke="var(--code)" stroke-width="1.8" fill="none" marker-end="url(#ar)" color="var(--code)"/>
+
+          <!-- STAGE 2 box (deterministic executor) -->
+          <rect x="596" y="60" width="180" height="180" rx="11" fill="var(--code-soft)" stroke="var(--code)" stroke-width="1.5"/>
+          <text x="686" y="88" text-anchor="middle" font-family="Archivo,sans-serif" font-size="15" font-weight="700" fill="var(--code)">executor</text>
+          <text x="686" y="112" text-anchor="middle" font-size="11.5" font-family="IBM Plex Sans" fill="currentColor">SSH + docker 起服务</text>
+          <text x="686" y="132" text-anchor="middle" font-size="11.5" font-family="IBM Plex Sans" fill="currentColor">轮询 /health 就绪</text>
+          <text x="686" y="152" text-anchor="middle" font-size="11.5" font-family="IBM Plex Sans" fill="currentColor">自适应并发 sweep</text>
+          <text x="686" y="172" text-anchor="middle" font-size="11.5" font-family="IBM Plex Sans" fill="currentColor">采指标 · 算 goodput</text>
+          <text x="686" y="196" text-anchor="middle" font-size="11" font-family="IBM Plex Mono,monospace" fill="var(--code)">逐候选循环</text>
+          <text x="686" y="222" text-anchor="middle" font-size="11" font-family="IBM Plex Mono,monospace" fill="var(--ai)">◆ AI 调用 ② 出压测命令</text>
+
+          <!-- ranking output -->
+          <rect x="812" y="98" width="164" height="104" rx="10" fill="var(--surface)" stroke="var(--good)" stroke-width="1.8"/>
+          <text x="894" y="128" text-anchor="middle" font-family="Archivo,sans-serif" font-size="14" font-weight="700" fill="var(--good)">ranking.json</text>
+          <text x="894" y="150" text-anchor="middle" font-size="11.5" font-family="IBM Plex Sans" fill="currentColor">SLA 内 goodput 排名</text>
+          <text x="894" y="170" text-anchor="middle" font-size="11.5" font-family="IBM Plex Sans" fill="currentColor">+ 最优部署配置</text>
+          <text x="894" y="188" text-anchor="middle" font-size="11" font-family="IBM Plex Sans" fill="var(--muted)">可复现 · 可审计</text>
+          <path d="M776,150 L808,150" stroke="var(--good)" stroke-width="1.8" fill="none" marker-end="url(#ar)" color="var(--good)"/>
+
+          <!-- inner loop: sweep detail -->
+          <g font-family="IBM Plex Sans,sans-serif">
+            <rect x="560" y="300" width="416" height="132" rx="10" fill="var(--surface-2)" stroke="var(--line)"/>
+            <text x="580" y="326" font-family="IBM Plex Mono,monospace" font-size="11.5" letter-spacing=".08em" fill="var(--code)">自适应并发 SWEEP — 找 SLA 饱和点 C*</text>
+            <!-- concurrency ramp -->
+            <g font-family="IBM Plex Mono,monospace" font-size="12" font-weight="600" text-anchor="middle">
+              <rect x="580" y="344" width="46" height="30" rx="6" fill="var(--surface)" stroke="var(--line-strong)"/><text x="603" y="364" fill="currentColor">C=1</text>
+              <rect x="634" y="344" width="46" height="30" rx="6" fill="var(--surface)" stroke="var(--line-strong)"/><text x="657" y="364" fill="currentColor">2</text>
+              <rect x="688" y="344" width="46" height="30" rx="6" fill="var(--surface)" stroke="var(--line-strong)"/><text x="711" y="364" fill="currentColor">4</text>
+              <rect x="742" y="344" width="46" height="30" rx="6" fill="var(--surface)" stroke="var(--line-strong)"/><text x="765" y="364" fill="currentColor">8</text>
+              <rect x="796" y="344" width="52" height="30" rx="6" fill="var(--good)" opacity="0.16" stroke="var(--good)"/><text x="822" y="364" fill="var(--good)">16 ✓</text>
+              <rect x="856" y="344" width="52" height="30" rx="6" fill="var(--bad)" opacity="0.12" stroke="var(--bad)"/><text x="882" y="364" fill="var(--bad)">32 ✗</text>
+            </g>
+            <text x="580" y="398" font-size="11.5" fill="var(--muted)">指数扩张冲破天花板 → 二分回收,log₂ 次探针钉住边界</text>
+            <text x="580" y="416" font-size="11.5" fill="var(--muted)">边界噪声对称复检:孤立的 通过/失败 都先复测,防一次运气翻转排名</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption>输入两个文件(测什么 / 在哪测)→ 阶段一生成机器无关候选 → 阶段二真机压测排名。虚线为 target 部署事实直接注入阶段二,不经过 AI。</figcaption>
+
+      <div class="legend">
+        <span><i class="dot ai"></i>AI 出题(读知识库、决策参数)</span>
+        <span><i class="dot code"></i>确定性代码(起服务、压测、排名)</span>
+        <span><i class="dot io"></i>输入 / 产物文件</span>
+      </div>
+    </figure>
+  </section>
+
+  <!-- ============ WHY TRUSTWORTHY ============ -->
+  <section>
+    <p class="eyebrow">为什么可信</p>
+    <h2>AI 灵活出题,代码严格阅卷</h2>
+    <p class="sub">全流程 AI 只被调用两次,且产物都要过确定性校验;所有「谁快谁慢」的判定不含任何 AI 主观打分。</p>
+
+    <div class="calls">
+      <div class="call">
+        <div class="n">AI 调用 ① — 阶段一</div>
+        <h3>生成启动配置候选</h3>
+        <p>读 skill 知识库(调优判据)+ catalogs 事实表(卡算力/模型架构/负载),推导张量并行度、注意力后端、显存占比等,拼出一批候选启动命令,并给出每条选择的理由。</p>
+      </div>
+      <div class="call">
+        <div class="n">AI 调用 ② — 阶段二启动时</div>
+        <h3>生成压测命令模板</h3>
+        <p>按工作负载出 bench_serving 分并发压测命令模板;随后环境变量替换、真机执行、指标解析、SLA 判定、goodput 排名——全部由确定性代码完成。</p>
+      </div>
+    </div>
+
+    <div class="princ">
+      <div class="p"><h3><span class="tag">复现</span>确定性阅卷</h3><p>并发 sweep、SLA 门限、goodput 计算全是纯函数,可离线单测;同输入同输出。</p></div>
+      <div class="p"><h3><span class="tag">审计</span>候选带理由</h3><p>每条候选记录 params/cmd/reasons,为什么选这个 TP、这个后端,白纸黑字可回溯。</p></div>
+      <div class="p"><h3><span class="tag">搬运</span>配置机器无关</h3><p>候选里模型路径是 <code>${MODEL_PATH}</code> 占位符,同一份配置换机器即用,不必重调 AI。</p></div>
+      <div class="p"><h3><span class="tag">扩展</span>加经验=改文本</h3><p>新模型/新卡/新镜像/新判据,只改 catalogs 与 knowledge 文本,生成器代码零改动。</p></div>
+    </div>
+  </section>
+
+  <!-- ============ REAL RESULT ============ -->
+  <section>
+    <p class="eyebrow">一次真实寻优</p>
+    <h2>Qwen3.6-27B-FP8 · Pro5000 ×8 · 问答 3.5k→1k</h2>
+    <p class="sub">16 个候选真机压测,SLA = TTFT≤2000ms / TPOT≤80ms / 成功率≥99%。排名基于<b>整机有效吞吐</b>(单实例吞吐 × 每机实例数),而非不管延迟的峰值吞吐。</p>
+
+    <div class="stats">
+      <div class="stat hero-stat">
+        <div class="v">40 027<small> tok/s</small></div>
+        <div class="k">冠军整机 goodput(c009)</div>
+      </div>
+      <div class="stat">
+        <div class="v">×8</div>
+        <div class="k">每机实例数(TP=1 单卡一实例)</div>
+      </div>
+      <div class="stat">
+        <div class="v">C=32</div>
+        <div class="k">SLA 饱和并发点</div>
+      </div>
+      <div class="stat">
+        <div class="v">2 次</div>
+        <div class="k">全流程 AI 调用总数</div>
+      </div>
+    </div>
+
+    <h3 style="font-size:16px;margin:34px 0 4px;font-family:'Archivo';font-weight:700">整机 goodput 排名(tok/s)</h3>
+    <div class="bars">
+      <div class="barrow">
+        <div class="lbl"><b>c009 <span class="crown">♛</span></b><span>TP1 · ×8 · C=32</span></div>
+        <div class="track"><div class="fill win" style="width:100%"></div></div>
+        <div class="barval">40 027</div>
+      </div>
+      <div class="barrow">
+        <div class="lbl"><b>c013</b><span>TP1 · ×8 · C=15</span></div>
+        <div class="track"><div class="fill" style="width:73.4%"></div></div>
+        <div class="barval">29 383</div>
+      </div>
+      <div class="barrow">
+        <div class="lbl"><b>c014</b><span>TP1 · ×8 · C=15</span></div>
+        <div class="track"><div class="fill" style="width:55.9%"></div></div>
+        <div class="barval">22 372</div>
+      </div>
+      <div class="barrow">
+        <div class="lbl"><b>c016</b><span>TP1 · ×8 · C=11</span></div>
+        <div class="track"><div class="fill" style="width:51.9%"></div></div>
+        <div class="barval">20 774</div>
+      </div>
+      <div class="barrow">
+        <div class="lbl"><b>c012</b><span>TP1 · ×8 · C=7</span></div>
+        <div class="track"><div class="fill" style="width:34.5%"></div></div>
+        <div class="barval">13 814</div>
+      </div>
+      <div class="barrow">
+        <div class="lbl"><b>c001 基线</b><span>TP4 · 张量并行</span></div>
+        <div class="track"><div class="fill zero"></div></div>
+        <div class="barval dead">未过 SLA</div>
+      </div>
+    </div>
+    <p class="sub" style="margin-top:22px">
+      <b>反直觉但站得住的结论:</b>对这个 A3B MoE + 长输入短输出负载,<span class="ink-code">8 个独立单卡实例(TP1)</span>整机吞吐远超张量并行方案——TP4 基线甚至没跑出 SLA 内的合格结果。<b>「不存在脱离工作负载的通用最优」</b>正是系统要靠真机实测证明的事。
+    </p>
+  </section>
+
+  <footer>
+    llm-infer-tuner · 当前落地引擎 SGLang,catalogs 引擎无关,未来可复用于 vLLM · 排名数据取自 outputs/…cand16/results/ranking.json
+  </footer>
+</div>

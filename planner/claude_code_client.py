@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
+
+# 默认用哪个 Claude Code CLI 生成压测命令。
+#   tclaude(默认)—— 腾讯内网 CLI,与 L1 gen_configs.sh 的默认保持一致
+#   claude        —— 公开 CLI,任何有 claude 登录/API key 的人可用
+# 命令行契约一致(tclaude 内嵌 @anthropic-ai/claude-code),故只切 binary 名即可。
+# 通过环境变量 BENCH_AGENT / LLM_INFER_AGENT 覆盖(优先 BENCH_AGENT);
+# run_executor.sh 的 --agent 会写进 BENCH_AGENT,故命令行选择优先于此默认。
+def _default_executable() -> str:
+    return os.environ.get("BENCH_AGENT") or os.environ.get("LLM_INFER_AGENT") or "tclaude"
 
 CompletedProcess = subprocess.CompletedProcess[str]
 Runner = Callable[..., CompletedProcess]
@@ -21,11 +31,12 @@ class ClaudeCodeClient:
 
     def __init__(
         self,
-        executable: str = "claude",
+        executable: str | None = None,
         timeout_seconds: int = 600,
         runner: Runner = subprocess.run,
     ) -> None:
-        self.executable = executable
+        # executable 显式传入时以其为准;否则读环境变量,最终回落到 "claude"。
+        self.executable = executable or _default_executable()
         self.timeout_seconds = timeout_seconds
         self.runner = runner
 

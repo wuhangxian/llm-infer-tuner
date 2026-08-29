@@ -1,2 +1,2 @@
-"""Planning components for LLMOptAgent."""
+"""Planning components for llm-infer-tuner."""
 

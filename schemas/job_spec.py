@@ -1,4 +1,4 @@
-"""Input contract for one LLMOptAgent tuning job."""
+"""Input contract for one llm-infer-tuner tuning job."""
 
 from typing import Annotated, Literal
 
@@ -17,16 +17,30 @@ class SLA(StrictModel):
     min_success_rate: float = Field(default=0.99, ge=0, le=1)
 
 
+class BaselineConfig(StrictModel):
+    """User-specified baseline params. Any key-value pair is allowed.
+    AI will fill in missing params (default_flags, pin flags, etc.)
+    and assemble a complete launch command.
+    """
+    model_config = ConfigDict(extra="allow", str_strip_whitespace=True)
+
+
 class SearchBudget(StrictModel):
     max_candidates: int = Field(gt=0)
     max_runtime_minutes: int = Field(gt=0)
+    baseline: BaselineConfig | None = None
+    baseline_threshold_pct: float = Field(default=0, ge=0, le=100,
+        description="Only keep candidates with goodput >= baseline * (1 + pct/100). 0 = keep all")
 
 
 class JobSpec(StrictModel):
     job_id: Identifier
     engine: Literal["sglang"]
-    instance_type: Identifier
+    gpu_model: Identifier
+    gpu_count: int = Field(gt=0)
+    gpu_memory_gb: float = Field(gt=0)
     model: Identifier
+    image: Identifier
     workload: Identifier
     benchmark_method: Identifier
     sla: SLA

@@ -1,0 +1,46 @@
+{
+  "_meta": {
+    "job_id": "example-custom",
+    "gpu_model": "G24_pro5000",
+    "gpu_count": 8,
+    "gpu_memory_gb": 72,
+    "workload": "W04_input-4k-output-1k",
+    "benchmark_method": "sglang-bench-serving",
+    "sla": {
+      "max_avg_ttft_ms": 2000,
+      "max_avg_tpot_ms": 80,
+      "min_success_rate": 0.99
+    },
+    "ssh_target": "ubuntu@122.51.115.16",
+    "ssh_password": "",
+    "model_host_dir": "/data/models/your-model/",
+    "model_container_path": "/data/models/your-model/",
+    "image_ref": "hai-beijing.tencentcloudcr.com/ai/sglang:v0.5.16-cu129",
+    "port": 30000
+  },
+  "candidates": [
+    {
+      "id": "c001",
+      "params": {
+        "tp_size": 4,
+        "attention_backend": "flashinfer",
+        "mem_fraction_static": 0.88,
+        "disable_radix_cache": true,
+        "trust_remote_code": true
+      },
+      "reasons": ["TP4+flashinfer+mf0.88"]
+    },
+    {
+      "id": "c002",
+      "params": {
+        "tp_size": 2,
+        "attention_backend": "triton",
+        "mem_fraction_static": 0.88,
+        "disable_radix_cache": true,
+        "trust_remote_code": true,
+        "kv_cache_dtype": "fp8_e4m3"
+      },
+      "reasons": ["TP2+triton+kv_fp8"]
+    }
+  ]
+}

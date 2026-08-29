@@ -1,0 +1,20 @@
+{
+  "job_id": "deepseek-v4-flash-0731-fp8_pro5000_8x72g_input-8k-output-1k_cand8",
+  "engine": "sglang",
+  "gpu_model": "G24_pro5000",
+  "gpu_count": 8,
+  "gpu_memory_gb": 72,
+  "model": "M03_deepseek-v4-flash-0731-fp8",
+  "image": "I03_sglang-v0.5.16",
+  "workload": "W05_input-8k-output-1k",
+  "benchmark_method": "sglang-bench-serving",
+  "sla": {
+    "max_avg_ttft_ms": 2000,
+    "max_avg_tpot_ms": 80,
+    "min_success_rate": 0.99
+  },
+  "search": {
+    "max_candidates": 8,
+    "max_runtime_minutes": 180
+  }
+}

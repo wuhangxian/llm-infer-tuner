@@ -1,0 +1,35 @@
+{
+  "job_id": "qwen38-27b-fp8_pro5000_8x72g_input-4k-output-1k_cand32",
+  "engine": "sglang",
+  "gpu_model": "G24_pro5000",
+  "gpu_count": 8,
+  "gpu_memory_gb": 72,
+  "model": "M55_qwen3-8-27b-fp8",
+  "image": "I03_sglang-v0.5.16",
+  "workload": "W04_input-4k-output-1k",
+  "benchmark_method": "sglang-bench-serving",
+  "sla": {
+    "max_avg_ttft_ms": 2000,
+    "max_avg_tpot_ms": 80,
+    "min_success_rate": 0.99
+  },
+  "search": {
+    "max_candidates": 32,
+    "max_runtime_minutes": 180,
+    "baseline": {
+      "trust_remote_code": true,
+      "kv_cache_dtype": "fp8_e4m3",
+      "mem_fraction_static": 0.85,
+      "attention_backend": "flashinfer",
+      "chunked_prefill_size": 2048,
+      "reasoning_parser": "qwen3",
+      "tool_call_parser": "qwen3_coder",
+      "mamba_full_memory_ratio": 4.59,
+      "mamba_radix_cache_strategy": "extra_buffer",
+      "mamba_ssm_dtype": "float32",
+      "page_size": 64,
+      "tp_size": 1
+    },
+    "baseline_threshold_pct": 15
+  }
+}

@@ -6,7 +6,7 @@
 
   "fixed_args": {
     "backend": "sglang",
-    "dataset_name": "random",
+    "dataset_name": "random-ids",
     "random_range_ratio": 1.0
   },
 
@@ -29,7 +29,8 @@
     "schedule_policy": "--schedule-policy",
     "kv_cache_dtype": "--kv-cache-dtype",
     "reasoning_parser": "--reasoning-parser",
-    "tool_call_parser": "--tool-call-parser"
+    "tool_call_parser": "--tool-call-parser",
+    "trust_remote_code": "--trust-remote-code"
   },
 
   "runtime_args": {
