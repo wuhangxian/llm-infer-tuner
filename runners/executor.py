@@ -891,6 +891,23 @@ def _force_disable_radix_cache(cmd: str) -> str:
     return effective + (marker + comment if marker else "")
 
 
+def _override_launch_port(cmd: str, port: int) -> str:
+    """Set one launch command's ``--port`` regardless of its original spelling/value."""
+    body, marker, comment = cmd.partition(" #")
+    parts = shlex.split(body)
+    for index, part in enumerate(parts):
+        if part == "--port" and index + 1 < len(parts):
+            parts[index + 1] = str(port)
+            break
+        if part.startswith("--port="):
+            parts[index] = f"--port={port}"
+            break
+    else:
+        parts.extend(["--port", str(port)])
+    effective = shlex.join(parts)
+    return effective + (marker + comment if marker else "")
+
+
 def _run_candidate(
     ctx: _CandidateContext,
     candidate: dict[str, Any],
@@ -956,11 +973,7 @@ def _run_candidate(
     for startup_attempt in range(1, max(1, config.startup_max_attempts) + 1):
         for idx, (rport, rgpu) in enumerate(zip(replica_ports, replica_gpus)):
             # 每个副本换到自己的端口;满载时再用 CUDA_VISIBLE_DEVICES 把它钉在自己那段卡上。
-            rcmd = base_cmd.replace(
-                "--host 0.0.0.0 --port 30000",
-                f"--host 0.0.0.0 --port {rport}",
-            )
-            rcmd = rcmd.replace("--port 30000", f"--port {rport}")
+            rcmd = _override_launch_port(base_cmd, rport)
             if rgpu is not None:
                 rcmd = f"env CUDA_VISIBLE_DEVICES={rgpu} {rcmd}"
             rlog = server_log if idx == 0 else f"{candidate_out}/server_i{idx}.log"
