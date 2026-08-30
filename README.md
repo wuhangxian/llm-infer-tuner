@@ -41,7 +41,7 @@ L1 / L2 的完整跑法见下面「快速开始」和「两种使用方式」。
 ### 0. 前置(按层级递增)
 
 - **L0(跑测试)**:Python 3.11+ + [uv](https://github.com/astral-sh/uv) + `jq`
-- **L1(AI 生成)**:额外需一个 Claude Code CLI(已登录)——`tclaude`(腾讯内网)**或**公开的 `claude`(`claude login` / `ANTHROPIC_API_KEY`)。用 `--agent` 选,详见下文。
+- **L1(AI 生成)**:额外需一个 Claude Code CLI(已认证)——`tclaude`(腾讯内网)**或**原版 `claude`(`claude auth login` / Anthropic 环境变量 / HAIHub 网关 Token)。用 `--agent` 选,详见下文。
 - **L2(真机压测)**:额外需一台目标 GPU 机器 —— SSH 可达、已装 docker、已备好模型权重和 sglang 镜像
 
 ```bash
@@ -57,14 +57,108 @@ uv sync
 npm install -g @tencent/tclaude --engine-strict --registry=https://mirrors.tencent.com/npm
 tclaude login && tclaude --version
 
-# 或公开 claude(任何人):二选一登录方式
-claude login                       # 交互登录
-export ANTHROPIC_API_KEY=sk-...    # 或用 API key
-claude --version
+# 或原版 Claude Code(任何人):安装和网关配置见下文
 ```
 
-`gen_configs.sh` 通过所选 CLI 自己的网关和登录态调用模型。项目仍会加载可选的
-`.env` 文件,供其他需要直连 API 的工具使用;它不会覆盖 CLI 的网关。
+`gen_configs.sh` 通过所选 CLI 的网关和认证信息调用模型。项目脚本启动时会加载可选的
+项目根目录 `.env`；如果其中定义了同名 `ANTHROPIC_*`，会覆盖当前终端中的值。使用
+HAIHub 前应删除或更新 `.env` 里的冲突项，确保它与下文的网关配置一致。
+
+#### 在远程 Ubuntu 安装原版 Claude Code
+
+使用 Anthropic 官方推荐的 Linux 原生安装器（无需 `sudo` 和 Node.js）：
+
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+
+# 安装器默认放到 ~/.local/bin；当前终端找不到 claude 时补上 PATH
+export PATH="$HOME/.local/bin:$PATH"
+claude --version
+claude doctor
+```
+
+若希望每次 SSH 登录后都能找到 `claude`，把 PATH 写入 `~/.bashrc`：
+
+```bash
+grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' ~/.bashrc || \
+  printf '\n%s\n' 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+安装细节和其他平台命令以 [Claude Code 官方安装文档](https://code.claude.com/docs/en/installation) 为准。
+
+#### 通过 HAIHub 网关使用 Claude Code
+
+使用 HAIHub 网关 Token 时不需要执行 `claude auth login`。下面配置把原版 Claude Code 指向 HAIHub，并让 `opus` / `sonnet` / `haiku` 别名映射到网关中的模型名。**不要把真实 Token 写进项目 README、脚本、项目 `.env` 或 Git 提交。**
+
+先确认项目 `.env` 没有会覆盖本配置的值：
+
+```bash
+awk -F= '/^(export[[:space:]]+)?ANTHROPIC_(BASE_URL|AUTH_TOKEN|API_KEY|MODEL|DEFAULT_.*_MODEL)=/ {
+  key=$1; sub(/^export[[:space:]]+/, "", key); print NR ":" key "=<已设置>"
+}' .env 2>/dev/null || true
+```
+
+如有输出，请删除这些旧配置或把它们更新为与下文相同的 HAIHub 配置，再运行项目脚本。
+
+只在当前 SSH 会话临时生效：
+
+```bash
+export ANTHROPIC_BASE_URL="https://api.model.haihub.cn"
+unset ANTHROPIC_API_KEY
+read -rsp "HAIHub Token: " ANTHROPIC_AUTH_TOKEN; echo
+export ANTHROPIC_AUTH_TOKEN
+
+export ANTHROPIC_DEFAULT_OPUS_MODEL="claude-opus-4-8"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="claude-sonnet-4-6"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="claude-sonnet-4-6"
+export ANTHROPIC_MODEL="opus"
+```
+
+需要跨 SSH 会话保留时，写入一个仅当前用户可读的配置文件：
+
+```bash
+mkdir -p "$HOME/.config/claude-code"
+umask 077
+read -rsp "HAIHub Token: " HAIHUB_TOKEN; echo
+{
+  printf '%s\n' 'export ANTHROPIC_BASE_URL="https://api.model.haihub.cn"'
+  printf '%s\n' 'unset ANTHROPIC_API_KEY'
+  printf 'export ANTHROPIC_AUTH_TOKEN=%q\n' "$HAIHUB_TOKEN"
+  printf '%s\n' 'export ANTHROPIC_DEFAULT_OPUS_MODEL="claude-opus-4-8"'
+  printf '%s\n' 'export ANTHROPIC_DEFAULT_SONNET_MODEL="claude-sonnet-4-6"'
+  printf '%s\n' 'export ANTHROPIC_DEFAULT_HAIKU_MODEL="claude-sonnet-4-6"'
+  printf '%s\n' 'export ANTHROPIC_MODEL="opus"'
+} > "$HOME/.config/claude-code/haihub.env"
+unset HAIHUB_TOKEN
+chmod 600 "$HOME/.config/claude-code/haihub.env"
+
+grep -qxF 'source "$HOME/.config/claude-code/haihub.env"' ~/.bashrc || \
+  printf '\n%s\n' 'source "$HOME/.config/claude-code/haihub.env"' >> ~/.bashrc
+source "$HOME/.config/claude-code/haihub.env"
+```
+
+验证 CLI 和网关是否可用：
+
+```bash
+claude --model opus -p '只回复：连接成功'
+```
+
+验证通过后，在本项目中显式选择原版 Claude Code：
+
+```bash
+./gen_configs.sh --agent claude --model claude-opus-4-8 input/jobs/<job>.json
+./run_executor.sh --agent claude input/jobs/<job>.json input/targets/<target>.json
+```
+
+常见问题：
+
+- `claude: command not found`：执行 `export PATH="$HOME/.local/bin:$PATH"`，再运行 `claude --version`。
+- HTTP `401`：先确认 Token 是否有效。`ANTHROPIC_AUTH_TOKEN` 使用 Bearer 认证；只有网关明确要求 `x-api-key` 时，才改用 `ANTHROPIC_API_KEY`。
+- HTTP `429` 或网关错误码 `6008`：通常是 Token 配额或限流，不是 Claude Code 安装失败。
+- 模型不存在：模型名使用连字符，例如 `claude-opus-4-8`，不要写成 `claude-opus-4.8`。
+
+环境变量语义可参考 [Claude Code 环境变量](https://code.claude.com/docs/en/env-vars) 和 [模型配置](https://code.claude.com/docs/en/model-config)。如果 Token 曾粘贴到聊天、日志或终端历史中，应立即在网关侧吊销并重新生成。
 
 ---
 
