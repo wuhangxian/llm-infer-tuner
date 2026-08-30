@@ -358,6 +358,13 @@ def test_two_round_dryrun_ranks_by_true_goodput(tmp_path, workloads_output_len):
     for cand, conc, num_prompts in container.bench_calls:
         assert num_prompts == conc * 4, (cand, conc, num_prompts)
 
+    server_ports = {
+        _flag_int(command.split(), "--port")
+        for command in container.launched_cmds
+        if "sglang.launch_server" in command
+    }
+    assert server_ports == {30000, 30001, 30002, 30003}
+
     # -- ranking is goodput-descending and matches true C* --------------------
     ranking = summary["ranking"]
     ids_in_order = [row["candidate_id"] for row in ranking]
@@ -659,6 +666,59 @@ def test_every_launch_forces_exactly_one_disable_radix(tmp_path, workloads_outpu
         assert "--disable-radix-cache=" not in cmd, (
             f"必须是裸 flag,不能是 =true/=false 形式,实际:{cmd}"
         )
+
+
+@pytest.mark.parametrize(
+    "port_arg",
+    ["--port=30000", "--port 30010", ""],
+    ids=["equals", "arbitrary-old-port", "missing"],
+)
+def test_launch_overrides_any_port_spelling_with_assigned_port(
+    tmp_path, workloads_output_len, port_arg
+):
+    configs_path = tmp_path / "configs.jsonl"
+    configs_path.write_text(
+        json.dumps(
+            {
+                "id": "equals-port",
+                "params": {"tp_size": 1},
+                "cmd": (
+                    "python -m sglang.launch_server --model-path ${MODEL_PATH} "
+                    f"{port_arg}"
+                ),
+                "reasons": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path),
+        configs_path=configs_path,
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=1,
+        port=30005,
+    )
+    container = _FakeContainer({"equals-port": 2})
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        run_executor(config, remote=_FakeRemote(), client=_FakeClient())
+    finally:
+        ex.Container = original_container
+
+    server_cmds = [
+        command
+        for command in container.launched_cmds
+        if "sglang.launch_server" in command
+    ]
+    assert server_cmds
+    assert all(_flag_int(command.split(), "--port") == 30005 for command in server_cmds)
 
 
 def test_threshold_marks_but_never_removes_candidates(tmp_path, workloads_output_len):
