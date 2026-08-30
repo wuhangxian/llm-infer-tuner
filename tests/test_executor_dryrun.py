@@ -389,6 +389,43 @@ def test_two_round_dryrun_ranks_by_true_goodput(tmp_path, workloads_output_len):
         assert (results_dir / cid / "run_result.r1.json").exists()
 
 
+def test_baseline_plus_32_candidates_all_enter_round2_and_keep_one_row(
+    tmp_path, workloads_output_len
+):
+    candidate_ids = ["baseline", *(f"c{i:03d}" for i in range(1, 33))]
+    params = {
+        candidate_id: {
+            "tp_size": 1,
+            **({"is_baseline": True} if candidate_id == "baseline" else {}),
+        }
+        for candidate_id in candidate_ids
+    }
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path),
+        configs_path=_write_configs_with_params(tmp_path, params),
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=32,
+        top_k=5,
+    )
+    container = _FakeContainer(dict.fromkeys(candidate_ids, 2))
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote(), client=_FakeClient())
+    finally:
+        ex.Container = original_container
+
+    assert len(summary["candidate_results"]) == 33
+    assert [row["candidate_id"] for row in summary["candidate_results"]] == candidate_ids
+    assert all("round2" in candidate for candidate in summary["candidates"])
+    assert all(row["status"] == "completed" for row in summary["candidate_results"])
+
+
 def test_round2_reuses_round1_seeds_no_rebench(tmp_path, workloads_output_len):
     """The single top-K candidate's round-1 probes must be reused as round-2 seeds:
     a C benched in round 1 is never benched again in round 2."""
