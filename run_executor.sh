@@ -2,64 +2,16 @@
 # run_executor.sh —— 第二阶段:远程压测 + 排名。
 #
 # 用法1(三参数模式,AI 生成后跑):
-#   ./run_executor.sh [--agent tclaude|claude] <job.json> <target.json> [configs.jsonl] [results_dir]
+#   ./run_executor.sh <job.json> <target.json> [configs.jsonl] [results_dir]
 #
 # 用法2(单文件模式,手写配置):
-#   ./run_executor.sh [--agent tclaude|claude] <configs.jsonl>
+#   ./run_executor.sh <configs.jsonl>
 #   configs.jsonl 第一行是 _meta(SLA/workload/target 信息),后面每行一条候选
 #
-# --agent 选用哪个 Claude Code CLI 生成压测命令(与 L1 gen_configs.sh 对称):
-#   tclaude(默认)—— 腾讯内网 CLI,与 gen_configs.sh 的默认保持一致
-#   claude        —— 公开 CLI,走 `claude login` 或 ANTHROPIC_API_KEY
-# 选择通过 BENCH_AGENT 环境变量透传给 executor.py 的 ClaudeCodeClient。
-#
-# 脚本分 5 步确定性操作,不涉及 AI 决策。
+# 压测命令由 JobSpec + workload + benchmark_method 确定性生成,第二阶段不调用 AI。
 set -euo pipefail
 
-# Load .env for claude API credentials
-if [ -f .env ]; then
-  set -a
-  . ./.env
-  set +a
-fi
-
 command -v jq >/dev/null || { echo "❌ 需要 jq" >&2; exit 1; }
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 解析 --agent(可选,默认 tclaude),其余仍是位置参数。
-# 先把 --agent 从参数里摘掉,剩下的位置参数交给下面既有的模式检测逻辑,
-# 避免改动 $1/$2/$# 的判断。选定后写进 BENCH_AGENT 供 executor.py 读取。
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AGENT=""                 # 空 = 用户没显式指定,后面回落到默认 tclaude
-POSITIONAL=()
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --agent)
-      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
-        echo "❌ --agent 需要值(tclaude 或 claude)" >&2; exit 2
-      fi
-      AGENT="$2"; shift 2 ;;
-    --agent=*)
-      AGENT="${1#--agent=}"
-      if [ -z "$AGENT" ]; then echo "❌ --agent 需要值(tclaude 或 claude)" >&2; exit 2; fi
-      shift ;;
-    --)
-      shift; while [ "$#" -gt 0 ]; do POSITIONAL+=("$1"); shift; done ;;
-    *)
-      POSITIONAL+=("$1"); shift ;;
-  esac
-done
-set -- "${POSITIONAL[@]}"
-
-# 默认与 gen_configs.sh 一致:不写 --agent 时用 tclaude。
-AGENT="${AGENT:-tclaude}"
-case "$AGENT" in
-  tclaude|claude) ;;
-  *) echo "❌ 未知 --agent: $AGENT(仅支持 tclaude | claude)" >&2; exit 2 ;;
-esac
-# 命令行选择优先于既有环境变量;写进 BENCH_AGENT 供 ClaudeCodeClient 读取。
-export BENCH_AGENT="$AGENT"
-command -v "$AGENT" >/dev/null || { echo "❌ $AGENT 不在 PATH" >&2; exit 1; }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 检测模式:单文件 vs 三参数
@@ -132,7 +84,7 @@ CONTAINER_NAME="llm-infer-tuner-${JOB_ID}"
 
 echo "▶ 执行器参数一览:" >&2
 echo "    job_id=$JOB_ID  max_candidates=$MAX_CAND" >&2
-echo "    agent(压测命令生成)=$AGENT" >&2
+echo "    bench_command=deterministic(no AI)" >&2
 echo "    ssh=$SSH_TARGET" >&2
   echo "    image=$IMAGE_REF  container=$CONTAINER_NAME  port=$PORT" >&2
 echo "    model(host)=$MODEL_HOST_DIR" >&2

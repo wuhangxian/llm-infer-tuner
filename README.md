@@ -48,7 +48,7 @@ L1 / L2 的完整跑法见下面「快速开始」和「两种使用方式」。
 uv sync
 ```
 
-### 1. 登录 AI CLI(L1/L2 才需要;只跑 L0 可跳过)
+### 1. 登录 AI CLI(仅 L1 需要;只跑 L0/L2 可跳过)
 
 项目支持两个命令行契约完全一致的 Claude Code CLI,用 `--agent` 选:
 
@@ -87,8 +87,7 @@ export PATH="$HOME/.local/bin:$PATH" && claude --version
 
 > `--agent tclaude|claude` 选用哪个 CLI(默认 `tclaude`)。两者命令行契约一致
 > (tclaude 内嵌 `@anthropic-ai/claude-code`),故只切 binary 与默认模型。
-> **L1 与 L2 默认统一为 `tclaude`**,`--agent` 开关也完全对称,不必记「哪一步默认哪个」。
-> 非腾讯环境(只有公开 `claude`)两步都加 `--agent claude` 即可。
+> AI CLI 只用于 L1 生成候选。L2 不调用 AI,不需要登录态、Token 或模型额度。
 
 AI 读 knowledge.md + catalogs(gpu/models/workloads/images),推导 TP/attention/mem-fraction/投机解码等参数,生成候选配置到 `outputs/<job_id>/configs.jsonl`。
 
@@ -125,17 +124,12 @@ GEN_MAX_RETRIES=0 ./gen_configs.sh input/jobs/<job>.json
 **第二步:远程压测 + 排名**
 
 ```bash
-# 默认 agent=tclaude(与 gen_configs.sh 一致)
 ./run_executor.sh input/jobs/<job>.json input/targets/<target>.json
-
-# 非腾讯环境:用公开 claude CLI 生成压测命令
-./run_executor.sh --agent claude input/jobs/<job>.json input/targets/<target>.json
 ```
 
 SSH 到远程机器,起容器 → 起服务 → 自适应并发搜索 → 压测 → 排名 → 输出 `outputs/<job_id>/results/ranking.json`。
 
-> `--agent` 选用哪个 CLI 生成压测命令(默认 `tclaude`),与 gen_configs.sh 对称。
-> 选择会写进 `BENCH_AGENT` 环境变量透传给执行器;直接设 `BENCH_AGENT`/`LLM_INFER_AGENT` 亦可,`--agent` 优先。
+执行器直接读取 JobSpec 的 `workload` 和 `benchmark_method`,再从 `catalogs/workloads.yaml` 与 `references/benchmark_methods/*.json` 确定性拼出 `sglang.bench_serving` 命令。第二步不调用 `tclaude` 或 `claude`,也不受 AI 超时、限流或额度影响。
 
 ### 方式 B: 手写配置 + 直接压测(一步)
 
@@ -143,8 +137,6 @@ SSH 到远程机器,起容器 → 起服务 → 自适应并发搜索 → 压测
 
 ```bash
 ./run_executor.sh input/configs/<config>.json
-# 或指定生成压测命令的 CLI(默认 tclaude)
-./run_executor.sh --agent claude input/configs/<config>.json
 ```
 
 JSON 格式:
@@ -320,7 +312,7 @@ llm-infer-tuner/
 │   ├── workloads.yaml          #   负载场景(W01-W10, 输入/输出长度)
 │   └── sglang-images.yaml      #   SGLang 镜像信息(I01-I03, 含 attention_backends/valid_flags)
 │
-├── .claude/skills/             # AI 读的知识库
+├── .claude/skills/             # L1 AI 读的知识库
 │   └── sglang-server-config-gen/
 │       ├── SKILL.md            #   流程入口
 │       ├── knowledge.md        #   全部调优经验(§0-§12)
@@ -331,13 +323,10 @@ llm-infer-tuner/
 │   ├── remote.py               #   SSH + sshpass
 │   ├── container.py            #   docker 生命周期
 │   ├── readiness.py            #   /health 轮询
-│   ├── bench_runner.py         #   压测命令生成(调 tclaude/claude,--agent 选)
+│   ├── bench_runner.py         #   从 workload/method 确定性生成压测命令
 │   ├── concurrency_search.py   #   自适应并发搜索
 │   ├── metrics.py              #   压测结果解析
 │   └── ranker.py               #   goodput 排名
-│
-├── planner/
-│   └── claude_code_client.py   # claude CLI 封装
 │
 ├── schemas/
 │   └── job_spec.py             # JobSpec 校验(含 baseline 字段)

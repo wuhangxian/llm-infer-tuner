@@ -16,9 +16,8 @@ from typing import Any
 
 import yaml
 
-from planner.claude_code_client import ClaudeCodeClient
 from runners.bench_runner import (
-    generate_benchmark_commands,
+    build_benchmark_command_template,
     rewrite_bench_command,
     run_benchmark,
     substitute_placeholders,
@@ -217,8 +216,8 @@ def _run_result_dict(result: RunResult) -> dict[str, Any]:
 def _force_output_file(command: str, output_path: str) -> str:
     """Point the bench command's --output-file at a known in-container path.
 
-    The client skill emits ``--output-file result_...jsonl`` (a bare relative
-    name); rewrite that argument so the file lands where the executor reads it.
+    The benchmark method emits ``--output-file result_...jsonl`` (a bare
+    relative name); rewrite that argument so the file lands where the executor reads it.
     Appends the flag if the command lacks one.
     """
     parts = shlex.split(command)
@@ -253,22 +252,12 @@ class _CandidateContext:
 
 
 def _resolve_bench_template(
-    job: JobSpec, *, config: ExecutorConfig, client: ClaudeCodeClient
+    job: JobSpec, *, config: ExecutorConfig
 ) -> str:
-    """Call the client skill ONCE and return a single bench command template.
-
-    The skill emits one command per concurrency level; they differ only in
-    --max-concurrency / --num-prompts, so any one of them serves as the template
-    that rewrite_bench_command() re-parameterizes per probe. Prefer the lowest
-    concurrency (fewest prompts) as the canonical template.
-    """
-    commands = generate_benchmark_commands(
-        job, project_root=config.project_root, client=client
+    """Build one locally validated command template for every candidate/probe."""
+    return build_benchmark_command_template(
+        job, project_root=config.project_root
     )
-    if not commands:
-        raise RuntimeError("client skill returned no benchmark commands")
-    commands.sort(key=lambda bc: bc.concurrency)
-    return commands[0].command
 
 
 def _aggregate_replicas(replicas: list[RunResult], *, expected: int) -> RunResult:
@@ -1242,7 +1231,6 @@ def run_executor(
     config: ExecutorConfig,
     *,
     remote: RemoteRunner | None = None,
-    client: ClaudeCodeClient | None = None,
 ) -> dict:
     """Orchestrate the 8-step executor loop and return a summary dict.
 
@@ -1259,17 +1247,12 @@ def run_executor(
     candidates = _load_candidates(config.configs_path, config.max_candidates)
     _check_hardware_match(job, config)
 
+    # Everything needed to construct the benchmark is local and deterministic.
+    # Validate it before SSH preflight, which may clear containers/GPU processes.
+    bench_template = _resolve_bench_template(job, config=config)
+
     remote = remote or RemoteRunner(config.ssh_target, ssh_password=config.ssh_password)
     _preflight_checks(config, remote)
-    client = client or ClaudeCodeClient()
-
-    # FAIRNESS: the client skill (an LLM) is called EXACTLY ONCE per job to get a
-    # bench command template. Every candidate and every probed concurrency reuses
-    # that one template with only --max-concurrency / --num-prompts rewritten, so
-    # input length / dataset / seed are byte-identical across the whole sweep. (The
-    # old code called the skill once per candidate, letting the workload drift and
-    # making candidates non-comparable.)
-    bench_template = _resolve_bench_template(job, config=config, client=client)
 
     # The boundary predicate for the adaptive search: a run "qualifies" iff it is
     # both data-healthy (not truncated) and within SLA. Injected so the search

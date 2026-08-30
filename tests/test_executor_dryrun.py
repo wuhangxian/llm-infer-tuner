@@ -1,11 +1,10 @@
 """Offline dry-run of the full two-round executor loop (no ssh/docker/network).
 
-Drives ``run_executor`` end to end with a fake RemoteRunner + fake Container +
-fake ClaudeCodeClient. Asserts the wiring that the unit tests can't reach:
+Drives ``run_executor`` end to end with a fake RemoteRunner + fake Container.
+Asserts the wiring that the unit tests can't reach:
 
-  * the client skill (an LLM) is called EXACTLY ONCE per job (fairness), and every
-    candidate/probe reuses that one template with only --max-concurrency /
-    --num-prompts rewritten (byte-identical workload otherwise);
+  * every candidate/probe reuses one deterministic benchmark template with only
+    --max-concurrency / --num-prompts rewritten (byte-identical workload otherwise);
   * round 1 expands over ALL candidates, round 2 precisely refines ALL candidates
     and REUSES round-1 probes as seeds (seeded C are never re-benched);
   * the final ranking is goodput-descending and matches each candidate's true C*.
@@ -235,34 +234,6 @@ def _flag_str(parts: list[str], flag: str) -> str:
     return ""
 
 
-class _FakeClient:
-    """Returns one bench command per concurrency level; counts how often it runs."""
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def run(self, *, prompt, json_schema, add_dirs, allow_dangerous_permissions=True):
-        self.calls += 1
-        base = (
-            "python -m sglang.bench_serving --backend sglang "
-            "--host ${BENCHMARK_HOST} --port ${BENCHMARK_PORT} "
-            "--model ${MODEL_PATH} --dataset-name random "
-            "--random-input-len 1000 --random-output-len 1000 "
-            "--output-file result_${JOB_ID}_${TIMESTAMP}.jsonl"
-        )
-        return {
-            "benchmark_commands": [
-                {
-                    "concurrency": c,
-                    "num_prompts": c * 4,
-                    "command": f"{base} --max-concurrency {c} --num-prompts {c * 4}",
-                    "reason": "grid",
-                }
-                for c in (1, 2, 4, 8, 16, 32)
-            ]
-        }
-
-
 # --- fixtures -----------------------------------------------------------------
 
 
@@ -275,7 +246,7 @@ def _write_job(tmp_path: Path, *, baseline_threshold_pct: float = 0) -> Path:
          "gpu_memory_gb": 72,
         "model": "qwen36-35b",
         "image": "sglang-test",
-        "workload": "chat_1k_1k",
+        "workload": "W01_input-1k-output-1k",
         "benchmark_method": "sglang-bench-serving",
         "sla": {"max_avg_ttft_ms": 2000.0, "max_avg_tpot_ms": 80.0, "min_success_rate": 0.99},
         "search": {
@@ -339,21 +310,17 @@ def test_two_round_dryrun_ranks_by_true_goodput(tmp_path, workloads_output_len):
     )
 
     remote = _FakeRemote()
-    client = _FakeClient()
     container = _FakeContainer(cstar)
     # Patch Container so run_executor uses our fake instead of docker-over-ssh.
     import runners.executor as exmod
     original_container = exmod.Container
     exmod.Container = lambda _remote, _cfg: container
     try:
-        summary = run_executor(config, remote=remote, client=client)
+        summary = run_executor(config, remote=remote)
     finally:
         exmod.Container = original_container
 
-    # -- FAIRNESS: the LLM client is called exactly once for the whole job -----
-    assert client.calls == 1, f"client skill called {client.calls} times, expected 1"
-
-    # -- every bench used the shared template: only C / num_prompts vary, and
+    # -- every bench used the deterministic shared template: only C / num_prompts vary, and
     #    num_prompts == C * multiplier (4) every time.
     for cand, conc, num_prompts in container.bench_calls:
         assert num_prompts == conc * 4, (cand, conc, num_prompts)
@@ -423,7 +390,7 @@ def test_baseline_plus_32_candidates_all_enter_round2_and_keep_one_row(
     original_container = ex.Container
     ex.Container = lambda _remote, _cfg: container
     try:
-        summary = run_executor(config, remote=_FakeRemote(), client=_FakeClient())
+        summary = run_executor(config, remote=_FakeRemote())
     finally:
         ex.Container = original_container
 
@@ -456,13 +423,12 @@ def test_round2_reuses_round1_seeds_no_rebench(tmp_path, workloads_output_len):
     )
 
     remote = _FakeRemote()
-    client = _FakeClient()
     container = _FakeContainer(cstar)
     import runners.executor as exmod
     original_container = exmod.Container
     exmod.Container = lambda _remote, _cfg: container
     try:
-        summary = run_executor(config, remote=remote, client=client)
+        summary = run_executor(config, remote=remote)
     finally:
         exmod.Container = original_container
 
@@ -550,13 +516,12 @@ def test_round2_fill_host_benches_n_replicas_no_double_count(tmp_path, workloads
     )
 
     remote = _FakeRemote()
-    client = _FakeClient()
     container = _FakeContainer(cstar)
     import runners.executor as exmod
     original_container = exmod.Container
     exmod.Container = lambda _remote, _cfg: container
     try:
-        summary = run_executor(config, remote=remote, client=client)
+        summary = run_executor(config, remote=remote)
     finally:
         exmod.Container = original_container
 
@@ -646,13 +611,12 @@ def test_every_launch_forces_exactly_one_disable_radix(tmp_path, workloads_outpu
         max_cap=256,
     )
     remote = _FakeRemote()
-    client = _FakeClient()
     container = _FakeContainer({"cand-cmd": 2, "cand-params": 2, "cand-already": 2})
     import runners.executor as exmod
     original_container = exmod.Container
     exmod.Container = lambda _remote, _cfg: container
     try:
-        run_executor(config, remote=remote, client=client)
+        run_executor(config, remote=remote)
     finally:
         exmod.Container = original_container
 
@@ -708,7 +672,7 @@ def test_launch_overrides_any_port_spelling_with_assigned_port(
     original_container = ex.Container
     ex.Container = lambda _remote, _cfg: container
     try:
-        run_executor(config, remote=_FakeRemote(), client=_FakeClient())
+        run_executor(config, remote=_FakeRemote())
     finally:
         ex.Container = original_container
 
@@ -744,11 +708,11 @@ def test_threshold_marks_but_never_removes_candidates(tmp_path, workloads_output
         max_candidates=16,
         top_k=1,
     )
-    remote, client, container = _FakeRemote(), _FakeClient(), _FakeContainer(cstar)
+    remote, container = _FakeRemote(), _FakeContainer(cstar)
     original_container = ex.Container
     ex.Container = lambda _remote, _cfg: container
     try:
-        summary = run_executor(config, remote=remote, client=client)
+        summary = run_executor(config, remote=remote)
     finally:
         ex.Container = original_container
 
@@ -782,7 +746,7 @@ def test_server_startup_retries_then_completes(tmp_path, workloads_output_len):
     original_container = ex.Container
     ex.Container = lambda _remote, _cfg: container
     try:
-        summary = run_executor(config, remote=_FakeRemote(), client=_FakeClient())
+        summary = run_executor(config, remote=_FakeRemote())
     finally:
         ex.Container = original_container
 
@@ -816,7 +780,7 @@ def test_container_or_ssh_startup_failure_recreates_and_retries(
     original_container = ex.Container
     ex.Container = lambda _remote, _cfg: container
     try:
-        summary = run_executor(config, remote=_FakeRemote(), client=_FakeClient())
+        summary = run_executor(config, remote=_FakeRemote())
     finally:
         ex.Container = original_container
 
@@ -849,7 +813,7 @@ def test_exhausted_startup_retries_keeps_failed_candidate_row(
     original_container = ex.Container
     ex.Container = lambda _remote, _cfg: container
     try:
-        summary = run_executor(config, remote=_FakeRemote(), client=_FakeClient())
+        summary = run_executor(config, remote=_FakeRemote())
     finally:
         ex.Container = original_container
 
