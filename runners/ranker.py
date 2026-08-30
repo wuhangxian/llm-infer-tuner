@@ -133,7 +133,43 @@ def rank_candidates(
                 "goodput_raw": raw,
                 "goodput_per_host": per_host,
                 "best_concurrency": best_concurrency,
+                **_best_point_metrics(results, best_concurrency, sla, output_len),
             }
         )
     ranking.sort(key=lambda row: row["goodput_per_host"], reverse=True)
     return ranking
+
+
+def _best_point_metrics(
+    results: list[RunResult],
+    best_concurrency: int | None,
+    sla: SLA,
+    output_len: int,
+) -> dict:
+    if best_concurrency is None:
+        return {
+            "request_throughput": 0.0,
+            "output_throughput": 0.0,
+            "total_throughput": 0.0,
+            "mean_ttft_ms": 0.0,
+            "p99_ttft_ms": 0.0,
+            "mean_tpot_ms": 0.0,
+            "p99_tpot_ms": 0.0,
+            "success_rate": 0.0,
+            "avg_output_tokens": 0.0,
+        }
+    for result in reversed(results):
+        healthy, _ = data_health_check(result, output_len=output_len)
+        if result.concurrency == best_concurrency and healthy and passes_sla(result, sla):
+            return {
+                "request_throughput": result.request_throughput,
+                "output_throughput": result.output_throughput,
+                "total_throughput": result.total_throughput,
+                "mean_ttft_ms": result.mean_ttft_ms,
+                "p99_ttft_ms": result.p99_ttft_ms,
+                "mean_tpot_ms": result.mean_tpot_ms,
+                "p99_tpot_ms": result.p99_tpot_ms,
+                "success_rate": result.success_rate,
+                "avg_output_tokens": result.avg_output_tokens,
+            }
+    return {}

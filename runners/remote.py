@@ -87,7 +87,11 @@ class RemoteRunner:
         return self._invoke(list(argv), timeout=timeout)
 
     def _invoke(self, argv: list[str], *, timeout: int | None) -> CommandResult:
-        effective_timeout = self.default_timeout if timeout is None else timeout
+        # timeout=0 is the explicit opt-out used by long-running benchmarks.
+        # None retains the ordinary per-command safety default.
+        effective_timeout = None if timeout == 0 else (
+            self.default_timeout if timeout is None else timeout
+        )
         try:
             completed = self.runner(
                 argv,

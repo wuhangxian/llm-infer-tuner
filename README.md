@@ -27,7 +27,7 @@ uv run python -m pytest tests/ -q        # 跑全套单测
 预期看到:
 
 ```
-131 passed in ~30s
+122 passed in ~30s
 ```
 
 **这一步不碰任何 GPU、不发任何网络请求**,纯确定性逻辑(配置拼装、并发搜索、goodput 排名、schema 校验)全部覆盖。想快速确认"代码是不是能跑",跑这一条就够了。
@@ -41,14 +41,14 @@ L1 / L2 的完整跑法见下面「快速开始」和「两种使用方式」。
 ### 0. 前置(按层级递增)
 
 - **L0(跑测试)**:Python 3.11+ + [uv](https://github.com/astral-sh/uv) + `jq`
-- **L1(AI 生成)**:额外需一个 Claude Code CLI(已登录)——`tclaude`(腾讯内网)**或**公开的 `claude`(`claude login` / `ANTHROPIC_API_KEY`)。用 `--agent` 选,详见下文。
+- **L1(AI 生成)**:额外需一个已配置好的 Claude Code CLI——`tclaude`(腾讯内网)**或**原版 `claude`。用 `--agent` 选,详见下文。
 - **L2(真机压测)**:额外需一台目标 GPU 机器 —— SSH 可达、已装 docker、已备好模型权重和 sglang 镜像
 
 ```bash
 uv sync
 ```
 
-### 1. 登录 AI CLI(L1/L2 才需要;只跑 L0 可跳过)
+### 1. 登录 AI CLI(仅 L1 需要;只跑 L0/L2 可跳过)
 
 项目支持两个命令行契约完全一致的 Claude Code CLI,用 `--agent` 选:
 
@@ -57,14 +57,12 @@ uv sync
 npm install -g @tencent/tclaude --engine-strict --registry=https://mirrors.tencent.com/npm
 tclaude login && tclaude --version
 
-# 或公开 claude(任何人):二选一登录方式
-claude login                       # 交互登录
-export ANTHROPIC_API_KEY=sk-...    # 或用 API key
-claude --version
+# 或原版 Claude Code(默认用户已完成账号或网关认证配置):
+curl -fsSL https://claude.ai/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH" && claude --version
 ```
 
-`gen_configs.sh` 通过所选 CLI 自己的网关和登录态调用模型。项目仍会加载可选的
-`.env` 文件,供其他需要直连 API 的工具使用;它不会覆盖 CLI 的网关。
+默认用户已经配置好所选 CLI 的登录态或网关环境变量；本项目只负责选择 CLI 和模型，不负责管理认证信息。
 
 ---
 
@@ -89,8 +87,7 @@ claude --version
 
 > `--agent tclaude|claude` 选用哪个 CLI(默认 `tclaude`)。两者命令行契约一致
 > (tclaude 内嵌 `@anthropic-ai/claude-code`),故只切 binary 与默认模型。
-> **L1 与 L2 默认统一为 `tclaude`**,`--agent` 开关也完全对称,不必记「哪一步默认哪个」。
-> 非腾讯环境(只有公开 `claude`)两步都加 `--agent claude` 即可。
+> AI CLI 只用于 L1 生成候选。L2 不调用 AI,不需要登录态、Token 或模型额度。
 
 AI 读 knowledge.md + catalogs(gpu/models/workloads/images),推导 TP/attention/mem-fraction/投机解码等参数,生成候选配置到 `outputs/<job_id>/configs.jsonl`。
 
@@ -127,17 +124,12 @@ GEN_MAX_RETRIES=0 ./gen_configs.sh input/jobs/<job>.json
 **第二步:远程压测 + 排名**
 
 ```bash
-# 默认 agent=tclaude(与 gen_configs.sh 一致)
 ./run_executor.sh input/jobs/<job>.json input/targets/<target>.json
-
-# 非腾讯环境:用公开 claude CLI 生成压测命令
-./run_executor.sh --agent claude input/jobs/<job>.json input/targets/<target>.json
 ```
 
 SSH 到远程机器,起容器 → 起服务 → 自适应并发搜索 → 压测 → 排名 → 输出 `outputs/<job_id>/results/ranking.json`。
 
-> `--agent` 选用哪个 CLI 生成压测命令(默认 `tclaude`),与 gen_configs.sh 对称。
-> 选择会写进 `BENCH_AGENT` 环境变量透传给执行器;直接设 `BENCH_AGENT`/`LLM_INFER_AGENT` 亦可,`--agent` 优先。
+执行器直接读取 JobSpec 的 `workload` 和 `benchmark_method`,再从 `catalogs/workloads.yaml` 与 `references/benchmark_methods/*.json` 确定性拼出 `sglang.bench_serving` 命令。第二步不调用 `tclaude` 或 `claude`,也不受 AI 超时、限流或额度影响。
 
 ### 方式 B: 手写配置 + 直接压测(一步)
 
@@ -145,8 +137,6 @@ SSH 到远程机器,起容器 → 起服务 → 自适应并发搜索 → 压测
 
 ```bash
 ./run_executor.sh input/configs/<config>.json
-# 或指定生成压测命令的 CLI(默认 tclaude)
-./run_executor.sh --agent claude input/configs/<config>.json
 ```
 
 JSON 格式:
@@ -237,11 +227,9 @@ JSON 格式:
 
 多个候选可以同时跑在不同 GPU 上(每个候选独立容器,独立端口),不浪费空闲卡。
 
-### 关闭 Radix Cache(执行期无条件钉死)
+### 关闭 Radix Cache
 
-**执行器在起服务前无条件注入 `--disable-radix-cache`**,不区分候选来源——不论来自 AI 生成的 `configs.jsonl`、手写 config JSON,还是 `cmd`/`cmd_parts`/`params` 任一形式,也不论候选里写没写,最终启动命令都保证带且仅带一个 `--disable-radix-cache`。同时 `extra_buffer` 会被改写成 `no_buffer`(extra_buffer 依赖 radix cache 存 Mamba 状态,关 radix 会启动崩)。
-
-为什么钉死:压测用固定 seed 的 `random-ids`,同一并发档复测会生成完全相同的 prompt,radix 命中前缀让第二次 prefill 白嫖、ttft 断崖式下降,污染吞吐/延迟对比;寻优只认纯推理性能。投机解码 + `no_buffer` + `--disable-radix-cache` 是合法组合。
+默认所有候选 pin `--disable-radix-cache`,测纯推理性能。投机解码 + `no_buffer` + `--disable-radix-cache` 是合法组合。
 
 ### Goodput 归一化排名
 
@@ -324,7 +312,7 @@ llm-infer-tuner/
 │   ├── workloads.yaml          #   负载场景(W01-W10, 输入/输出长度)
 │   └── sglang-images.yaml      #   SGLang 镜像信息(I01-I03, 含 attention_backends/valid_flags)
 │
-├── .claude/skills/             # AI 读的知识库
+├── .claude/skills/             # L1 AI 读的知识库
 │   └── sglang-server-config-gen/
 │       ├── SKILL.md            #   流程入口
 │       ├── knowledge.md        #   全部调优经验(§0-§12)
@@ -335,13 +323,10 @@ llm-infer-tuner/
 │   ├── remote.py               #   SSH + sshpass
 │   ├── container.py            #   docker 生命周期
 │   ├── readiness.py            #   /health 轮询
-│   ├── bench_runner.py         #   压测命令生成(调 tclaude/claude,--agent 选)
+│   ├── bench_runner.py         #   从 workload/method 确定性生成压测命令
 │   ├── concurrency_search.py   #   自适应并发搜索
 │   ├── metrics.py              #   压测结果解析
 │   └── ranker.py               #   goodput 排名
-│
-├── planner/
-│   └── claude_code_client.py   # claude CLI 封装
 │
 ├── schemas/
 │   └── job_spec.py             # JobSpec 校验(含 baseline 字段)

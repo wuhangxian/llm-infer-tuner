@@ -47,6 +47,8 @@ class SearchOutcome:
     newly_probed: List[int]       # distinct C actually evaluated THIS call (excl. seeds),
                                   #   in probe order -> evidence is pulled only for these
     log: List[str] = field(default_factory=list)
+    startup_attempts: int = 1
+    failures: list[dict] = field(default_factory=list)
 
 
 class _BudgetExhausted(Exception):

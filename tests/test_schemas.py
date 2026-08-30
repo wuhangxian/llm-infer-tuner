@@ -52,3 +52,23 @@ def test_job_spec_rejects_unsupported_engine_and_unknown_fields() -> None:
 
 def test_job_spec_exports_json_schema() -> None:
     assert "properties" in JobSpec.model_json_schema()
+
+
+def test_job_has_no_required_overall_runtime_limit() -> None:
+    payload = {
+        "job_id": "long-job",
+        "engine": "sglang",
+        "gpu_model": "gpu-1",
+        "gpu_count": 8,
+        "gpu_memory_gb": 80,
+        "model": "large-model",
+        "image": "sglang",
+        "workload": "workload",
+        "benchmark_method": "method",
+        "sla": {"max_avg_ttft_ms": 1000, "max_avg_tpot_ms": 100},
+        "search": {"max_candidates": 100},
+    }
+
+    job = JobSpec.model_validate(payload)
+
+    assert job.search.max_runtime_minutes is None

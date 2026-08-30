@@ -12,6 +12,8 @@ def wait_until_ready(
     *,
     is_alive: Callable[[], bool] | None = None,
     timeout_s: int = 1800,
+    stall_timeout_s: int | None = None,
+    progress: Callable[[], object] | None = None,
     interval_s: float = 5.0,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.monotonic,
@@ -22,13 +24,24 @@ def wait_until_ready(
     reports False (the server process crashed), returns False immediately. Returns
     False when ``timeout_s`` elapses without a successful probe.
     """
-    deadline = now() + timeout_s
+    started_at = now()
+    deadline = started_at + timeout_s
+    last_progress_at = started_at
+    last_progress = progress() if progress is not None else None
     while True:
         if is_alive is not None and not is_alive():
             return False
         if probe():
             return True
-        if now() >= deadline:
+        current = now()
+        if progress is not None:
+            current_progress = progress()
+            if current_progress != last_progress:
+                last_progress = current_progress
+                last_progress_at = current
+        if current >= deadline:
+            return False
+        if stall_timeout_s is not None and current - last_progress_at >= stall_timeout_s:
             return False
         sleep(interval_s)
 

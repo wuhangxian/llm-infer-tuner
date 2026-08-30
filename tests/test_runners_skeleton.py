@@ -6,6 +6,7 @@ import json
 
 from runners.metrics import RunResult, parse_bench_text
 from runners.ranker import candidate_goodput, data_health_check, passes_sla
+from runners.readiness import wait_until_ready
 from runners.remote import DEFAULT_SSH_OPTIONS, CommandResult, RemoteRunner
 from schemas.job_spec import SLA
 
@@ -209,3 +210,40 @@ def test_run_local_uses_injected_runner_and_wraps_result() -> None:
     assert result.ok is True
     assert result.returncode == 0
     assert result.stdout == "hi\n"
+
+
+def test_remote_timeout_zero_means_no_deadline() -> None:
+    import subprocess
+
+    observed = {}
+
+    def fake_runner(argv, **kwargs):
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+    runner = RemoteRunner("user@host", runner=fake_runner)
+    result = runner.run_local(["long-benchmark"], timeout=0)
+
+    assert result.ok
+    assert observed["timeout"] is None
+
+
+def test_readiness_stops_when_log_makes_no_progress() -> None:
+    clock = {"now": 0.0}
+
+    def sleep(seconds: float) -> None:
+        clock["now"] += seconds
+
+    ready = wait_until_ready(
+        lambda: False,
+        is_alive=lambda: True,
+        timeout_s=100,
+        stall_timeout_s=5,
+        progress=lambda: "same-log-size",
+        interval_s=1,
+        sleep=sleep,
+        now=lambda: clock["now"],
+    )
+
+    assert ready is False
+    assert clock["now"] == 5

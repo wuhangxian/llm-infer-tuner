@@ -1,97 +1,132 @@
-"""Generate sglang.bench_serving commands via the client skill and run them in-container."""
+"""Build deterministic sglang.bench_serving commands and run them in-container."""
 
 from __future__ import annotations
 
 import json
 import shlex
-from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
 
-from planner.claude_code_client import ClaudeCodeClient
+import yaml
+
 from runners.container import Container
 from runners.remote import CommandResult
 from schemas.job_spec import JobSpec
 
-CLIENT_SKILL_DIR = ".claude/skills/sglang-client-config-gen"
 
-BENCH_SCHEMA: dict = {
-    "type": "object",
-    "required": ["benchmark_commands"],
-    "properties": {
-        "benchmark_commands": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "required": ["concurrency", "num_prompts", "command", "reason"],
-                "properties": {
-                    "concurrency": {"type": "integer"},
-                    "num_prompts": {"type": "integer"},
-                    "command": {"type": "string"},
-                    "reason": {"type": "string"},
-                },
-            },
-        }
-    },
-}
+def _load_benchmark_method(project_root: Path, method_id: str) -> dict:
+    directory = project_root / "references" / "benchmark_methods"
+    for path in sorted(directory.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict) and data.get("method_id") == method_id:
+            return data
+    raise ValueError(f"unknown benchmark_method: {method_id}")
 
 
-@dataclass
-class BenchCommand:
-    """One benchmark command for a single concurrency level, still holding placeholders."""
-
-    concurrency: int
-    num_prompts: int
-    command: str  # holds ${BENCHMARK_HOST}/${BENCHMARK_PORT}/${MODEL_PATH}/${JOB_ID}/${TIMESTAMP}
-    reason: str = ""
-
-
-def _build_prompt(job: JobSpec) -> str:
-    job_json = json.dumps(job.model_dump(mode="json"), ensure_ascii=False, indent=2)
-    return (
-        "# 生成 SGLang 压测命令(客户端)\n\n"
-        f"按 `{CLIENT_SKILL_DIR}/SKILL.md` 的读序与输出契约,为下面这个 JobSpec 生成"
-        "每个并发档一条 `python -m sglang.bench_serving` 命令。\n\n"
-        "读:① 该 SKILL.md → ② 同目录 knowledge.md → ③ catalogs/workloads.yaml"
-        "(按 JobSpec.workload 取卡)→ ④ references/benchmark_methods/"
-        "<JobSpec.benchmark_method>.json。\n\n"
-        "host/port/model/输出文件用占位符 ${BENCHMARK_HOST} / ${BENCHMARK_PORT} / "
-        "${MODEL_PATH} / ${JOB_ID} / ${TIMESTAMP};绝不写 --context-length;"
-        "--backend 恒 sglang。\n\n"
-        "## JobSpec\n```json\n"
-        f"{job_json}\n"
-        "```\n\n"
-        "严格按 schema 只返回 JSON 对象 {\"benchmark_commands\": [...]}。"
-    )
+def _token_value(workload: dict, field: str, *, workload_id: str) -> int:
+    raw: object = workload.get(field)
+    if isinstance(raw, dict):
+        raw = raw.get("value")
+    if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+        raise ValueError(f"workload {workload_id} has invalid {field}: {raw!r}")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"workload {workload_id} has invalid {field}: {raw!r}") from exc
+    if value <= 0:
+        raise ValueError(f"workload {workload_id} has invalid {field}: {raw!r}")
+    return value
 
 
-def generate_benchmark_commands(
-    job: JobSpec,
-    *,
-    project_root: str | Path,
-    client: ClaudeCodeClient,
-    allow_dangerous_permissions: bool = True,
-) -> list[BenchCommand]:
-    """Ask the client skill for one bench command per concurrency level."""
+def _lookup_dotted(data: dict, path: str) -> object:
+    current: object = data
+    for component in path.split("."):
+        if not isinstance(current, dict) or component not in current:
+            return None
+        current = current[component]
+    return current
+
+
+def build_benchmark_command_template(
+    job: JobSpec, *, project_root: str | Path
+) -> str:
+    """Build the canonical bench_serving template from checked-in data only."""
     root = Path(project_root)
-    add_dirs: Sequence[str | Path] = [root, root / CLIENT_SKILL_DIR]
-    payload = client.run(
-        prompt=_build_prompt(job),
-        json_schema=BENCH_SCHEMA,
-        add_dirs=add_dirs,
-        allow_dangerous_permissions=allow_dangerous_permissions,
-    )
-    commands: list[BenchCommand] = []
-    for item in payload.get("benchmark_commands", []):
-        commands.append(
-            BenchCommand(
-                concurrency=int(item["concurrency"]),
-                num_prompts=int(item["num_prompts"]),
-                command=str(item["command"]),
-                reason=str(item.get("reason", "")),
-            )
+    workloads_path = root / "catalogs" / "workloads.yaml"
+    try:
+        workload_catalog = yaml.safe_load(
+            workloads_path.read_text(encoding="utf-8")
+        ) or {}
+    except OSError as exc:
+        raise ValueError(f"cannot read workload catalog: {workloads_path}") from exc
+    workloads = workload_catalog.get("workloads", {}) or {}
+    workload = workloads.get(job.workload)
+    if not isinstance(workload, dict):
+        raise ValueError(f"unknown workload: {job.workload}")
+
+    input_tokens = _token_value(workload, "input_tokens", workload_id=job.workload)
+    output_tokens = _token_value(workload, "output_tokens", workload_id=job.workload)
+    method = _load_benchmark_method(root, job.benchmark_method)
+    if method.get("engine") != job.engine:
+        raise ValueError(
+            f"benchmark_method {job.benchmark_method} engine mismatch: "
+            f"expected {job.engine}, got {method.get('engine')}"
         )
-    return commands
+
+    traffic = method.get("traffic", {}) or {}
+    concurrency_values = traffic.get("concurrency_values") or [1]
+    try:
+        concurrency = int(concurrency_values[0])
+        multiplier = int(traffic.get("num_prompts_multiplier", 4))
+    except (IndexError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"benchmark_method {job.benchmark_method} has invalid traffic settings"
+        ) from exc
+    if concurrency <= 0 or multiplier <= 0:
+        raise ValueError(
+            f"benchmark_method {job.benchmark_method} has invalid traffic settings"
+        )
+
+    output_template = str(
+        (method.get("result", {}) or {}).get(
+            "output_file_template", "result_{job_id}_{timestamp}.jsonl"
+        )
+    )
+    output_template = output_template.replace("{job_id}", "${JOB_ID}").replace(
+        "{timestamp}", "${TIMESTAMP}"
+    )
+    values = {
+        "fixed_args": method.get("fixed_args", {}) or {},
+        "runtime_args": method.get("runtime_args", {}) or {},
+        "traffic": {"concurrency": concurrency},
+        "workload": {
+            "input_tokens": {"value": input_tokens},
+            "output_tokens": {"value": output_tokens},
+        },
+        "result": {"output_file": output_template},
+        "derived": {"num_prompts": concurrency * multiplier},
+    }
+
+    entrypoint = method.get("entrypoint")
+    if not isinstance(entrypoint, str) or not entrypoint.strip():
+        raise ValueError(f"benchmark_method {job.benchmark_method} has no entrypoint")
+    parts = shlex.split(entrypoint)
+    argument_mapping = method.get("argument_mapping", {}) or {}
+    if not isinstance(argument_mapping, dict):
+        raise ValueError(
+            f"benchmark_method {job.benchmark_method} has invalid argument_mapping"
+        )
+    for source, flag in argument_mapping.items():
+        value = _lookup_dotted(values, str(source))
+        if value is None or value == "":
+            continue
+        parts.extend([str(flag), str(value)])
+
+    if "--context-length" in parts:
+        raise ValueError("benchmark command must not contain --context-length")
+    return shlex.join(parts)
 
 
 def substitute_placeholders(
@@ -140,10 +175,10 @@ def rewrite_bench_command(
 ) -> tuple[str, int]:
     """Rewrite ONE bench command template for a given concurrency.
 
-    The fairness rule (see client knowledge §3): every candidate must be pressed
+    The fairness rule: every candidate must be pressed
     with the *same* workload, and per-concurrency num_prompts must scale as a
-    constant ratio of C. So we take a single template (generated once per job by
-    the client skill) and deterministically rewrite ONLY ``--max-concurrency``
+    constant ratio of C. So we take the job's locally built template and
+    deterministically rewrite ONLY ``--max-concurrency``
     (-> concurrency) and ``--num-prompts`` (-> concurrency * multiplier), leaving
     every other flag — model, input/output len, dataset, range-ratio, seed —
     byte-for-byte identical across all candidates and all concurrency probes.
@@ -158,7 +193,7 @@ def rewrite_bench_command(
 
 
 def run_benchmark(
-    container: Container, command: str, *, timeout: int = 3600
+    container: Container, command: str, *, timeout: int | None = 0
 ) -> CommandResult:
     """Execute a fully-substituted bench command inside the container."""
     return container.exec(command, timeout=timeout)

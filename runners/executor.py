@@ -9,15 +9,15 @@ import shlex
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from planner.claude_code_client import ClaudeCodeClient
 from runners.bench_runner import (
-    generate_benchmark_commands,
+    build_benchmark_command_template,
     rewrite_bench_command,
     run_benchmark,
     substitute_placeholders,
@@ -28,14 +28,20 @@ from runners.metrics import RunResult, parse_bench_text
 from runners.ranker import data_health_check, passes_sla, rank_candidates
 from runners.readiness import make_health_probe, wait_until_ready
 from runners.remote import RemoteRunner
+from runners.reporting import (
+    annotate_baseline_threshold,
+    build_candidate_rows,
+    render_candidate_preview,
+    write_reports,
+)
 from schemas.job_spec import JobSpec
 
 # Round-1 = coarse adaptive expansion over ALL candidates (no bisection); round-2
-# = precise bisection over the top-K, reusing round-1 probes as seeds. The two
+# = precise bisection over ALL candidates, reusing round-1 probes as seeds. The two
 # rounds are cheap because expansion is log-scale and round-2 only re-probes new
 # midpoints (seeds are served from cache, never re-benched).
 ROUND1_MAX_PROBES = 7   # reaches ~C=64 via 1,2,4,8,16,32,64 in one candidate
-ROUND1_CONFIRM = 1      # coarse: naive verdicts are fine for picking top-K
+ROUND1_CONFIRM = 1      # coarse: precise round 2 will confirm the boundary
 ROUND2_MAX_PROBES = 14
 ROUND2_CONFIRM = 2      # precise: re-probe boundary passes AND fails (see search module)
 DEFAULT_TOP_K = 5
@@ -73,11 +79,14 @@ class ExecutorConfig:
     target_gpu_model: str = ""
     target_gpu_count: int = 0
     target_gpu_memory_gb: float = 0.0
-    top_k: int = DEFAULT_TOP_K    # round-2 refines only the top-K candidates by round-1 goodput
+    top_k: int = DEFAULT_TOP_K    # deprecated compatibility input; all candidates enter round 2
     max_cap: int = DEFAULT_MAX_CAP  # upper bound on concurrency the search will probe
     ssh_password: str = ""  # optional; empty = key-based SSH
     max_parallel: int = 8  # 批内并发跑多少个候选(每个独占容器+GPU+端口);1 = 退回串行
-    fill_host: bool = False  # round2 是否把 top-K 候选各复制成 floor(gpu/tp) 个实例整机满载实测
+    fill_host: bool = False  # round2 是否把每个候选复制成 floor(gpu/tp) 个实例整机满载实测
+    startup_stall_timeout_s: int = 300
+    startup_hard_timeout_s: int = 900
+    startup_max_attempts: int = 3
 
 
 def _load_job(job_path: Path) -> JobSpec:
@@ -207,8 +216,8 @@ def _run_result_dict(result: RunResult) -> dict[str, Any]:
 def _force_output_file(command: str, output_path: str) -> str:
     """Point the bench command's --output-file at a known in-container path.
 
-    The client skill emits ``--output-file result_...jsonl`` (a bare relative
-    name); rewrite that argument so the file lands where the executor reads it.
+    The benchmark method emits ``--output-file result_...jsonl`` (a bare
+    relative name); rewrite that argument so the file lands where the executor reads it.
     Appends the flag if the command lacks one.
     """
     parts = shlex.split(command)
@@ -238,25 +247,17 @@ class _CandidateContext:
     # None = 单实例,只用 port 起一个 server —— round1 粗筛与非满载路径的原行为。
     replica_ports: list[int] | None = None
     replica_gpus: list[str] | None = None  # 每个副本的 CUDA_VISIBLE_DEVICES 值(如 "0,1")
+    container_ready: bool = False
+    container_start_failures: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _resolve_bench_template(
-    job: JobSpec, *, config: ExecutorConfig, client: ClaudeCodeClient
+    job: JobSpec, *, config: ExecutorConfig
 ) -> str:
-    """Call the client skill ONCE and return a single bench command template.
-
-    The skill emits one command per concurrency level; they differ only in
-    --max-concurrency / --num-prompts, so any one of them serves as the template
-    that rewrite_bench_command() re-parameterizes per probe. Prefer the lowest
-    concurrency (fewest prompts) as the canonical template.
-    """
-    commands = generate_benchmark_commands(
-        job, project_root=config.project_root, client=client
+    """Build one locally validated command template for every candidate/probe."""
+    return build_benchmark_command_template(
+        job, project_root=config.project_root
     )
-    if not commands:
-        raise RuntimeError("client skill returned no benchmark commands")
-    commands.sort(key=lambda bc: bc.concurrency)
-    return commands[0].command
 
 
 def _aggregate_replicas(replicas: list[RunResult], *, expected: int) -> RunResult:
@@ -673,12 +674,36 @@ def _run_batch_parallel(
         )
         containers.append((candidate_id, container, ctx, candidate, gpu_ids_str, port))
 
-    # Start all containers in this batch
+    # Start all containers in this batch. Container creation (including a
+    # transient SSH 255) is part of bounded service startup recovery.
     for candidate_id, container, ctx, candidate, gpu_ids_str, port in containers:
-        _log(f"[{round_label}] {candidate_id}: starting container (GPUs={gpu_ids_str}, port={port}) ...")
-        started = container.start()
-        if not started.ok or not container.is_running():
-            _log(f"[{round_label}] {candidate_id}: container FAILED to start: {started.stderr.strip()}")
+        try:
+            failed_round = int(round_label.removeprefix("r"))
+        except ValueError:
+            failed_round = 0
+        for attempt in range(1, max(1, config.startup_max_attempts) + 1):
+            _log(
+                f"[{round_label}] {candidate_id}: starting container "
+                f"(GPUs={gpu_ids_str}, port={port}, "
+                f"attempt {attempt}/{config.startup_max_attempts}) ..."
+            )
+            started = container.start(timeout=config.startup_hard_timeout_s)
+            if started.ok and container.is_running(timeout=config.startup_hard_timeout_s):
+                ctx.container_ready = True
+                break
+            reason = started.stderr.strip() or started.stdout.strip() or "container not running"
+            ctx.container_start_failures.append(
+                {
+                    "failed_at": datetime.now(UTC).astimezone().isoformat(),
+                    "round": failed_round,
+                    "concurrency": None,
+                    "attempt": attempt,
+                    "stage": "container_start",
+                    "reason": f"container did not start: {reason}",
+                }
+            )
+            _log(f"[{round_label}] {candidate_id}: container start failed: {reason}")
+            container.remove(force=True, timeout=config.startup_hard_timeout_s)
 
     # Run each candidate (server lifecycle + search) CONCURRENTLY within the batch.
     # 每个候选独占容器+GPU+端口,底层 subprocess.run 线程安全,故用线程池并发跑。
@@ -687,6 +712,20 @@ def _run_batch_parallel(
     # 不会留下孤儿容器占住 GPU/端口导致下个 batch 撞车。
     def _run_one(entry) -> tuple[str, SearchOutcome]:
         candidate_id, container, ctx, candidate, gpu_ids_str, port = entry
+        if not ctx.container_ready:
+            reason = ctx.container_start_failures[-1]["reason"]
+            return candidate_id, SearchOutcome(
+                results=[_health_check_failed_result(candidate_id, reason)],
+                c_star=None,
+                stop_reason="health_check_failed",
+                last_pass=None,
+                first_fail=None,
+                num_evals=0,
+                newly_probed=[],
+                log=[reason],
+                startup_attempts=len(ctx.container_start_failures),
+                failures=list(ctx.container_start_failures),
+            )
         cand_seeds = None
         if seeds_by_id and candidate_id in seeds_by_id:
             cand_seeds = seeds_by_id[candidate_id]
@@ -703,6 +742,17 @@ def _run_batch_parallel(
             )
         except Exception as exc:  # noqa: BLE001 - 单候选崩溃不拖垮同批其他候选
             _log(f"[{round_label}] {candidate_id}: 运行异常,记为失败: {exc!r}")
+            try:
+                failed_round = int(round_label.removeprefix("r"))
+            except ValueError:
+                failed_round = 0
+            failure = {
+                "failed_at": datetime.now(UTC).astimezone().isoformat(),
+                "round": failed_round,
+                "concurrency": None,
+                "attempt": 1,
+                "reason": f"_run_candidate raised: {exc!r}",
+            }
             outcome = SearchOutcome(
                 results=[_health_check_failed_result(candidate_id, f"_run_candidate raised: {exc!r}")],
                 c_star=None,
@@ -712,6 +762,7 @@ def _run_batch_parallel(
                 num_evals=0,
                 newly_probed=[],
                 log=[f"_run_candidate raised: {exc!r}"],
+                failures=[failure],
             )
         return candidate_id, outcome
 
@@ -815,20 +866,35 @@ def _force_disable_radix_cache(cmd: str) -> str:
     radix」(固定 seed 复测会命中前缀,prefill 白嫖,ttft 断崖式下降污染对比),
     故在唯一的命令汇合点统一注入,任何来源都跑不掉。
 
-    连带处理与本约束冲突的 mamba `extra_buffer`:它靠 radix cache 存 Mamba 状态,
-    `extra_buffer` + `--disable-radix-cache` 会启动 ValueError。这里把它改写成
-    `no_buffer`(SGLang 默认、与关 radix 天然兼容),避免旧 config 直接崩在启动。
+    用户是否写该开关都不影响最终结果:先移除已有写法,再统一追加一个裸 flag。
+    Mamba radix 策略不在这里改写;Radix Cache 关闭时该策略不生效,报告显示 inactive。
     """
-    # 1) 去掉 extra_buffer(空格式或 = 式都覆盖),改成 no_buffer
     cmd = re.sub(
-        r"--mamba-radix-cache-strategy(=|\s+)extra_buffer",
-        r"--mamba-radix-cache-strategy\1no_buffer",
+        r"\s*--disable-radix-cache(?:=\S+|\s+(?!-)\S+)?",
+        "",
         cmd,
+        flags=re.IGNORECASE,
     )
-    # 2) 若已显式写了 --disable-radix-cache(可能带 =true/=false),先全部剥掉,稍后统一补
-    cmd = re.sub(r"\s*--disable-radix-cache(=\S+)?", "", cmd)
-    # 3) 统一在末尾补一个裸 flag
-    return cmd.rstrip() + " --disable-radix-cache"
+    body, marker, comment = cmd.partition(" #")
+    effective = body.rstrip() + " --disable-radix-cache"
+    return effective + (marker + comment if marker else "")
+
+
+def _override_launch_port(cmd: str, port: int) -> str:
+    """Set one launch command's ``--port`` regardless of its original spelling/value."""
+    body, marker, comment = cmd.partition(" #")
+    parts = shlex.split(body)
+    for index, part in enumerate(parts):
+        if part == "--port" and index + 1 < len(parts):
+            parts[index + 1] = str(port)
+            break
+        if part.startswith("--port="):
+            parts[index] = f"--port={port}"
+            break
+    else:
+        parts.extend(["--port", str(port)])
+    effective = shlex.join(parts)
+    return effective + (marker + comment if marker else "")
 
 
 def _run_candidate(
@@ -878,42 +944,81 @@ def _run_candidate(
     n_replicas = len(replica_ports)
     server_log = f"{candidate_out}/server.log"  # 首副本日志,崩溃诊断沿用它
 
-    for idx, (rport, rgpu) in enumerate(zip(replica_ports, replica_gpus)):
-        # 每个副本换到自己的端口;满载时再用 CUDA_VISIBLE_DEVICES 把它钉在自己那段卡上。
-        rcmd = base_cmd.replace("--host 0.0.0.0 --port 30000", f"--host 0.0.0.0 --port {rport}")
-        rcmd = rcmd.replace("--port 30000", f"--port {rport}")
-        if rgpu is not None:
-            # 必须用 `env KEY=VAL` 而非裸 `KEY=VAL cmd` 前缀:exec_detached 会拼成
-            # `nohup {rcmd} ...`,而 nohup 把第一个词当程序名 —— 裸前缀会让它去找名为
-            # "CUDA_VISIBLE_DEVICES=0" 的可执行文件,报 "No such file or directory" 而崩。
-            # env 会正确解析 KEY=VAL 环境赋值后再 exec 后面的 python。
-            rcmd = f"env CUDA_VISIBLE_DEVICES={rgpu} {rcmd}"
-        rlog = server_log if idx == 0 else f"{candidate_out}/server_i{idx}.log"
-        tag = "" if n_replicas == 1 else f" 副本 {idx + 1}/{n_replicas} (GPU={rgpu}@{rport})"
-        _log(f"[{round_label}] {candidate_id}: starting server{tag}, waiting for /health ...")
-        container.exec_detached(rcmd, rlog)
-
     def _server_alive() -> bool:
         return container.exec("pgrep -f sglang.launch_server").ok
 
-    # 满载:所有副本端口都要 /health 通过才算就绪(缺一个就不能满载压测)。
-    ready = True
-    for rport in replica_ports:
-        probe = make_health_probe(container, port=rport)
-        if not wait_until_ready(probe, is_alive=_server_alive):
-            ready = False
+    def _startup_progress() -> str:
+        result = container.exec(f"stat -c '%s:%Y' {shlex.quote(server_log)}")
+        return result.stdout.strip() if result.ok else ""
+
+    startup_failures: list[dict[str, Any]] = list(ctx.container_start_failures)
+    ready = False
+    startup_attempt = 0
+    try:
+        failed_round = int(round_label.removeprefix("r"))
+    except ValueError:
+        failed_round = 0
+
+    for startup_attempt in range(1, max(1, config.startup_max_attempts) + 1):
+        for idx, (rport, rgpu) in enumerate(zip(replica_ports, replica_gpus)):
+            # 每个副本换到自己的端口;满载时再用 CUDA_VISIBLE_DEVICES 把它钉在自己那段卡上。
+            rcmd = _override_launch_port(base_cmd, rport)
+            if rgpu is not None:
+                rcmd = f"env CUDA_VISIBLE_DEVICES={rgpu} {rcmd}"
+            rlog = server_log if idx == 0 else f"{candidate_out}/server_i{idx}.log"
+            tag = "" if n_replicas == 1 else (
+                f" 副本 {idx + 1}/{n_replicas} (GPU={rgpu}@{rport})"
+            )
+            _log(
+                f"[{round_label}] {candidate_id}: starting server{tag} "
+                f"(attempt {startup_attempt}/{config.startup_max_attempts}), "
+                "waiting for /health ..."
+            )
+            container.exec_detached(rcmd, rlog)
+
+        # 满载:所有副本端口都要 /health 通过才算就绪。
+        ready = True
+        for rport in replica_ports:
+            probe = make_health_probe(container, port=rport)
+            if not wait_until_ready(
+                probe,
+                is_alive=_server_alive,
+                timeout_s=config.startup_hard_timeout_s,
+                stall_timeout_s=config.startup_stall_timeout_s,
+                progress=_startup_progress,
+            ):
+                ready = False
+                break
+        if ready:
             break
-    candidate_port = replica_ports[0]
+
+        local_log = candidate_dir / f"server.{round_label}.attempt{startup_attempt}.log"
+        _pull_container_file(container, server_log, local_log)
+        reason = _extract_failure_reason(local_log)
+        startup_failures.append(
+            {
+                "failed_at": datetime.now(UTC).astimezone().isoformat(),
+                "round": failed_round,
+                "concurrency": None,
+                "attempt": startup_attempt,
+                "stage": "server_start",
+                "reason": f"server did not become ready: {reason}",
+            }
+        )
+        _log(
+            f"[{round_label}] {candidate_id}: startup attempt {startup_attempt} failed: {reason}"
+        )
+        container.exec("pkill -f sglang.launch_server || true")
 
     try:
         if not ready:
-            _log(f"[{round_label}] {candidate_id}: server NOT ready (crash/timeout)")
-            local_log = candidate_dir / f"server.{round_label}.log"
-            _pull_container_file(container, server_log, local_log)
-            reason = _extract_failure_reason(local_log)
-            _log(f"[{round_label}] {candidate_id}: crash reason: {reason}")
+            _log(
+                f"[{round_label}] {candidate_id}: server NOT ready after "
+                f"{startup_attempt} attempt(s)"
+            )
+            reason = startup_failures[-1]["reason"] if startup_failures else "unknown"
             failed = _health_check_failed_result(
-                candidate_id, f"server did not become ready: {reason}"
+                candidate_id, reason
             )
             outcome = SearchOutcome(
                 results=[failed],
@@ -924,6 +1029,8 @@ def _run_candidate(
                 num_evals=0,
                 newly_probed=[],
                 log=["server did not become ready"],
+                startup_attempts=startup_attempt + len(ctx.container_start_failures),
+                failures=startup_failures,
             )
         else:
             _log(f"[{round_label}] {candidate_id}: server ready, probing concurrency ...")
@@ -955,6 +1062,8 @@ def _run_candidate(
                 f"[{round_label}] {candidate_id}: done c_star={outcome.c_star} "
                 f"stop={outcome.stop_reason} evals={outcome.num_evals}"
             )
+            outcome.startup_attempts = startup_attempt + len(ctx.container_start_failures)
+            outcome.failures = startup_failures
     finally:
         container.exec("pkill -f sglang.launch_server || true")
 
@@ -970,6 +1079,7 @@ def _outcome_diag(outcome: SearchOutcome) -> dict[str, Any]:
         "num_evals": outcome.num_evals,
         "newly_probed": list(outcome.newly_probed),
         "num_results": len(outcome.results),
+        "startup_attempts": outcome.startup_attempts,
     }
 
 
@@ -1121,7 +1231,6 @@ def run_executor(
     config: ExecutorConfig,
     *,
     remote: RemoteRunner | None = None,
-    client: ClaudeCodeClient | None = None,
 ) -> dict:
     """Orchestrate the 8-step executor loop and return a summary dict.
 
@@ -1138,17 +1247,12 @@ def run_executor(
     candidates = _load_candidates(config.configs_path, config.max_candidates)
     _check_hardware_match(job, config)
 
+    # Everything needed to construct the benchmark is local and deterministic.
+    # Validate it before SSH preflight, which may clear containers/GPU processes.
+    bench_template = _resolve_bench_template(job, config=config)
+
     remote = remote or RemoteRunner(config.ssh_target, ssh_password=config.ssh_password)
     _preflight_checks(config, remote)
-    client = client or ClaudeCodeClient()
-
-    # FAIRNESS: the client skill (an LLM) is called EXACTLY ONCE per job to get a
-    # bench command template. Every candidate and every probed concurrency reuses
-    # that one template with only --max-concurrency / --num-prompts rewritten, so
-    # input length / dataset / seed are byte-identical across the whole sweep. (The
-    # old code called the skill once per candidate, letting the workload drift and
-    # making candidates non-comparable.)
-    bench_template = _resolve_bench_template(job, config=config, client=client)
 
     # The boundary predicate for the adaptive search: a run "qualifies" iff it is
     # both data-healthy (not truncated) and within SLA. Injected so the search
@@ -1174,11 +1278,13 @@ def run_executor(
     outputs_container_path = "/workspace/outputs"
 
     config.results_dir.mkdir(parents=True, exist_ok=True)
-    _log(f"job={job.job_id} candidates={len(candidates)} "
-         f"output_len={output_len} multiplier={multiplier} top_k={config.top_k} "
-         f"gpu_count={job.gpu_count}")
+    _log(
+        f"job={job.job_id} candidates={len(candidates)} output_len={output_len} "
+        f"multiplier={multiplier} precise_candidates=all gpu_count={job.gpu_count}"
+    )
 
     results_by_candidate: dict[str, list[RunResult]] = {}
+    round_results: dict[str, dict[int, list[RunResult]]] = {}
     candidate_summaries: dict[str, dict[str, Any]] = {}
     search_diagnostics: dict[str, dict[str, Any]] = {}
 
@@ -1232,26 +1338,34 @@ def run_executor(
         )
         for candidate_id, outcome in outcomes.items():
             results_by_candidate[candidate_id] = outcome.results
+            round_results.setdefault(candidate_id, {})[1] = list(outcome.results)
             search_diagnostics[candidate_id] = _outcome_diag(outcome)
             candidate_summaries[candidate_id] = {
                 "candidate_id": candidate_id,
                 "round1": _outcome_diag(outcome),
+                "round1_batch": f"{batch_idx + 1}/{len(batches)}",
+                "round1_attempts": outcome.startup_attempts,
+                "attempts": outcome.startup_attempts,
+                "failures": [
+                    {**failure, "batch": f"{batch_idx + 1}/{len(batches)}"}
+                    for failure in outcome.failures
+                ],
             }
 
-    # ---- pick top-K by round-1 goodput ------------------------------------
+    # Round-1 ranking is diagnostic only. Every candidate enters precise round 2.
     round1_ranking = rank_candidates(
         results_by_candidate, job.sla, output_len=output_len,
         gpu_count=job.gpu_count,
     )
-    top_ids = [row["candidate_id"] for row in round1_ranking[: config.top_k]]
+    refine_ids = [str(candidate.get("id", "unknown")) for candidate in candidates]
     _log(f"round-1 done. ranking={[(r['candidate_id'], r['goodput_per_host']) for r in round1_ranking]}")
-    _log(f"round-2 refining top-{config.top_k}: {top_ids}")
+    _log(f"round-2 refining ALL {len(refine_ids)} candidates: {refine_ids}")
 
-    # ---- ROUND 2: precise bisection on top-K (batch-parallel) ----
+    # ---- ROUND 2: precise bisection on ALL candidates (batch-parallel) ----
     candidate_by_id = {str(c.get("id", "unknown")): c for c in candidates}
-    top_candidates = [candidate_by_id[cid] for cid in top_ids if cid in candidate_by_id]
+    top_candidates = [candidate_by_id[cid] for cid in refine_ids if cid in candidate_by_id]
 
-    # Split top-K into batches.
+    # Split all precise candidates into batches.
     # · fill_host:每个候选独占整机、各自成批,批间串行(N 副本满载实测)。
     # · 否则:沿用「按 tp_size 把多个候选拼满 gpu_count」的粗筛式并行分批。
     top_batches: list[list[dict[str, Any]]] = []
@@ -1296,42 +1410,65 @@ def run_executor(
         )
         for candidate_id, outcome in outcomes.items():
             results_by_candidate[candidate_id] = outcome.results
+            new_concurrencies = set(outcome.newly_probed)
+            round_results.setdefault(candidate_id, {})[2] = [
+                result for result in outcome.results if result.concurrency in new_concurrencies
+            ]
             search_diagnostics[candidate_id] = _outcome_diag(outcome)
             candidate_summaries[candidate_id]["round2"] = _outcome_diag(outcome)
+            candidate_summaries[candidate_id]["round2_batch"] = (
+                f"{batch_idx + 1}/{len(top_batches)}"
+            )
+            candidate_summaries[candidate_id]["round2_attempts"] = outcome.startup_attempts
+            candidate_summaries[candidate_id]["attempts"] += outcome.startup_attempts
+            candidate_summaries[candidate_id]["failures"].extend(
+                {**failure, "batch": f"{batch_idx + 1}/{len(top_batches)}"}
+                for failure in outcome.failures
+            )
 
     ranking = rank_candidates(
         results_by_candidate, job.sla, output_len=output_len,
         gpu_count=job.gpu_count,
     )
 
-    # Baseline filtering: if baseline_threshold_pct > 0, find baseline goodput
-    # and filter out candidates below baseline * (1 + pct/100)
     threshold_pct = job.search.baseline_threshold_pct
-    baseline_goodput = None
-    if threshold_pct > 0:
-        for row in ranking:
-            if row["candidate_id"] == "baseline":
-                baseline_goodput = row["goodput_per_host"]
-                break
-        if baseline_goodput is not None and baseline_goodput > 0:
-            threshold = baseline_goodput * (1 + threshold_pct / 100)
-            filtered = [r for r in ranking if r["goodput_per_host"] >= threshold or r["candidate_id"] == "baseline"]
-            _log(f"Baseline filter: baseline={baseline_goodput:.0f}, threshold=+{threshold_pct}%={threshold:.0f}, kept {len(filtered)}/{len(ranking)} candidates")
-            ranking = filtered
-        elif baseline_goodput is not None and baseline_goodput == 0:
-            _log(f"Baseline failed (goodput=0), skipping threshold filter")
-        else:
-            _log(f"No baseline candidate found, skipping threshold filter")
-
-    _write_json(config.results_dir / "ranking.json", ranking)
+    ranking = annotate_baseline_threshold(ranking, threshold_pct=threshold_pct)
+    candidate_rows = build_candidate_rows(
+        candidates,
+        candidate_summaries,
+        round_results,
+        ranking,
+        output_len=output_len,
+    )
+    completed_count = sum(row["status"] == "completed" for row in candidate_rows)
+    all_completed = completed_count == len(candidate_rows)
+    task_status = {
+        "report_schema_version": 1,
+        "job_id": job.job_id,
+        "task_status": "COMPLETED" if all_completed else "INCOMPLETE",
+        "ranking_status": "FINAL" if all_completed else "PROVISIONAL",
+        "interrupted": False,
+        "total_candidates": len(candidate_rows),
+        "completed_candidates": completed_count,
+        "failed_candidates": len(candidate_rows) - completed_count,
+    }
+    write_reports(
+        config.results_dir,
+        ranking=ranking,
+        candidate_rows=candidate_rows,
+        task_status=task_status,
+    )
+    _log("candidate result preview (one row per candidate):")
+    for line in render_candidate_preview(candidate_rows):
+        _log("  " + line)
 
     return {
         "job_id": job.job_id,
         "output_len": output_len,
         "num_prompts_multiplier": multiplier,
-        "top_k": config.top_k,
-        "top_ids": top_ids,
+        **task_status,
         "candidates": list(candidate_summaries.values()),
+        "candidate_results": candidate_rows,
         "search_diagnostics": search_diagnostics,
         "ranking": ranking,
     }
@@ -1380,7 +1517,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--concurrencies", default=None,
                         help="deprecated: adaptive search now chooses probes")
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K,
-                        help="round-2 refines only the top-K candidates by round-1 goodput")
+                        help="deprecated compatibility option; round-2 always refines all candidates")
     parser.add_argument("--max-cap", type=int, default=DEFAULT_MAX_CAP,
                         help="upper bound on concurrency the search will probe")
     parser.add_argument("--port", type=int, default=30000)
@@ -1391,7 +1528,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--target-gpu-memory-gb", type=float, default=0.0)
     parser.add_argument(
         "--fill-host", action="store_true",
-        help="round2 把每个 top-K 候选复制成 floor(gpu_count/tp_size) 个实例整机满载、"
+        help="round2 把每个候选复制成 floor(gpu_count/tp_size) 个实例整机满载、"
              "多端口并发压测求和,得到实测整机 goodput(而非单实例 × 实例数 纸面外推)。"
              "round1 仍单实例粗筛。",
     )
@@ -1399,6 +1536,9 @@ def main(argv: list[str] | None = None) -> int:
         "--max-parallel", type=int, default=8,
         help="批内候选并发上限(每候选独占容器+GPU+端口)。",
     )
+    parser.add_argument("--startup-stall-timeout", type=int, default=300)
+    parser.add_argument("--startup-hard-timeout", type=int, default=900)
+    parser.add_argument("--startup-max-attempts", type=int, default=3)
     args = parser.parse_args(argv)
 
     config = ExecutorConfig(
@@ -1423,6 +1563,9 @@ def main(argv: list[str] | None = None) -> int:
         target_gpu_memory_gb=args.target_gpu_memory_gb,
         fill_host=args.fill_host,
         max_parallel=args.max_parallel,
+        startup_stall_timeout_s=args.startup_stall_timeout,
+        startup_hard_timeout_s=args.startup_hard_timeout,
+        startup_max_attempts=args.startup_max_attempts,
     )
     summary = run_executor(config)
     print(json.dumps(summary, ensure_ascii=False, indent=2))

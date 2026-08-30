@@ -480,6 +480,17 @@ def test_startup_prints_timeout_protection(script_project: ScriptProject) -> Non
     assert "最多尝试 2 次" in completed.stderr
 
 
+def test_preview_distinguishes_requested_and_effective_mamba_cache(
+    script_project: ScriptProject,
+) -> None:
+    completed, _ = script_project.run()
+
+    assert completed.returncode == 0, completed.stderr
+    assert "requested_mamba=no_buffer(default)" in completed.stderr
+    assert "effective_mamba=inactive(radix_off)" in completed.stderr
+    assert "radix=off" in completed.stderr
+
+
 def test_malformed_raw_preserves_existing_output_and_cleans_temp(
     script_project: ScriptProject,
 ) -> None:
