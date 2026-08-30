@@ -228,6 +228,11 @@ ${JOB_JSON}
 
 如果没有 baseline 字段:正常生成 max_candidates 条候选(第一条是基线锚点),不额外插基线。
 
+## 公平性硬约束
+
+- 所有候选(含 baseline)实际执行时统一关闭 Radix/Prefix Cache；executor 会覆盖用户输入并确保启动命令带且仅带一个 `--disable-radix-cache`。
+- `mamba_radix_cache_strategy` 可保留为用户请求值用于审计，但在 Radix Cache 关闭时记为 effective=inactive，不作为候选间有效调优轴。
+
 ## 执行方式
 
 请按 \`${SKILL_DIR}/SKILL.md\` 的流程执行:读 knowledge.md + catalogs/*.yaml(含 sglang-images.yaml),
@@ -506,14 +511,15 @@ OUT_TMP=""
 # (一条候选占十几行),wc -l 会把总行数(如 33 条≈620 行)误当成候选数。
 N="$(jq '.candidates | length' "$OUT")"
 echo "✅ 已生成 $N 条候选 → $OUT" >&2
-echo "── 预览(id / tp / ep / att / mf / mamba / page / spec / chunk / kv / sched / radix)──" >&2
+echo "── 预览(id / tp / ep / att / mf / requested_mamba / effective_mamba / page / spec / chunk / kv / sched / radix)──" >&2
 jq -r '.candidates[] | 
   "  " + .id +
   "  tp=" + (.params.tp_size|tostring) +
   "  ep=" + (.params.ep_size // 1 | tostring) +
   "  " + (.params.attention_backend // "-(default)") +
   "  mf=" + (.params.mem_fraction_static|tostring) +
-  "  mamba=" + (.params.mamba_radix_cache_strategy // .params.mamba_scheduler_strategy // .params["mamba-radix-cache-strategy"] // "no_buffer(default)") +
+  "  requested_mamba=" + (.params.mamba_radix_cache_strategy // .params.mamba_scheduler_strategy // .params["mamba-radix-cache-strategy"] // "no_buffer(default)") +
+  "  effective_mamba=inactive(radix_off)" +
   "  page=" + (.params.page_size // .params["page-size"] // "1(default)" | tostring) +
   "  spec=" + (.params.speculative_algorithm // .params["speculative-algorithm"] // .params.speculative // "none(default)") +
   "  chunk=" + (.params.chunked_prefill_size // .params["chunked-prefill-size"] // "8192(default)" | tostring) +

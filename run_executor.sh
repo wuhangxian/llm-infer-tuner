@@ -156,6 +156,17 @@ if [ -n "${MAX_PARALLEL:-}" ]; then
   echo "    max_parallel=$MAX_PARALLEL" >&2
 fi
 
+# 只限制服务拉起，不限制整个任务运行时间。可按机器/模型覆盖。
+STARTUP_STALL_TIMEOUT_SECONDS="${STARTUP_STALL_TIMEOUT_SECONDS:-300}"
+STARTUP_HARD_TIMEOUT_SECONDS="${STARTUP_HARD_TIMEOUT_SECONDS:-900}"
+STARTUP_MAX_ATTEMPTS="${STARTUP_MAX_ATTEMPTS:-3}"
+EXTRA_ARGS+=(
+  --startup-stall-timeout "$STARTUP_STALL_TIMEOUT_SECONDS"
+  --startup-hard-timeout "$STARTUP_HARD_TIMEOUT_SECONDS"
+  --startup-max-attempts "$STARTUP_MAX_ATTEMPTS"
+)
+echo "    startup: stall=${STARTUP_STALL_TIMEOUT_SECONDS}s hard=${STARTUP_HARD_TIMEOUT_SECONDS}s attempts=${STARTUP_MAX_ATTEMPTS}; job_timeout=none" >&2
+
 exec uv run python -m runners.executor \
   --job "$JOB" \
   --configs "$CONFIGS" \

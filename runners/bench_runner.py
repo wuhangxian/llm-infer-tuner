@@ -158,7 +158,7 @@ def rewrite_bench_command(
 
 
 def run_benchmark(
-    container: Container, command: str, *, timeout: int = 3600
+    container: Container, command: str, *, timeout: int | None = 0
 ) -> CommandResult:
     """Execute a fully-substituted bench command inside the container."""
     return container.exec(command, timeout=timeout)

@@ -27,10 +27,19 @@ class BaselineConfig(StrictModel):
 
 class SearchBudget(StrictModel):
     max_candidates: int = Field(gt=0)
-    max_runtime_minutes: int = Field(gt=0)
+    # Legacy input only. The executor deliberately does not impose a whole-job
+    # deadline because a large candidate set may legitimately run for days.
+    max_runtime_minutes: int | None = Field(default=None, gt=0)
     baseline: BaselineConfig | None = None
-    baseline_threshold_pct: float = Field(default=0, ge=0, le=100,
-        description="Only keep candidates with goodput >= baseline * (1 + pct/100). 0 = keep all")
+    baseline_threshold_pct: float = Field(
+        default=0,
+        ge=0,
+        le=100,
+        description=(
+            "Annotate whether each candidate reaches baseline * (1 + pct/100); "
+            "never filter rows"
+        ),
+    )
 
 
 class JobSpec(StrictModel):

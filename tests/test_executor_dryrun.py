@@ -6,8 +6,8 @@ fake ClaudeCodeClient. Asserts the wiring that the unit tests can't reach:
   * the client skill (an LLM) is called EXACTLY ONCE per job (fairness), and every
     candidate/probe reuses that one template with only --max-concurrency /
     --num-prompts rewritten (byte-identical workload otherwise);
-  * round 1 expands over ALL candidates, round 2 bisects only the top-K and
-    REUSES round-1 probes as seeds (top-K seeded C are never re-benched);
+  * round 1 expands over ALL candidates, round 2 precisely refines ALL candidates
+    and REUSES round-1 probes as seeds (seeded C are never re-benched);
   * the final ranking is goodput-descending and matches each candidate's true C*.
 
 The fake "server" is a monotone SLA boundary per candidate: bench at C qualifies
@@ -177,6 +177,46 @@ class _FakeContainer:
         return _FakeResult(0, stdout=jsonl)
 
 
+class _FlakyServerContainer(_FakeContainer):
+    def __init__(self, cstar_by_candidate: dict[str, int], failures_before_ready: int) -> None:
+        super().__init__(cstar_by_candidate)
+        self.failures_remaining = failures_before_ready
+        self.launch_attempts = 0
+
+    def exec_detached(self, command: str, log_container_path: str, *, timeout=None):
+        self.launch_attempts += 1
+        self.launched_cmds.append(command)
+        if self.failures_remaining > 0:
+            self.failures_remaining -= 1
+            self.alive = False
+            self._result_files[log_container_path] = "RuntimeError: synthetic startup crash"
+            return _FakeResult(returncode=1, stderr="synthetic startup crash")
+        self.alive = True
+        return _FakeResult(stdout="1234\n")
+
+
+class _FlakyContainerStart(_FakeContainer):
+    def __init__(self, cstar_by_candidate: dict[str, int], failures_before_ready: int) -> None:
+        super().__init__(cstar_by_candidate)
+        self.failures_remaining = failures_before_ready
+        self.container_running = False
+
+    def start(self, *, timeout=None) -> _FakeResult:
+        if self.failures_remaining > 0:
+            self.failures_remaining -= 1
+            self.container_running = False
+            return _FakeResult(returncode=255, stderr="ssh connection lost")
+        self.container_running = True
+        return _FakeResult()
+
+    def is_running(self, *, timeout=None) -> bool:
+        return self.container_running
+
+    def remove(self, *, force: bool = True, timeout=None) -> _FakeResult:
+        self.container_running = False
+        return _FakeResult()
+
+
 def _flag_int(parts: list[str], flag: str) -> int:
     for i, p in enumerate(parts):
         if p == flag and i + 1 < len(parts):
@@ -226,7 +266,7 @@ class _FakeClient:
 # --- fixtures -----------------------------------------------------------------
 
 
-def _write_job(tmp_path: Path) -> Path:
+def _write_job(tmp_path: Path, *, baseline_threshold_pct: float = 0) -> Path:
     job = {
         "job_id": "dryrun-job",
         "engine": "sglang",
@@ -238,7 +278,11 @@ def _write_job(tmp_path: Path) -> Path:
         "workload": "chat_1k_1k",
         "benchmark_method": "sglang-bench-serving",
         "sla": {"max_avg_ttft_ms": 2000.0, "max_avg_tpot_ms": 80.0, "min_success_rate": 0.99},
-        "search": {"max_candidates": 16, "max_runtime_minutes": 120},
+        "search": {
+            "max_candidates": 16,
+            "max_runtime_minutes": 120,
+            "baseline_threshold_pct": baseline_threshold_pct,
+        },
     }
     path = tmp_path / "job.json"
     path.write_text(json.dumps(job), encoding="utf-8")
@@ -323,11 +367,21 @@ def test_two_round_dryrun_ranks_by_true_goodput(tmp_path, workloads_output_len):
         assert by_id[cid]["goodput_per_host"] == expected_cstar * 100.0 * 8  # gpu_count=8, tp_size=1
         assert by_id[cid]["best_concurrency"] == expected_cstar
 
-    # -- top-K wiring: only the two best (by round-1 goodput) get round 2 ------
-    assert summary["top_k"] == 2
-    assert set(summary["top_ids"]) == {"cand-b", "cand-d"}
-    for cid in ("cand-b", "cand-d"):
+    # -- every candidate enters precise round 2; --top-k is compatibility-only --
+    assert "top_k" not in summary
+    assert "top_ids" not in summary
+    for cid in cstar:
         assert "round2" in summary["candidates"][_index_of(summary, cid)]
+
+    assert summary["task_status"] == "COMPLETED"
+    assert summary["ranking_status"] == "FINAL"
+    rows = [json.loads(line) for line in (
+        results_dir / "candidate_results.jsonl"
+    ).read_text(encoding="utf-8").splitlines()]
+    assert [row["candidate_id"] for row in rows] == list(cstar)
+    assert all(row["status"] == "completed" for row in rows)
+    assert all({point["round"] for point in row["concurrency_points"]} == {1, 2}
+               for row in rows)
 
     # -- ranking.json + per-candidate evidence were written -------------------
     assert (results_dir / "ranking.json").exists()
@@ -506,17 +560,17 @@ def _index_of(summary: dict, candidate_id: str) -> int:
     raise AssertionError(f"{candidate_id} not in summary candidates")
 
 
-def test_every_launch_forces_disable_radix_and_no_extra_buffer(tmp_path, workloads_output_len):
+def test_every_launch_forces_exactly_one_disable_radix(tmp_path, workloads_output_len):
     """硬约束:任何候选、任何来源(cmd/params)启动命令都必须钉死关 radix,
-    且不得带与之冲突的 mamba extra_buffer。复刻用户手写 config 的形状:
-    带 extra_buffer、不带 disable-radix-cache —— 执行器必须自动纠正。"""
+    用户没写时补上,用户写了任意值时覆盖成唯一的裸 flag。Mamba 请求值原样留作审计。"""
     path = tmp_path / "configs.jsonl"
     lines = [
         # (a) cmd 整串,带 extra_buffer,没写 disable-radix —— 你手写 config 渲染后的样子
         json.dumps({
             "id": "cand-cmd",
             "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} "
-                   "--tp-size 1 --mamba-radix-cache-strategy extra_buffer",
+                   "--tp-size 1 --mamba-radix-cache-strategy extra_buffer "
+                   "--disable-radix-cache=0",
             "reasons": [],
         }),
         # (b) params 字典,没写 disable_radix_cache 字段 —— 回落 SGLang 默认(radix 开)
@@ -565,9 +619,148 @@ def test_every_launch_forces_disable_radix_and_no_extra_buffer(tmp_path, workloa
         assert cmd.count("--disable-radix-cache") == 1, (
             f"每条启动命令必须带且仅带一个 --disable-radix-cache,实际:{cmd}"
         )
-        assert "extra_buffer" not in cmd, (
-            f"启动命令不得含与关 radix 冲突的 extra_buffer,实际:{cmd}"
-        )
         assert "--disable-radix-cache=" not in cmd, (
             f"必须是裸 flag,不能是 =true/=false 形式,实际:{cmd}"
         )
+
+
+def test_threshold_marks_but_never_removes_candidates(tmp_path, workloads_output_len):
+    cstar = {"baseline": 10, "fast": 16, "slow": 4}
+    job_path = _write_job(tmp_path, baseline_threshold_pct=20)
+    configs_path = _write_configs_with_params(
+        tmp_path,
+        {
+            "baseline": {"is_baseline": True, "tp_size": 1},
+            "fast": {"tp_size": 1},
+            "slow": {"tp_size": 1},
+        },
+    )
+    config = ExecutorConfig(
+        job_path=job_path,
+        configs_path=configs_path,
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=16,
+        top_k=1,
+    )
+    remote, client, container = _FakeRemote(), _FakeClient(), _FakeContainer(cstar)
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=remote, client=client)
+    finally:
+        ex.Container = original_container
+
+    ranking = summary["ranking"]
+    assert {row["candidate_id"] for row in ranking} == set(cstar)
+    by_id = {row["candidate_id"]: row for row in ranking}
+    assert by_id["fast"]["beats_baseline_threshold"] is True
+    assert by_id["slow"]["beats_baseline_threshold"] is False
+    assert by_id["slow"]["total_throughput"] == 400.0
+    assert by_id["slow"]["mean_ttft_ms"] == 100.0
+    assert by_id["slow"]["mean_tpot_ms"] == 10.0
+    assert by_id["slow"]["success_rate"] == 1.0
+
+
+def test_server_startup_retries_then_completes(tmp_path, workloads_output_len):
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path),
+        configs_path=_write_configs(tmp_path, ["flaky"]),
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=1,
+        startup_max_attempts=3,
+        startup_hard_timeout_s=10,
+        startup_stall_timeout_s=5,
+    )
+    container = _FlakyServerContainer({"flaky": 4}, failures_before_ready=2)
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote(), client=_FakeClient())
+    finally:
+        ex.Container = original_container
+
+    row = summary["candidate_results"][0]
+    assert summary["task_status"] == "COMPLETED"
+    assert row["status"] == "completed"
+    assert row["attempts"] == 4
+    assert len(row["failures"]) == 2
+    assert all(failure["failed_at"] for failure in row["failures"])
+    assert all(failure["round"] == 1 for failure in row["failures"])
+
+
+def test_container_or_ssh_startup_failure_recreates_and_retries(
+    tmp_path, workloads_output_len
+):
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path),
+        configs_path=_write_configs(tmp_path, ["flaky-container"]),
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=1,
+        startup_max_attempts=3,
+        startup_hard_timeout_s=10,
+        startup_stall_timeout_s=5,
+    )
+    container = _FlakyContainerStart({"flaky-container": 4}, failures_before_ready=2)
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote(), client=_FakeClient())
+    finally:
+        ex.Container = original_container
+
+    row = summary["candidate_results"][0]
+    assert summary["task_status"] == "COMPLETED"
+    assert row["status"] == "completed"
+    assert row["attempts"] == 4
+    assert len(row["failures"]) == 2
+    assert all("ssh connection lost" in failure["reason"] for failure in row["failures"])
+
+
+def test_exhausted_startup_retries_keeps_failed_candidate_row(
+    tmp_path, workloads_output_len
+):
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path),
+        configs_path=_write_configs(tmp_path, ["broken"]),
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=1,
+        startup_max_attempts=3,
+        startup_hard_timeout_s=10,
+        startup_stall_timeout_s=5,
+    )
+    container = _FlakyServerContainer({"broken": 4}, failures_before_ready=99)
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote(), client=_FakeClient())
+    finally:
+        ex.Container = original_container
+
+    row = summary["candidate_results"][0]
+    assert summary["task_status"] == "INCOMPLETE"
+    assert summary["ranking_status"] == "PROVISIONAL"
+    assert row["candidate_id"] == "broken"
+    assert row["status"] == "failed"
+    assert row["failed_at"]
+    assert row["failed_round"] == 2
+    assert row["failure_reason"]
