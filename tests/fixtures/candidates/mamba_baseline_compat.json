@@ -1,0 +1,37 @@
+{
+  "candidates": [
+    {
+      "id": "baseline",
+      "params": {
+        "is_baseline": true,
+        "reasoning_parser": "qwen3",
+        "mamba_radix_cache_strategy": "extra_buffer",
+        "mem_fraction_static": 0.8
+      },
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --reasoning-parser qwen3 --mamba-radix-cache-strategy extra_buffer --mem-fraction-static 0.8",
+      "reasons": ["baseline"]
+    },
+    {
+      "id": "c001",
+      "params": {
+        "tp_size": 1,
+        "attention_backend": "flashinfer",
+        "mamba_radix_cache_strategy": "no_buffer",
+        "mem_fraction_static": 0.82
+      },
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 1 --attention-backend flashinfer --mamba-radix-cache-strategy no_buffer --mem-fraction-static 0.82",
+      "reasons": ["candidate"]
+    },
+    {
+      "id": "c002",
+      "params": {
+        "tp_size": 2,
+        "attention_backend": "triton",
+        "mamba_radix_cache_strategy": "no_buffer",
+        "mem_fraction_static": 0.82
+      },
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 2 --attention-backend triton --mamba-radix-cache-strategy no_buffer --mem-fraction-static 0.82",
+      "reasons": ["candidate"]
+    }
+  ]
+}

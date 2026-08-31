@@ -53,3 +53,31 @@ def test_report_preserves_requested_cache_params_and_shows_forced_effective_stat
         'effective_params={"disable_radix_cache":true,'
         '"mamba_cache_strategy":"inactive(radix_off)"}' in preview
     )
+
+
+def test_report_uses_audit_requested_params_after_loader_strips_mamba() -> None:
+    rows = build_candidate_rows(
+        [
+            {
+                "id": "c001",
+                "params": {"disable_radix_cache": True},
+                "requested_params": {
+                    "mamba_radix_cache_strategy": "no_buffer",
+                    "mem_fraction_static": 0.82,
+                },
+                "cmd": "python -m sglang.launch_server --disable-radix-cache",
+                "requested_cmd": (
+                    "python -m sglang.launch_server "
+                    "--mamba-radix-cache-strategy no_buffer"
+                ),
+            }
+        ],
+        {"c001": {"attempts": 1}},
+        {},
+        [],
+        output_len=1024,
+    )
+
+    assert rows[0]["requested_params"]["mamba_radix_cache_strategy"] == "no_buffer"
+    assert rows[0]["effective_params"]["mamba_cache_strategy"] == "inactive(radix_off)"
+    assert "--mamba-radix-cache-strategy" in rows[0]["requested_command"]

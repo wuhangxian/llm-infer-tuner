@@ -42,13 +42,24 @@ def annotate_baseline_threshold(
 
 def _effective_params(candidate: dict[str, Any]) -> dict[str, Any]:
     params = deepcopy(candidate.get("params", {}))
+    requested_params = deepcopy(candidate.get("requested_params", params))
     params.pop("disable-radix-cache", None)
     params.pop("disable_radix_cache", None)
     params["disable_radix_cache"] = True
-    requested_mamba = params.pop("mamba_radix_cache_strategy", None)
-    requested_mamba = params.pop("mamba_scheduler_strategy", requested_mamba)
-    requested_mamba = params.pop("mamba-radix-cache-strategy", requested_mamba)
-    requested_mamba = params.pop("mamba-scheduler-strategy", requested_mamba)
+    for name in (
+        "mamba_radix_cache_strategy",
+        "mamba_scheduler_strategy",
+        "mamba-radix-cache-strategy",
+        "mamba-scheduler-strategy",
+    ):
+        params.pop(name, None)
+    requested_mamba = requested_params.get("mamba_radix_cache_strategy")
+    if requested_mamba is None:
+        requested_mamba = requested_params.get("mamba_scheduler_strategy")
+    if requested_mamba is None:
+        requested_mamba = requested_params.get("mamba-radix-cache-strategy")
+    if requested_mamba is None:
+        requested_mamba = requested_params.get("mamba-scheduler-strategy")
     if requested_mamba is not None:
         params["mamba_cache_strategy"] = "inactive(radix_off)"
     return params
@@ -92,9 +103,11 @@ def build_candidate_rows(
                 "report_schema_version": REPORT_SCHEMA_VERSION,
                 "candidate_id": candidate_id,
                 "status": "completed" if completed else "failed",
-                "requested_params": deepcopy(candidate.get("params", {})),
+                "requested_params": deepcopy(
+                    candidate.get("requested_params", candidate.get("params", {}))
+                ),
                 "effective_params": _effective_params(candidate),
-                "requested_command": candidate.get("cmd"),
+                "requested_command": candidate.get("requested_cmd", candidate.get("cmd")),
                 "round1": summary.get("round1"),
                 "round2": round2,
                 "round1_batch": summary.get("round1_batch"),

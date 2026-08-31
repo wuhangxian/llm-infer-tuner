@@ -11,6 +11,8 @@ import pytest
 from runners.executor import _build_cmd_from_params, _load_candidates
 from schemas.job_spec import SearchBudget
 
+FIXTURES = Path(__file__).parent / "fixtures" / "candidates"
+
 
 def _candidate(candidate_id: str, **params: object) -> dict:
     tuning_flags = " ".join(
@@ -90,3 +92,30 @@ def test_params_are_shell_quoted_when_rendered_to_a_legacy_command() -> None:
 
     parts = shlex.split(command)
     assert parts[parts.index("--served-model-name") + 1] == "safe; not-a-command"
+
+
+def test_load_candidates_keeps_mamba_audit_only_and_returns_safe_executor_payload() -> None:
+    rows = _load_candidates(
+        FIXTURES / "mamba_baseline_compat.json", search=_search(baseline=True)
+    )
+
+    assert [row["id"] for row in rows] == ["baseline", "c001", "c002"]
+    for row in rows:
+        assert "mamba_radix_cache_strategy" in row["requested_params"]
+        assert "mamba_radix_cache_strategy" not in row["params"]
+        assert "--mamba-radix-cache-strategy" in row["requested_cmd"]
+        assert "--mamba-radix-cache-strategy" not in row["cmd"]
+        assert "--model-path" not in row["cmd"]
+        assert "--host" not in row["cmd"]
+        assert "--port" not in row["cmd"]
+        assert row["cmd"].split().count("--disable-radix-cache") == 1
+
+
+def test_loader_rejects_overflowing_exponent_anywhere_in_the_document(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "configs.json",
+        '{"_meta":{"overflow":1e400},"candidates":[]}',
+    )
+
+    with pytest.raises(ValueError, match="non-finite"):
+        _load_candidates(path, search=_search())

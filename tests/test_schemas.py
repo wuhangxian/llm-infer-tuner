@@ -146,6 +146,41 @@ def test_target_spec_excludes_plaintext_password_from_serialization() -> None:
     assert "ssh_password" not in target.model_dump()
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("ssh_target", "runner host"),
+        ("ssh_target", "runner;host"),
+        ("image_ref", "registry.example/image tag"),
+        ("image_ref", "registry.example/image$(id)"),
+    ],
+)
+def test_target_spec_rejects_whitespace_and_shell_metacharacters(field: str, value: str) -> None:
+    payload = _valid_target()
+    payload[field] = value
+
+    with pytest.raises(ValidationError):
+        TargetSpec.model_validate(payload)
+
+
+def test_target_paths_accept_safe_spaces_unicode_and_single_quotes() -> None:
+    payload = _valid_target()
+    payload["model_host_dir"] = "/models/模型 family's copy"
+    payload["model_container_path"] = "/container/模型 family's copy"
+
+    target = TargetSpec.model_validate(payload)
+
+    assert target.model_host_dir == "/models/模型 family's copy"
+
+
+def test_target_spec_rejects_empty_password_when_an_environment_source_is_set() -> None:
+    payload = _valid_target()
+    payload.update({"ssh_password": "", "ssh_password_env": "LLM_TUNER_TEST_SSH_PASSWORD"})
+
+    with pytest.raises(ValidationError, match="credential"):
+        TargetSpec.model_validate(payload)
+
+
 def test_job_spec_rejects_unsupported_engine_and_unknown_fields() -> None:
     payload = {
         "job_id": "job-1",
@@ -223,6 +258,166 @@ def test_job_spec_rejects_nonfinite_numbers(value: float) -> None:
 def test_job_spec_rejects_nonfinite_baseline_values(value: object) -> None:
     payload = _valid_job()
     payload["search"]["baseline"] = {"mem_fraction_static": value}
+
+    with pytest.raises(ValidationError):
+        JobSpec.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("tp_size", "1"),
+        ("tp_size", True),
+        ("pp_size", True),
+        ("num_continuous_decode_steps", True),
+        ("mem_fraction_static", "0.8"),
+        ("mem_fraction_static", True),
+        ("prefill_delayer_max_delay_ms", True),
+        ("page_size", "64"),
+        ("page_size", True),
+        ("trust_remote_code", "true"),
+        ("trust_remote_code", 1),
+        ("enable_two_batch_overlap", 1),
+        ("chunked_prefill_size", [4096]),
+    ],
+)
+def test_candidate_params_reject_wrong_known_types_and_non_scalars(
+    field: str, value: object
+) -> None:
+    candidate = {"id": "c001", "params": {field: value}, "reasons": []}
+
+    with pytest.raises(ValidationError):
+        CandidateSpec.model_validate(candidate)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"tp_size": True, "tp-size": 1},
+        {"tp_size": 1, "tp-size": 1},
+        {"mem_fraction_static": float("nan")},
+        {"attention_backend": {"nested": "value"}},
+    ],
+)
+def test_candidate_params_reject_alias_collisions_and_nonfinite_values(params: dict) -> None:
+    candidate = _candidate("c001")
+    candidate["params"] = params
+
+    with pytest.raises(ValidationError):
+        CandidateSpec.model_validate(candidate)
+
+
+def test_legacy_command_normalizes_runtime_and_mamba_but_compares_numeric_values() -> None:
+    candidate = {
+        "id": "c001",
+        "params": {
+            "tp_size": 1,
+            "schedule_conservativeness": 1,
+            "mamba_radix_cache_strategy": "no_buffer",
+            "trust_remote_code": False,
+        },
+        "cmd": (
+            "python -m sglang.launch_server --model-path ${MODEL_PATH} "
+            "--host 0.0.0.0 --port=30000 --tp-size 1 --schedule-conservativeness 1.0 "
+            "--mamba-radix-cache-strategy no_buffer"
+        ),
+        "reasons": [],
+    }
+
+    parsed = CandidateSpec.model_validate(candidate)
+
+    assert parsed.params["tp_size"] == 1
+    assert parsed.params["schedule_conservativeness"] == 1.0
+    assert "mamba_radix_cache_strategy" not in parsed.params
+    assert parsed.requested_params["mamba_radix_cache_strategy"] == "no_buffer"
+    assert (
+        parsed.cmd
+        == "python -m sglang.launch_server --tp-size 1 --schedule-conservativeness 1.0 "
+        "--disable-radix-cache"
+    )
+
+
+def test_params_only_candidate_stays_structured_and_safe() -> None:
+    parsed = CandidateSpec.model_validate(
+        {
+            "id": "c001",
+            "params": {"tp_size": 1, "mamba_radix_cache_strategy": "no_buffer"},
+            "reasons": [],
+        }
+    )
+
+    assert parsed.cmd is None
+    assert parsed.params["tp_size"] == 1
+    assert parsed.params["disable_radix_cache"] is True
+    assert "mamba_radix_cache_strategy" not in parsed.params
+    assert parsed.requested_params["mamba_radix_cache_strategy"] == "no_buffer"
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "python -m sglang.launch_server --model-path /untrusted/model",
+        "python -m sglang.launch_server --host localhost",
+        "python -m sglang.launch_server --port 65536",
+        "python -m sglang.launch_server --model-path ${MODEL_PATH} # comment",
+    ],
+)
+def test_legacy_command_rejects_unsafe_runtime_values_and_comments(cmd: str) -> None:
+    with pytest.raises(ValidationError):
+        CandidateSpec.model_validate({"id": "c001", "params": {}, "cmd": cmd, "reasons": []})
+
+
+def test_candidate_set_retains_zero_in_effective_fingerprint() -> None:
+    parsed = CandidateSet.model_validate(
+        _candidate_set(
+            _candidate("c001", schedule_conservativeness=0),
+            _candidate("c002"),
+        )
+    )
+
+    assert len(parsed.candidates) == 2
+
+
+def test_candidate_set_names_both_ids_for_a_duplicate_effective_config() -> None:
+    payload = _candidate_set(_candidate("c001", tp_size=1), _candidate("c002", tp_size=1))
+
+    with pytest.raises(ValidationError, match=r"c002 duplicates c001"):
+        CandidateSet.model_validate(payload)
+
+
+@pytest.mark.parametrize("reserved_field", ["requested_params", "requested_cmd"])
+def test_candidate_spec_rejects_externally_supplied_audit_fields(reserved_field: str) -> None:
+    candidate = _candidate("c001", tp_size=1)
+    candidate[reserved_field] = (
+        {"tp_size": 1}
+        if reserved_field == "requested_params"
+        else candidate["cmd"]
+    )
+
+    with pytest.raises(ValidationError, match="reserved"):
+        CandidateSpec.model_validate(candidate)
+
+
+def test_candidate_set_rejects_baseline_id_without_configured_baseline() -> None:
+    payload = _candidate_set(_candidate("baseline"), _candidate("c001", tp_size=1))
+
+    with pytest.raises(ValidationError, match="baseline"):
+        CandidateSet.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "baseline",
+    [
+        {"tp_size": "1"},
+        {"tp_size": True},
+        {"mem_fraction_static": "0.8"},
+        {"nested": {"value": 1}},
+        {"values": [1]},
+    ],
+)
+def test_baseline_uses_the_same_strict_scalar_contract(baseline: dict) -> None:
+    payload = _valid_job()
+    payload["search"]["baseline"] = baseline
 
     with pytest.raises(ValidationError):
         JobSpec.model_validate(payload)
@@ -356,6 +551,16 @@ def test_candidate_spec_deduplicates_bare_radix_disable_flags() -> None:
 def test_candidate_spec_rejects_radix_enablement_and_unsafe_legacy_command(candidate: dict) -> None:
     with pytest.raises(ValidationError):
         CandidateSpec.model_validate(candidate)
+
+
+@pytest.mark.parametrize(
+    "cache_flag", ["enable_hierarchical_cache", "enable_lmcache", "enable_prefix_mm_cache"]
+)
+def test_candidate_spec_rejects_every_cache_enablement_spelling(cache_flag: str) -> None:
+    with pytest.raises(ValidationError, match="cache enablement"):
+        CandidateSpec.model_validate(
+            {"id": "c001", "params": {cache_flag: True}, "reasons": []}
+        )
 
 
 def test_candidate_spec_rejects_legacy_command_params_disagreement() -> None:

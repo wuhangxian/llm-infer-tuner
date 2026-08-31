@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import shlex
 import sys
@@ -36,6 +37,7 @@ from runners.reporting import (
 )
 from schemas.candidate_spec import CandidateSet
 from schemas.job_spec import JobSpec, SearchBudget
+from schemas.parameter_contract import MAMBA_STRATEGY_PARAMETERS, normalise_parameter_name
 
 # Round-1 = coarse adaptive expansion over ALL candidates (no bisection); round-2
 # = precise bisection over ALL candidates, reusing round-1 probes as seeds. The two
@@ -146,8 +148,17 @@ def _strict_json_load(text: str, *, source: str) -> Any:
     def reject_constant(value: str) -> None:
         raise ValueError(f"{source}: non-finite JSON value {value!r} is not allowed")
 
+    def reject_nonfinite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError(f"{source}: non-finite JSON value {value!r} is not allowed")
+        return parsed
+
     return json.loads(
-        text, object_pairs_hook=reject_duplicate_keys, parse_constant=reject_constant
+        text,
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=reject_constant,
+        parse_float=reject_nonfinite_float,
     )
 
 
@@ -822,8 +833,9 @@ def _build_cmd_from_params(params: dict, model_path_placeholder: str = "${MODEL_
     - Boolean true -> bare flag (--trust-remote-code)
     - Boolean false -> omit
     - None/null -> omit
-    - --model-path, --host, --port auto-appended if not in params
+    - --model-path, --host, --port are executor-owned and auto-appended
     - --disable-radix-cache auto-appended if disable_radix_cache is true
+    - Mamba radix/scheduler strategy is audit-only and never emitted
     """
     # Auto-included flags that should not be duplicated
     auto_flags = {"model_path", "host", "port"}
@@ -834,9 +846,14 @@ def _build_cmd_from_params(params: dict, model_path_placeholder: str = "${MODEL_
     parts.append(f"--model-path {model_path_placeholder}")
 
     for key, val in params.items():
-        if key in auto_flags or key == "is_baseline":
+        normalised_key = normalise_parameter_name(str(key))
+        if (
+            normalised_key in auto_flags
+            or normalised_key == "is_baseline"
+            or normalised_key in MAMBA_STRATEGY_PARAMETERS
+        ):
             continue
-        flag = "--" + key.replace("_", "-")
+        flag = "--" + normalised_key.replace("_", "-")
         if val is True:
             parts.append(flag)
         elif val is False or val is None:
@@ -844,11 +861,9 @@ def _build_cmd_from_params(params: dict, model_path_placeholder: str = "${MODEL_
         else:
             parts.append(f"{flag} {shlex.quote(str(val))}")
 
-    # Auto-append host and port if not specified
-    if not any(k == "host" for k in params):
-        parts.append("--host 0.0.0.0")
-    if not any(k == "port" for k in params):
-        parts.append(f"--port {port}")
+    # Runtime ownership means candidates cannot override these values.
+    parts.append("--host 0.0.0.0")
+    parts.append(f"--port {port}")
 
     return " ".join(parts)
 
@@ -875,6 +890,28 @@ def _force_disable_radix_cache(cmd: str) -> str:
     body, marker, comment = cmd.partition(" #")
     effective = body.rstrip() + " --disable-radix-cache"
     return effective + (marker + comment if marker else "")
+
+
+def _set_launch_runtime(cmd: str, *, model_path: str, port: int) -> str:
+    """Strip candidate runtime flags and append the executor-owned values."""
+    parts = shlex.split(cmd)
+    runtime_flags = {"--model-path", "--host", "--port"}
+    effective_parts: list[str] = []
+    index = 0
+    while index < len(parts):
+        part = parts[index]
+        if part in runtime_flags:
+            index += 2 if index + 1 < len(parts) else 1
+            continue
+        if any(part.startswith(f"{flag}=") for flag in runtime_flags):
+            index += 1
+            continue
+        effective_parts.append(part)
+        index += 1
+    effective_parts.extend(
+        ["--model-path", model_path, "--host", "0.0.0.0", "--port", str(port)]
+    )
+    return shlex.join(effective_parts)
 
 
 def _override_launch_port(cmd: str, port: int) -> str:
@@ -919,19 +956,17 @@ def _run_candidate(
     if not cmd and candidate.get("cmd_parts"):
         cmd = " ".join(str(p) for p in candidate["cmd_parts"])
     # If no cmd/cmd_parts, build from params dict automatically
-    if not cmd and candidate.get("params"):
-        cmd = _build_cmd_from_params(candidate["params"], port=ctx.port)
+    if not cmd:
+        cmd = _build_cmd_from_params(candidate.get("params", {}), port=ctx.port)
     # 无条件钉死关 radix/prefix cache（团队硬约束）——不论命令来自 cmd/cmd_parts/params，
     # 也不论 config 有没有手写，都在此汇合点统一注入，任何来源都跑不掉。
     cmd = _force_disable_radix_cache(cmd)
     candidate_dir = config.results_dir / candidate_id
     candidate_dir.mkdir(parents=True, exist_ok=True)
 
-    # configs.jsonl may carry either the ${MODEL_PATH} placeholder or the host
-    # model dir baked straight into --model-path; rewrite both to the in-container
-    # mount point so the server finds the weights.
-    base_cmd = cmd.replace("${MODEL_PATH}", config.model_container_path)
-    base_cmd = base_cmd.replace(config.model_host_dir, config.model_container_path)
+    base_cmd = _set_launch_runtime(
+        cmd, model_path=config.model_container_path, port=ctx.port
+    )
     candidate_out = f"{ctx.outputs_container_path}/{candidate_id}"
     container.exec(f"mkdir -p {shlex.quote(candidate_out)}")
 

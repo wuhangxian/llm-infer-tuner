@@ -1,9 +1,10 @@
 """Input contract for one llm-infer-tuner tuning job."""
 
-import math
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from schemas.parameter_contract import normalise_parameter_mapping
 
 Identifier = Annotated[
     str,
@@ -43,19 +44,11 @@ class BaselineConfig(StrictModel):
     )
 
     @model_validator(mode="after")
-    def reject_nonfinite_values(self) -> "BaselineConfig":
-        def validate(value: Any) -> None:
-            if isinstance(value, float) and not math.isfinite(value):
-                raise ValueError("baseline values must be finite")
-            if isinstance(value, dict):
-                for nested in value.values():
-                    validate(nested)
-            elif isinstance(value, list):
-                for nested in value:
-                    validate(nested)
-
-        for value in (self.model_extra or {}).values():
-            validate(value)
+    def validate_parameter_values(self) -> "BaselineConfig":
+        """Use the candidate scalar contract for every free-form baseline flag."""
+        self.__pydantic_extra__ = normalise_parameter_mapping(
+            self.model_extra or {}, location="baseline"
+        )
         return self
 
 

@@ -3,211 +3,293 @@
 from __future__ import annotations
 
 import json
-import math
-import re
 import shlex
 from copy import deepcopy
-from typing import Any, ClassVar
+from typing import Any
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, PrivateAttr, computed_field, model_validator
 
 from schemas.job_spec import Identifier, SearchBudget, StrictModel
-
-_PARAMETER_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
-_SHELL_CONTROL = re.compile(r"[;|&<>`\r\n()]|\$(?!\{MODEL_PATH\})")
-_RUNTIME_OWNED = frozenset({"model_path", "host", "port"})
-_MAMBA_ALIASES = (
-    "mamba_radix_cache_strategy",
-    "mamba_scheduler_strategy",
-    "mamba-radix-cache-strategy",
-    "mamba-scheduler-strategy",
+from schemas.parameter_contract import (
+    MAMBA_STRATEGY_PARAMETERS,
+    RUNTIME_PARAMETERS,
+    CandidateParams,
+    ParameterScalar,
+    command_scalar,
+    is_safe_parameter_name,
+    normalise_parameter_name,
 )
 
 
-def _normalise_key(key: str) -> str:
-    return key.replace("-", "_")
+def _reject_shell_syntax(command: str) -> None:
+    """Reject shell operators while retaining safely quoted scalar argument values."""
+    quote: str | None = None
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote is None:
+            if char == "#":
+                raise ValueError("legacy cmd contains a shell comment")
+            if char in "\r\n;|&<>`()":
+                raise ValueError("legacy cmd contains shell control syntax")
+            if char == "'":
+                quote = char
+            elif char == '"':
+                quote = char
+            elif char == "$":
+                if not command.startswith("${MODEL_PATH}", index):
+                    raise ValueError("legacy cmd contains shell substitution")
+                index += len("${MODEL_PATH}") - 1
+        elif quote == "'":
+            if char == "'":
+                quote = None
+        else:
+            if char == "`":
+                raise ValueError("legacy cmd contains shell substitution")
+            if char == '"':
+                quote = None
+            elif char == "$":
+                if not command.startswith("${MODEL_PATH}", index):
+                    raise ValueError("legacy cmd contains shell substitution")
+                index += len("${MODEL_PATH}") - 1
+        index += 1
+    if quote is not None:
+        raise ValueError("legacy cmd has an unterminated quote")
 
 
-def _json_scalar(value: object, *, location: str) -> None:
-    if value is None or isinstance(value, (str, bool, int)):
-        return
-    if isinstance(value, float) and math.isfinite(value):
-        return
-    raise ValueError(f"{location} must be a finite scalar JSON value")
+def _validate_runtime_flag(name: str, value: ParameterScalar) -> None:
+    if name == "model_path" and value != "${MODEL_PATH}":
+        raise ValueError("legacy cmd --model-path must be exactly ${MODEL_PATH}")
+    if name == "host" and value != "0.0.0.0":
+        raise ValueError("legacy cmd --host must be 0.0.0.0")
+    if name == "port":
+        if type(value) is not int or not 1 <= value <= 65535:
+            raise ValueError("legacy cmd --port must be an integer in 1..65535")
 
 
-def _parse_legacy_command(cmd: str) -> dict[str, object]:
-    """Parse the intentionally tiny legacy command grammar without a shell."""
-    if not cmd.strip():
+def _parse_legacy_command(command: str) -> dict[str, ParameterScalar]:
+    """Parse the approved legacy argv grammar without ever invoking a shell."""
+    if not command.strip():
         return {}
-    if _SHELL_CONTROL.search(cmd):
-        raise ValueError("legacy cmd contains shell control syntax")
+    _reject_shell_syntax(command)
     try:
-        tokens = shlex.split(cmd, posix=True)
+        tokens = shlex.split(command, posix=True)
     except ValueError as exc:
         raise ValueError(f"legacy cmd cannot be parsed: {exc}") from exc
     if tokens[:3] != ["python", "-m", "sglang.launch_server"]:
         raise ValueError("legacy cmd must start exactly with python -m sglang.launch_server")
 
-    flags: dict[str, object] = {}
+    flags: dict[str, ParameterScalar] = {}
     index = 3
     while index < len(tokens):
         token = tokens[index]
         if not token.startswith("--") or token == "--":
             raise ValueError(f"legacy cmd has unsupported positional token {token!r}")
-        raw_key, separator, raw_value = token[2:].partition("=")
-        key = _normalise_key(raw_key)
-        if not _PARAMETER_NAME.fullmatch(key):
-            raise ValueError(f"legacy cmd has unsafe flag {token!r}")
-        if key in flags and key != "disable_radix_cache":
-            raise ValueError(f"legacy cmd repeats flag --{raw_key}")
+        raw_name, separator, raw_value = token[2:].partition("=")
+        name = normalise_parameter_name(raw_name)
+        if not is_safe_parameter_name(name):
+            raise ValueError(f"legacy cmd has unsafe flag --{raw_name}")
+        if name in flags and name != "disable_radix_cache":
+            raise ValueError(f"legacy cmd repeats flag --{raw_name}")
+        has_value = bool(separator)
+        value: str | bool
         if separator:
-            value: object = raw_value
+            value = raw_value
         elif index + 1 < len(tokens) and not tokens[index + 1].startswith("--"):
             value = tokens[index + 1]
+            has_value = True
             index += 1
         else:
             value = True
-        if key == "disable_radix_cache" and value is not True:
-            raise ValueError("candidate must not enable Radix cache")
-        flags[key] = value
+        try:
+            parsed_value = command_scalar(name, value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        if name == "disable_radix_cache":
+            if has_value or parsed_value is not True:
+                raise ValueError("candidate must use bare --disable-radix-cache")
+        if name in RUNTIME_PARAMETERS:
+            _validate_runtime_flag(name, parsed_value)
+        flags[name] = parsed_value
         index += 1
     return flags
 
 
-def _canonical_cmd(cmd: str, flags: dict[str, object]) -> str:
-    """Render a legacy command with one canonical Radix-off flag."""
-    tokens = shlex.split(cmd, posix=True)
-    rendered = tokens[:3]
-    index = 3
-    while index < len(tokens):
-        token = tokens[index]
-        raw_key, separator, _ = token[2:].partition("=")
-        key = _normalise_key(raw_key)
-        if key == "disable_radix_cache":
-            if not separator and index + 1 < len(tokens) and not tokens[index + 1].startswith("--"):
-                index += 1
-        else:
-            rendered.append(token)
-            if not separator and index + 1 < len(tokens) and not tokens[index + 1].startswith("--"):
-                rendered.append(tokens[index + 1])
-                index += 1
-        index += 1
-    rendered.append("--disable-radix-cache")
-    return shlex.join(rendered)
+def _mamba_strategy(values: dict[str, ParameterScalar]) -> str | None:
+    strategies = [str(values[name]) for name in MAMBA_STRATEGY_PARAMETERS if name in values]
+    if len(set(strategies)) > 1:
+        raise ValueError("Mamba radix/scheduler strategy aliases disagree")
+    return strategies[0] if strategies else None
 
 
-def _command_value(value: object) -> str:
-    if value is True:
-        return "true"
-    if value is False:
-        return "false"
-    return str(value)
+def _agreement_values(values: dict[str, ParameterScalar]) -> dict[str, ParameterScalar]:
+    return {
+        name: value
+        for name, value in values.items()
+        if name not in RUNTIME_PARAMETERS
+        and name not in MAMBA_STRATEGY_PARAMETERS
+        and name not in {"disable_radix_cache", "is_baseline"}
+        and value is not False
+        and value is not None
+    }
+
+
+def _equal_values(left: ParameterScalar, right: ParameterScalar) -> bool:
+    if type(left) is float and type(right) is float:
+        return left == right
+    return type(left) is type(right) and left == right
+
+
+def _same_flag_values(
+    left: dict[str, ParameterScalar], right: dict[str, ParameterScalar]
+) -> bool:
+    return set(left) == set(right) and all(
+        _equal_values(left[name], right[name]) for name in left
+    )
+
+
+def _reject_radix_enablement(values: dict[str, ParameterScalar]) -> None:
+    """Keep every candidate on the required Radix-off execution path."""
+    for name, value in values.items():
+        if name == "disable_radix_cache":
+            if value is not True:
+                raise ValueError("candidate disable_radix_cache must be true when supplied")
+            continue
+        if name in MAMBA_STRATEGY_PARAMETERS:
+            continue
+        if (
+            name in {"radix_cache", "prefix_cache", "enable_prefix_cache"}
+            or (name.startswith("enable_") and "cache" in name)
+            or (name.endswith("_radix_cache") and not name.startswith("disable_"))
+        ):
+            raise ValueError("candidate must not request Radix/prefix cache enablement")
+
+
+def _canonical_cmd(flags: dict[str, ParameterScalar]) -> str:
+    """Emit only effective tuning flags plus one canonical Radix-off switch."""
+    parts = ["python", "-m", "sglang.launch_server"]
+    for name, value in flags.items():
+        if name in RUNTIME_PARAMETERS or name in MAMBA_STRATEGY_PARAMETERS:
+            continue
+        if name == "disable_radix_cache" or value is False or value is None:
+            continue
+        parts.append(f"--{name.replace('_', '-')}")
+        if value is not True:
+            parts.append(str(value))
+    parts.append("--disable-radix-cache")
+    return shlex.join(parts)
+
+
+def _safe_execution_params(values: dict[str, ParameterScalar]) -> dict[str, ParameterScalar]:
+    safe = {
+        name: value
+        for name, value in values.items()
+        if name not in RUNTIME_PARAMETERS and name not in MAMBA_STRATEGY_PARAMETERS
+    }
+    safe["disable_radix_cache"] = True
+    return safe
 
 
 class CandidateSpec(StrictModel):
-    """One candidate, with an optional legacy command constrained to an argv grammar."""
+    """One candidate with typed params and a deliberately tiny legacy argv grammar."""
 
     id: Identifier
-    params: dict[str, Any] = Field(default_factory=dict)
+    params: CandidateParams = Field(default_factory=lambda: CandidateParams({}))
     cmd: str | None = None
     reasons: list[str] = Field(default_factory=list)
+    _requested_params: CandidateParams = PrivateAttr(
+        default_factory=lambda: CandidateParams({})
+    )
+    _requested_cmd: str | None = PrivateAttr(default=None)
 
-    _reserved_param_keys: ClassVar[frozenset[str]] = _RUNTIME_OWNED
-
-    @field_validator("params")
+    @model_validator(mode="before")
     @classmethod
-    def validate_and_normalise_params(cls, params: dict[str, Any]) -> dict[str, Any]:
-        normalised: dict[str, Any] = {}
-        radix_values: list[object] = []
-        for raw_key, value in params.items():
-            key = _normalise_key(raw_key)
-            if not _PARAMETER_NAME.fullmatch(key):
-                raise ValueError(f"unsafe candidate parameter name {raw_key!r}")
-            _json_scalar(value, location=f"candidate parameter {raw_key!r}")
-            if key in normalised and normalised[key] != value:
-                raise ValueError(f"conflicting candidate parameter spellings for {key!r}")
-            if key == "disable_radix_cache":
-                radix_values.append(value)
-                continue
-            if key in {"radix_cache", "prefix_cache", "enable_radix_cache", "enable_prefix_cache"}:
-                raise ValueError("candidate must not enable Radix cache")
-            if key in _RUNTIME_OWNED:
-                # These values are executor-owned facts, not tuning decisions.
-                continue
-            if key == "is_baseline" and type(value) is not bool:
-                raise ValueError("candidate parameter 'is_baseline' must be a boolean")
-            normalised[key] = value
-        if any(value is not True for value in radix_values):
-            raise ValueError("candidate must not enable Radix cache; use bare disable-radix-cache")
-        normalised["disable_radix_cache"] = True
-        for field in ("tp_size", "ep_size", "dp_size"):
-            if field in normalised and (
-                type(normalised[field]) is not int or normalised[field] <= 0
-            ):
-                raise ValueError(f"candidate parameter {field!r} must be a positive integer")
-        return normalised
-
-    @field_validator("cmd")
-    @classmethod
-    def validate_command(cls, cmd: str | None) -> str | None:
-        if cmd is None:
-            return None
-        flags = _parse_legacy_command(cmd)
-        for key, value in flags.items():
-            if key in {"radix_cache", "prefix_cache", "enable_radix_cache", "enable_prefix_cache"}:
-                raise ValueError("candidate must not enable Radix cache")
-            if key == "disable_radix_cache" and value is not True:
-                raise ValueError("candidate must not enable Radix cache")
-        return _canonical_cmd(cmd, flags)
+    def reject_externally_supplied_audit_fields(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        reserved = {"requested_params", "requested_cmd"} & set(value)
+        if reserved:
+            names = ", ".join(sorted(reserved))
+            raise ValueError(f"candidate audit fields are reserved: {names}")
+        return value
 
     @model_validator(mode="after")
-    def validate_command_agreement(self) -> CandidateSpec:
-        if self.cmd is None:
-            if not self.params:
-                raise ValueError("candidate requires params or a legacy cmd")
-            return self
-        flags = _parse_legacy_command(self.cmd)
-        command_params = {
-            key: value
-            for key, value in flags.items()
-            if key not in _RUNTIME_OWNED and key != "disable_radix_cache"
-        }
-        params = {
-            key: value
-            for key, value in self.params.items()
-            if key not in {"disable_radix_cache", "is_baseline", *_MAMBA_ALIASES}
-        }
-        if set(command_params) != set(params):
-            raise ValueError("legacy cmd and params disagree on tuning flags")
-        for key, value in params.items():
-            if _command_value(command_params[key]) != _command_value(value):
-                raise ValueError(f"legacy cmd and params disagrees for {key!r}")
+    def canonicalise_for_execution(self) -> CandidateSpec:
+        requested = self.params.as_dict()
+        self._requested_params = CandidateParams.model_validate(requested)
+        self._requested_cmd = self.cmd
+        command_flags = (
+            _parse_legacy_command(self._requested_cmd)
+            if self._requested_cmd is not None
+            else {}
+        )
+
+        _reject_radix_enablement(requested)
+        _reject_radix_enablement(command_flags)
+        for runtime_name in RUNTIME_PARAMETERS:
+            if runtime_name in requested:
+                _validate_runtime_flag(runtime_name, requested[runtime_name])
+
+        if self._requested_cmd is not None:
+            expected = _agreement_values(requested)
+            actual = _agreement_values(command_flags)
+            if not _same_flag_values(expected, actual):
+                missing = sorted(set(expected) ^ set(actual))
+                if missing:
+                    raise ValueError("legacy cmd disagrees with params on tuning flags")
+                raise ValueError("legacy cmd disagrees with params on tuning flag values")
+        requested_mamba = _mamba_strategy(requested)
+        command_mamba = _mamba_strategy(command_flags)
+        if (
+            requested_mamba is not None
+            and command_mamba is not None
+            and requested_mamba != command_mamba
+        ):
+            raise ValueError("legacy cmd disagrees with params on Mamba strategy")
+        if requested_mamba is None and command_mamba is not None:
+            requested["mamba_radix_cache_strategy"] = command_mamba
+            self._requested_params = CandidateParams.model_validate(requested)
+
+        safe_requested = _safe_execution_params(requested)
+        safe_supplied = _safe_execution_params(self.params.as_dict())
+        if not _same_flag_values(safe_supplied, safe_requested):
+            raise ValueError("params and requested_params disagree on effective tuning flags")
+        self.params = CandidateParams.model_validate(safe_requested)
+        self.cmd = _canonical_cmd(command_flags) if self._requested_cmd is not None else None
         return self
+
+    @computed_field
+    @property
+    def requested_params(self) -> dict[str, ParameterScalar]:
+        """Auditable requested values, never accepted as raw candidate input."""
+        return self._requested_params.as_dict()
+
+    @computed_field
+    @property
+    def requested_cmd(self) -> str | None:
+        return self._requested_cmd
 
     @property
     def is_baseline(self) -> bool:
-        return self.params.get("is_baseline") is True
+        return self._requested_params.get("is_baseline") is True
 
     @property
     def requested_mamba_radix_cache_strategy(self) -> str | None:
-        for key in _MAMBA_ALIASES:
-            value = self.params.get(_normalise_key(key))
-            if value is not None:
-                return str(value)
-        return None
+        return _mamba_strategy(self._requested_params.as_dict())
 
     @property
     def effective_mamba_radix_cache_strategy(self) -> str:
         return "inactive(radix_off)"
 
     @property
-    def effective_params(self) -> dict[str, Any]:
-        params = deepcopy(self.params)
+    def effective_params(self) -> dict[str, ParameterScalar]:
+        params = deepcopy(self.params.as_dict())
         params.pop("is_baseline", None)
-        for key in _MAMBA_ALIASES:
-            params.pop(_normalise_key(key), None)
-        return {key: value for key, value in params.items() if value not in (False, None)}
+        return {
+            name: value
+            for name, value in params.items()
+            if value is not False and value is not None
+        }
 
 
 class CandidateSet(StrictModel):
@@ -234,22 +316,31 @@ class CandidateSet(StrictModel):
         ids = [candidate.id for candidate in self.candidates]
         if len(ids) != len(set(ids)):
             raise ValueError("candidate IDs must be unique")
-        baselines = [candidate for candidate in self.candidates if candidate.is_baseline]
+        baseline_ids = [candidate for candidate in self.candidates if candidate.id == "baseline"]
+        marked_baselines = [candidate for candidate in self.candidates if candidate.is_baseline]
         if self.baseline_configured:
-            if len(baselines) != 1 or baselines[0].id != "baseline":
-                raise ValueError("configured baseline requires exactly one id='baseline' candidate")
-        elif baselines:
+            if len(baseline_ids) != 1 or len(marked_baselines) != 1:
+                raise ValueError("configured baseline requires exactly one id='baseline' marker")
+            if baseline_ids[0] is not marked_baselines[0]:
+                raise ValueError("configured baseline id and is_baseline marker must match")
+        elif baseline_ids or marked_baselines:
             raise ValueError("candidate baseline is not configured by the job")
         expected = self.max_candidates + (1 if self.baseline_configured else 0)
         if len(self.candidates) != expected:
             raise ValueError(f"expected {expected} candidates, received {len(self.candidates)}")
-        fingerprints = [
-            json.dumps(candidate.effective_params, sort_keys=True, separators=(",", ":"))
-            for candidate in self.candidates
-        ]
-        if len(fingerprints) != len(set(fingerprints)):
-            raise ValueError("candidate effective configurations must be unique")
+        fingerprints: dict[str, str] = {}
+        for candidate in self.candidates:
+            fingerprint = json.dumps(
+                candidate.effective_params, sort_keys=True, separators=(",", ":")
+            )
+            original_id = fingerprints.get(fingerprint)
+            if original_id is not None:
+                raise ValueError(
+                    f"{candidate.id} duplicates {original_id}: "
+                    "candidate effective configurations must be unique"
+                )
+            fingerprints[fingerprint] = candidate.id
         return self
 
 
-__all__ = ["CandidateSet", "CandidateSpec"]
+__all__ = ["CandidateParams", "CandidateSet", "CandidateSpec"]
