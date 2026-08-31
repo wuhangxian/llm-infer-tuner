@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shlex
 import sys
@@ -34,9 +35,10 @@ from runners.reporting import (
     render_candidate_preview,
     write_reports,
 )
-from schemas.document_io import load_candidates, load_job
+from schemas.document_io import load_candidates, load_job, load_target
 from schemas.job_spec import JobSpec, SearchBudget
 from schemas.parameter_contract import MAMBA_STRATEGY_PARAMETERS, normalise_parameter_name
+from schemas.target_spec import TargetSpec
 
 # Round-1 = coarse adaptive expansion over ALL candidates (no bisection); round-2
 # = precise bisection over ALL candidates, reusing round-1 probes as seeds. The two
@@ -83,12 +85,26 @@ class ExecutorConfig:
     target_gpu_memory_gb: float = 0.0
     top_k: int = DEFAULT_TOP_K    # deprecated compatibility input; all candidates enter round 2
     max_cap: int = DEFAULT_MAX_CAP  # upper bound on concurrency the search will probe
-    ssh_password: str = ""  # optional; empty = key-based SSH
+    ssh_password: str = field(default="", repr=False)  # empty = key-based SSH
     max_parallel: int = 8  # 批内并发跑多少个候选(每个独占容器+GPU+端口);1 = 退回串行
     fill_host: bool = False  # round2 是否把每个候选复制成 floor(gpu/tp) 个实例整机满载实测
     startup_stall_timeout_s: int = 300
     startup_hard_timeout_s: int = 900
     startup_max_attempts: int = 3
+
+
+def validate_port_span(base_port: int, span: int) -> tuple[int, int]:
+    """Validate one contiguous assigned/cleanup port span without side effects."""
+    if type(base_port) is not int or not 1 <= base_port <= 65535:
+        raise ValueError("base port must be an integer in 1..65535")
+    if type(span) is not int or span < 1:
+        raise ValueError("port span must be a positive integer")
+    end_port = base_port + span - 1
+    if end_port > 65535:
+        raise ValueError(
+            f"port span {base_port}-{end_port} exceeds 65535 (span={span})"
+        )
+    return base_port, end_port
 
 
 def _load_job(job_path: Path) -> JobSpec:
@@ -822,43 +838,94 @@ def _force_disable_radix_cache(cmd: str) -> str:
     return shlex.join(effective_parts)
 
 
-def _set_launch_runtime(cmd: str, *, model_path: str, port: int) -> str:
-    """Strip candidate runtime flags and append the executor-owned values."""
-    parts = shlex.split(cmd)
-    runtime_flags = {"--model-path", "--host", "--port"}
-    effective_parts: list[str] = []
+_RUNTIME_FLAG_ALIASES = {
+    "--model-path": "model_path",
+    "--host": "host",
+    "--port": "port",
+    "-p": "port",
+}
+
+
+def _runtime_flag_token(token: str) -> tuple[str, str | None] | None:
+    for spelling, name in _RUNTIME_FLAG_ALIASES.items():
+        if token == spelling:
+            return name, None
+        prefix = f"{spelling}="
+        if token.startswith(prefix):
+            return name, token[len(prefix):]
+    return None
+
+
+def _validate_supplied_runtime_value(name: str, value: str) -> None:
+    if not value:
+        raise ValueError(f"launch --{name.replace('_', '-')} value must not be empty")
+    if name == "port":
+        try:
+            supplied_port = int(value)
+        except ValueError as exc:
+            raise ValueError(f"launch port must be an integer, received {value!r}") from exc
+        validate_port_span(supplied_port, 1)
+
+
+def _remove_launch_runtime_args(
+    argv: list[str], *, names: set[str]
+) -> list[str]:
+    """Remove every selected executor-owned runtime argument from tokenized argv."""
+    effective: list[str] = []
     index = 0
-    while index < len(parts):
-        part = parts[index]
-        if part in runtime_flags:
-            index += 2 if index + 1 < len(parts) else 1
-            continue
-        if any(part.startswith(f"{flag}=") for flag in runtime_flags):
+    while index < len(argv):
+        token = argv[index]
+        runtime = _runtime_flag_token(token)
+        if runtime is None or runtime[0] not in names:
+            effective.append(token)
             index += 1
             continue
-        effective_parts.append(part)
-        index += 1
-    effective_parts.extend(
+
+        name, equals_value = runtime
+        if equals_value is not None:
+            _validate_supplied_runtime_value(name, equals_value)
+            index += 1
+            continue
+
+        if index + 1 >= len(argv):
+            raise ValueError(f"launch flag {token} is missing its value")
+        supplied_value = argv[index + 1]
+        if _runtime_flag_token(supplied_value) is not None:
+            raise ValueError(f"launch flag {token} is missing its value")
+        _validate_supplied_runtime_value(name, supplied_value)
+        index += 2
+    return effective
+
+
+def _canonicalize_launch_runtime_argv(
+    argv: list[str], *, model_path: str, port: int
+) -> list[str]:
+    """Return launch argv with exactly one executor-owned model, host, and port."""
+    validate_port_span(port, 1)
+    effective = _remove_launch_runtime_args(
+        list(argv), names={"model_path", "host", "port"}
+    )
+    effective.extend(
         ["--model-path", model_path, "--host", "0.0.0.0", "--port", str(port)]
     )
-    return shlex.join(effective_parts)
+    return effective
+
+
+def _set_launch_runtime(cmd: str, *, model_path: str, port: int) -> str:
+    """Strip candidate runtime flags and append the executor-owned values."""
+    return shlex.join(
+        _canonicalize_launch_runtime_argv(
+            shlex.split(cmd), model_path=model_path, port=port
+        )
+    )
 
 
 def _override_launch_port(cmd: str, port: int) -> str:
     """Set one launch command's ``--port`` regardless of its original spelling/value."""
-    body, marker, comment = cmd.partition(" #")
-    parts = shlex.split(body)
-    for index, part in enumerate(parts):
-        if part == "--port" and index + 1 < len(parts):
-            parts[index + 1] = str(port)
-            break
-        if part.startswith("--port="):
-            parts[index] = f"--port={port}"
-            break
-    else:
-        parts.extend(["--port", str(port)])
-    effective = shlex.join(parts)
-    return effective + (marker + comment if marker else "")
+    validate_port_span(port, 1)
+    parts = _remove_launch_runtime_args(shlex.split(cmd), names={"port"})
+    parts.extend(["--port", str(port)])
+    return shlex.join(parts)
 
 
 def _run_candidate(
@@ -1044,7 +1111,9 @@ def _outcome_diag(outcome: SearchOutcome) -> dict[str, Any]:
 
 
 
-def _reclaim_host(config: ExecutorConfig, remote: RemoteRunner) -> None:
+def _reclaim_host(
+    config: ExecutorConfig, remote: RemoteRunner, *, port_span: int
+) -> None:
     """开跑前强制清场,独占整机。
 
     目标机默认视为本 job 独占使用。开跑前把机器上一切可能占用 GPU / 端口的东西
@@ -1086,9 +1155,7 @@ def _reclaim_host(config: ExecutorConfig, remote: RemoteRunner) -> None:
     _log(f"  GPU 进程清理: {kill_gpu.stdout.strip() or kill_gpu.stderr.strip() or '(无输出)'}")
 
     # 3. 清将要用的端口段上的 LISTEN 进程(容器删完后一般已释放,这里兜底)
-    start_port = int(config.port)
-    span = max(int(config.target_gpu_count), 1)
-    end_port = start_port + span - 1
+    start_port, end_port = validate_port_span(config.port, port_span)
     clear_ports = remote.run(
         f"for p in $(seq {start_port} {end_port}); do fuser -k ${{p}}/tcp 2>/dev/null || true; done; "
         f'echo "cleared_ports={start_port}-{end_port}"',
@@ -1100,7 +1167,9 @@ def _reclaim_host(config: ExecutorConfig, remote: RemoteRunner) -> None:
     time.sleep(3)
 
 
-def _preflight_checks(config: ExecutorConfig, remote: RemoteRunner) -> None:
+def _preflight_checks(
+    config: ExecutorConfig, remote: RemoteRunner, *, port_span: int
+) -> None:
     """Verify remote connectivity, forcibly reclaim the host, then check model dir and image."""
     # 1. SSH(先确认能连上,再动手清场)
     probe = remote.run("echo ok")
@@ -1112,7 +1181,7 @@ def _preflight_checks(config: ExecutorConfig, remote: RemoteRunner) -> None:
     _log(f"✅ SSH OK: {config.ssh_target}")
 
     # 1.5 强制清场,独占整机(取代原来只清本 job 前缀容器的做法)
-    _reclaim_host(config, remote)
+    _reclaim_host(config, remote, port_span=port_span)
 
     # 2. Model dir
     q = shlex.quote(config.model_host_dir)
@@ -1205,6 +1274,12 @@ def run_executor(
         job.benchmark_method, project_root=config.project_root
     )
     candidates = _load_candidates(config.configs_path, search=job.search)
+    # Every batch uses a contiguous slice starting at config.port. The widest
+    # simultaneous launch/cleanup span is bounded by the larger declared GPU
+    # count (TP1 candidates and fill-host replicas each consume at most one
+    # port per GPU). Validate this before constructing or calling RemoteRunner.
+    port_span = max(job.gpu_count, config.target_gpu_count, 1)
+    validate_port_span(config.port, port_span)
     _check_hardware_match(job, config)
 
     # Everything needed to construct the benchmark is local and deterministic.
@@ -1212,7 +1287,7 @@ def run_executor(
     bench_template = _resolve_bench_template(job, config=config)
 
     remote = remote or RemoteRunner(config.ssh_target, ssh_password=config.ssh_password)
-    _preflight_checks(config, remote)
+    _preflight_checks(config, remote, port_span=port_span)
 
     # The boundary predicate for the adaptive search: a run "qualifies" iff it is
     # both data-healthy (not truncated) and within SLA. Injected so the search
@@ -1460,32 +1535,39 @@ def _parse_concurrencies(value: str | None) -> list[int] | None:
     return [int(part) for part in value.split(",") if part.strip()]
 
 
+def _resolve_target_password(target_path: Path) -> tuple[TargetSpec, str]:
+    """Load one target and resolve its optional password without exposing it in argv."""
+    target = load_target(target_path)
+    if target.ssh_password_env is not None:
+        password = os.environ.get(target.ssh_password_env, "")
+        if not password:
+            raise ValueError(
+                f"{target_path}: environment variable {target.ssh_password_env!r} "
+                "referenced by ssh_password_env is missing or empty"
+            )
+        return target, password
+    if target.ssh_password is not None:
+        return target, target.ssh_password.get_secret_value()
+    return target, ""
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run generated SGLang configs on a remote host and rank them."
+        description="Run generated SGLang configs on a remote host and rank them.",
+        allow_abbrev=False,
     )
     parser.add_argument("--job", required=True, type=Path)
+    parser.add_argument("--target", required=True, type=Path)
     parser.add_argument("--configs", required=True, type=Path)
     parser.add_argument("--results", required=True, type=Path)
-    parser.add_argument("--ssh-target", required=True)
-    parser.add_argument("--ssh-password", default="", help="SSH password (empty=key-based)")
-    parser.add_argument("--image-ref", required=True)
-    parser.add_argument("--model-host-dir", required=True)
-    parser.add_argument("--model-container-path", required=True)
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
-    parser.add_argument("--max-candidates", type=int, default=1)
     parser.add_argument("--concurrencies", default=None,
                         help="deprecated: adaptive search now chooses probes")
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K,
                         help="deprecated compatibility option; round-2 always refines all candidates")
     parser.add_argument("--max-cap", type=int, default=DEFAULT_MAX_CAP,
                         help="upper bound on concurrency the search will probe")
-    parser.add_argument("--port", type=int, default=30000)
-    parser.add_argument("--container-name", default="llm-infer-tuner-exec")
-    parser.add_argument("--remote-outputs-dir", default="")
-    parser.add_argument("--target-gpu-model", default="")
-    parser.add_argument("--target-gpu-count", type=int, default=0)
-    parser.add_argument("--target-gpu-memory-gb", type=float, default=0.0)
+    parser.add_argument("--container-name", default=None)
     parser.add_argument(
         "--fill-host", action="store_true",
         help="round2 把每个候选复制成 floor(gpu_count/tp_size) 个实例整机满载、"
@@ -1501,26 +1583,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--startup-max-attempts", type=int, default=3)
     args = parser.parse_args(argv)
 
+    try:
+        job = load_job(args.job)
+        target, ssh_password = _resolve_target_password(args.target)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     config = ExecutorConfig(
         job_path=args.job,
         configs_path=args.configs,
         results_dir=args.results,
-        ssh_target=args.ssh_target,
-        ssh_password=args.ssh_password,
-        image_ref=args.image_ref,
-        model_host_dir=args.model_host_dir,
-        model_container_path=args.model_container_path,
+        ssh_target=target.ssh_target,
+        ssh_password=ssh_password,
+        image_ref=target.image_ref,
+        model_host_dir=target.model_host_dir,
+        model_container_path=target.model_container_path,
         project_root=args.project_root,
-        max_candidates=args.max_candidates,
+        max_candidates=job.search.max_candidates,
         concurrencies=_parse_concurrencies(args.concurrencies),
-        port=args.port,
-        container_name=args.container_name,
-        remote_outputs_dir=args.remote_outputs_dir,
+        port=target.port,
+        container_name=args.container_name or f"llm-infer-tuner-{job.job_id}",
+        remote_outputs_dir=target.remote_outputs_dir,
         top_k=args.top_k,
         max_cap=args.max_cap,
-        target_gpu_model=args.target_gpu_model,
-        target_gpu_count=args.target_gpu_count,
-        target_gpu_memory_gb=args.target_gpu_memory_gb,
+        target_gpu_model=target.gpu_model,
+        target_gpu_count=target.gpu_count,
+        target_gpu_memory_gb=target.gpu_memory_gb,
         fill_host=args.fill_host,
         max_parallel=args.max_parallel,
         startup_stall_timeout_s=args.startup_stall_timeout,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import shutil
+import os
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -45,9 +45,9 @@ class CommandResult:
 class RemoteRunner:
     """Execute commands on a remote host via ssh, or locally via a raw argv.
 
-    If *ssh_password* is provided, uses ``sshpass`` to feed the password to
-    ssh (requires the ``sshpass`` binary on PATH).  Otherwise falls back to
-    key-based passwordless SSH with ``BatchMode=yes``.
+    If *ssh_password* is provided, ``sshpass -d`` reads it from a protected pipe.
+    The secret therefore never appears in process argv. Otherwise key-based SSH
+    uses ``BatchMode=yes``.
     """
 
     def __init__(
@@ -60,7 +60,7 @@ class RemoteRunner:
         default_timeout: int = 600,
     ) -> None:
         self.ssh_target = ssh_target
-        self.ssh_password = ssh_password
+        self._ssh_password = ssh_password
         if ssh_options is not None:
             self.ssh_options = tuple(ssh_options)
         elif ssh_password:
@@ -70,36 +70,67 @@ class RemoteRunner:
         self.runner = runner
         self.default_timeout = default_timeout
 
-    def build_ssh_argv(self, command: str) -> list[str]:
-        if self.ssh_password:
+    def build_ssh_argv(
+        self, command: str, *, password_fd: int | None = None
+    ) -> list[str]:
+        if self._ssh_password:
+            # ``0`` is only a non-secret structural placeholder for callers that
+            # inspect argv. ``run`` always supplies the actual protected pipe FD.
+            fd = 0 if password_fd is None else password_fd
             return [
-                "sshpass", "-p", self.ssh_password,
+                "sshpass", "-d", str(fd),
                 "ssh", *self.ssh_options, self.ssh_target, command,
             ]
         return ["ssh", *self.ssh_options, self.ssh_target, command]
 
     def run(self, command: str, *, timeout: int | None = None) -> CommandResult:
-        return self._invoke(self.build_ssh_argv(command), timeout=timeout)
+        if not self._ssh_password:
+            return self._invoke(self.build_ssh_argv(command), timeout=timeout)
+
+        read_fd, write_fd = os.pipe()
+        try:
+            encoded = self._ssh_password.encode("utf-8")
+            written = 0
+            while written < len(encoded):
+                written += os.write(write_fd, encoded[written:])
+        finally:
+            os.close(write_fd)
+        try:
+            return self._invoke(
+                self.build_ssh_argv(command, password_fd=read_fd),
+                timeout=timeout,
+                pass_fds=(read_fd,),
+            )
+        finally:
+            os.close(read_fd)
 
     def run_local(
         self, argv: Sequence[str], *, timeout: int | None = None
     ) -> CommandResult:
         return self._invoke(list(argv), timeout=timeout)
 
-    def _invoke(self, argv: list[str], *, timeout: int | None) -> CommandResult:
+    def _invoke(
+        self,
+        argv: list[str],
+        *,
+        timeout: int | None,
+        pass_fds: tuple[int, ...] = (),
+    ) -> CommandResult:
         # timeout=0 is the explicit opt-out used by long-running benchmarks.
         # None retains the ordinary per-command safety default.
         effective_timeout = None if timeout == 0 else (
             self.default_timeout if timeout is None else timeout
         )
         try:
-            completed = self.runner(
-                argv,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=effective_timeout,
-            )
+            kwargs = {
+                "capture_output": True,
+                "text": True,
+                "check": False,
+                "timeout": effective_timeout,
+            }
+            if pass_fds:
+                kwargs["pass_fds"] = pass_fds
+            completed = self.runner(argv, **kwargs)
         except subprocess.TimeoutExpired as exc:
             stdout = _as_text(exc.stdout)
             stderr = _as_text(exc.stderr)

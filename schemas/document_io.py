@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from schemas.candidate_spec import CandidateSet
 from schemas.job_spec import JobSpec, SearchBudget
+from schemas.target_spec import TargetSpec
 
 
 def strict_json_load(text: str, *, source: str) -> Any:
@@ -52,6 +53,19 @@ def load_job(path: Path) -> JobSpec:
         return JobSpec.model_validate(payload)
     except (json.JSONDecodeError, ValidationError, ValueError) as exc:
         raise ValueError(f"{path}: invalid JobSpec: {exc}") from exc
+
+
+def load_target(path: Path) -> TargetSpec:
+    """Load and validate one strict TargetSpec document."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"{path}: cannot read target: {exc}") from exc
+    try:
+        payload = strict_json_load(text, source=str(path))
+        return TargetSpec.model_validate(payload)
+    except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+        raise ValueError(f"{path}: invalid TargetSpec: {exc}") from exc
 
 
 def _candidate_rows(path: Path) -> list[dict[str, Any]]:
@@ -118,4 +132,10 @@ def load_candidates(path: Path, *, search: SearchBudget) -> list[dict[str, Any]]
     return [candidate.model_dump() for candidate in candidate_set.candidates]
 
 
-__all__ = ["load_candidate_set", "load_candidates", "load_job", "strict_json_load"]
+__all__ = [
+    "load_candidate_set",
+    "load_candidates",
+    "load_job",
+    "load_target",
+    "strict_json_load",
+]

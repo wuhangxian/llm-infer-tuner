@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import shlex
 
+from runners.container import Container, ContainerConfig
 from runners.metrics import RunResult, parse_bench_text
 from runners.ranker import candidate_goodput, data_health_check, passes_sla
 from runners.readiness import wait_until_ready
 from runners.remote import DEFAULT_SSH_OPTIONS, CommandResult, RemoteRunner
 from schemas.job_spec import SLA
-
 
 # --- metrics.parse_bench_text -------------------------------------------------
 
@@ -195,6 +196,60 @@ def test_build_ssh_argv_structure() -> None:
     # default options preserved in order between "ssh" and the target
     assert tuple(argv[1:-2]) == DEFAULT_SSH_OPTIONS
     assert calls == []  # build only, no execution
+
+
+def test_password_ssh_uses_protected_fd_and_never_places_secret_in_argv() -> None:
+    import os
+    import subprocess
+
+    sentinel = "remote-password-sentinel"
+    observed: dict[str, object] = {}
+
+    def fake_runner(argv, **kwargs):
+        observed["argv"] = list(argv)
+        observed["password"] = os.read(kwargs["pass_fds"][0], 8192).decode()
+        return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+
+    runner = RemoteRunner("user@host", ssh_password=sentinel, runner=fake_runner)
+    result = runner.run("echo ok")
+
+    assert result.ok
+    argv = observed["argv"]
+    assert isinstance(argv, list)
+    assert sentinel not in argv
+    assert argv[:2] == ["sshpass", "-d"]
+    assert observed["password"] == sentinel
+
+
+def test_container_start_preserves_paths_with_spaces_unicode_and_single_quotes() -> None:
+    commands: list[str] = []
+
+    class RecordingRemote:
+        def run(self, command: str, *, timeout=None) -> CommandResult:
+            commands.append(command)
+            return CommandResult(returncode=0, stdout="container-id\n", stderr="")
+
+    model_host = "/models/模型 family's copy"
+    model_container = "/container/模型 family's copy"
+    outputs_host = "/outputs/本次 run's evidence"
+    container = Container(
+        RecordingRemote(),  # type: ignore[arg-type]
+        ContainerConfig(
+            image_ref="registry.example/sglang:test",
+            name="candidate-c001",
+            model_host_dir=model_host,
+            model_container_path=model_container,
+            outputs_host_dir=outputs_host,
+        ),
+    )
+
+    result = container.start()
+
+    assert result.ok
+    argv = shlex.split(commands[0])
+    mounts = [argv[index + 1] for index, token in enumerate(argv[:-1]) if token == "-v"]
+    assert f"{model_host}:{model_container}" in mounts
+    assert f"{outputs_host}:/workspace/outputs" in mounts
 
 
 def test_run_local_uses_injected_runner_and_wraps_result() -> None:

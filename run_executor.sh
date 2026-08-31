@@ -5,29 +5,48 @@
 #   ./run_executor.sh <job.json> <target.json> [configs.jsonl] [results_dir]
 #
 # 用法2(单文件模式,手写配置):
-#   ./run_executor.sh <configs.jsonl>
-#   configs.jsonl 第一行是 _meta(SLA/workload/target 信息),后面每行一条候选
+#   ./run_executor.sh <bundle.json|bundle.jsonl>
+#   单文件是一个顶层含 _meta + candidates 的 JSON wrapper。
 #
 # 压测命令由 JobSpec + workload + benchmark_method 确定性生成,第二阶段不调用 AI。
 set -euo pipefail
 
 command -v jq >/dev/null || { echo "❌ 需要 jq" >&2; exit 1; }
 
+usage() {
+  echo "用法1: ./run_executor.sh <job.json> <target.json> [configs.jsonl] [results_dir]" >&2
+  echo "用法2: ./run_executor.sh <bundle.json|bundle.jsonl>  (顶层含 _meta + candidates)" >&2
+}
+
+if [ "$#" -eq 0 ] || [ "$#" -gt 4 ]; then
+  usage
+  exit 2
+fi
+
+TMP_DIR=""
+cleanup() {
+  if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
+    rm -rf -- "$TMP_DIR"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 检测模式:单文件 vs 三参数
 # ─────────────────────────────────────────────────────────────────────────
 SINGLE_FILE=""
-if [ $# -eq 1 ] && [[ "$1" == *.json ]]; then
+if [ $# -eq 1 ] && { [[ "$1" == *.json ]] || [[ "$1" == *.jsonl ]]; }; then
   SINGLE_FILE="$1"
   [ -f "$SINGLE_FILE" ] || { echo "❌ 文件不存在: $SINGLE_FILE" >&2; exit 1; }
-elif [ $# -ge 2 ]; then
+elif [ $# -ge 2 ] && [ $# -le 4 ] && [[ "$1" != -* ]] && [[ "$2" != -* ]]; then
   JOB="$1"
   TARGET="$2"
   [ -f "$JOB" ]     || { echo "❌ job 不存在: $JOB" >&2; exit 1; }
   [ -f "$TARGET" ]  || { echo "❌ target 不存在: $TARGET" >&2; exit 1; }
 else
-  echo "用法1: ./run_executor.sh <job.json> <target.json> [configs.jsonl] [results_dir]" >&2
-  echo "用法2: ./run_executor.sh <configs.jsonl>  (第一行含 _meta)" >&2
+  usage
   exit 1
 fi
 
@@ -35,48 +54,84 @@ fi
 # 解析参数(单文件模式从 _meta 读,三参数模式从 job/target 读)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 if [ -n "$SINGLE_FILE" ]; then
-  # 单文件模式:从第一行 _meta 读所有信息
-  META="$SINGLE_FILE"
+  # 单文件模式:先在 0700 临时目录里生成严格的 job/target/configs。
+  # target 里绝不复制明文密码;兼容旧 bundle 时只通过当前进程环境传递。
+  jq -e 'type == "object" and (._meta | type == "object") and (.candidates | type == "array")' \
+    "$SINGLE_FILE" >/dev/null || {
+      echo "❌ 单文件必须是顶层含 _meta 和 candidates 数组的 JSON wrapper" >&2
+      exit 1
+    }
+  umask 077
+  TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/llm-infer-tuner.XXXXXXXX")"
+  chmod 700 "$TMP_DIR"
   JOB_ID="$(jq -r '._meta.job_id // "custom"' "$SINGLE_FILE")"
-  TMP_DIR=$(mktemp -d)
   CONFIGS="$TMP_DIR/configs.jsonl"
   RESULTS="outputs/${JOB_ID}/results"
-  SSH_TARGET="$(jq -r '._meta.ssh_target' "$SINGLE_FILE")"
-  SSH_PASSWORD="$(jq -r '._meta.ssh_password // ""' "$SINGLE_FILE")"
-  MODEL_HOST_DIR="$(jq -r '._meta.model_host_dir' "$SINGLE_FILE")"
-  MODEL_CONTAINER_PATH="$(jq -r '._meta.model_container_path' "$SINGLE_FILE")"
-  IMAGE_REF="$(jq -r '._meta.image_ref' "$SINGLE_FILE")"
-  PORT="$(jq -r '._meta.port // 30000' "$SINGLE_FILE")"
-  REMOTE_OUTPUTS_DIR="$(jq -r '._meta.remote_outputs_dir // ""' "$SINGLE_FILE")"
-  TARGET_GPU_MODEL="$(jq -r '._meta.gpu_model // ""' "$SINGLE_FILE")"
-  TARGET_GPU_COUNT="$(jq -r '._meta.gpu_count // 0' "$SINGLE_FILE")"
-  TARGET_GPU_MEM="$(jq -r '._meta.gpu_memory_gb // 0' "$SINGLE_FILE")"
 
-  MAX_CAND="$(jq -c ".candidates | length" "$SINGLE_FILE")"
+  has_plain_password="$(jq -r '((._meta.ssh_password? // "") | length) > 0' "$SINGLE_FILE")"
+  has_password_env="$(jq -r '((._meta.ssh_password_env? // "") | length) > 0' "$SINGLE_FILE")"
+  if [ "$has_plain_password" = "true" ] && [ "$has_password_env" = "true" ]; then
+    echo "❌ bundle 不能同时设置 ssh_password 和 ssh_password_env" >&2
+    exit 1
+  fi
+  if [ "$has_plain_password" = "true" ]; then
+    LLM_INFER_TUNER_BUNDLE_SSH_PASSWORD="$(jq -r '._meta.ssh_password' "$SINGLE_FILE")"
+    export LLM_INFER_TUNER_BUNDLE_SSH_PASSWORD
+  fi
 
-  # 写临时 job.json 和 target.json 给 executor.py
-  jq '._meta | {job_id, engine:"sglang", gpu_model, gpu_count, gpu_memory_gb, model:"custom", image:"custom", workload, benchmark_method, sla, search:{max_candidates:999, max_runtime_minutes:180}}' "$SINGLE_FILE" > "$TMP_DIR/job.json"
-  jq '._meta | {gpu_model, gpu_count, gpu_memory_gb, ssh_target, ssh_password, model_host_dir, model_container_path, image_ref, port, remote_outputs_dir}' "$SINGLE_FILE" > "$TMP_DIR/target.json"
+  # max_candidates 只统计非 baseline;任一 baseline 标记都会启用严格 baseline 契约,
+  # ID/标记不一致会继续由 CandidateSet 拒绝。
+  jq '
+    . as $root
+    | ($root._meta) as $m
+    | ([$root.candidates[] | select(.id == "baseline" or .params.is_baseline == true)]
+       | length > 0) as $has_baseline
+    | {
+        job_id: ($m.job_id // "custom"),
+        engine: "sglang",
+        gpu_model: $m.gpu_model,
+        gpu_count: $m.gpu_count,
+        gpu_memory_gb: $m.gpu_memory_gb,
+        model: ($m.model // "custom"),
+        image: ($m.image // "custom"),
+        workload: $m.workload,
+        benchmark_method: $m.benchmark_method,
+        sla: $m.sla,
+        search: ({max_candidates: (($root.candidates | length) - (if $has_baseline then 1 else 0 end))}
+                 + (if $has_baseline then {baseline: {}} else {} end))
+      }
+  ' "$SINGLE_FILE" > "$TMP_DIR/job.json"
+  jq --arg runtime_password_env "LLM_INFER_TUNER_BUNDLE_SSH_PASSWORD" '
+    ._meta as $m
+    | {
+        gpu_model: $m.gpu_model,
+        gpu_count: $m.gpu_count,
+        gpu_memory_gb: $m.gpu_memory_gb,
+        ssh_target: $m.ssh_target,
+        model_host_dir: $m.model_host_dir,
+        model_container_path: $m.model_container_path,
+        image_ref: $m.image_ref,
+        port: ($m.port // 30000),
+        remote_outputs_dir: ($m.remote_outputs_dir // ""),
+        exclusive_host: ($m.exclusive_host // false)
+      }
+      + (if (($m.ssh_password_env? // "") | length) > 0
+         then {ssh_password_env: $m.ssh_password_env}
+         elif (($m.ssh_password? // "") | length) > 0
+         then {ssh_password_env: $runtime_password_env}
+         else {} end)
+  ' "$SINGLE_FILE" > "$TMP_DIR/target.json"
   JOB="$TMP_DIR/job.json"
   TARGET="$TMP_DIR/target.json"
   # Extract candidates into JSONL for executor
   jq -c '.candidates[]' "$SINGLE_FILE" > "$TMP_DIR/configs.jsonl"
+  MAX_CAND="$(jq -r '.search.max_candidates' "$JOB")"
 else
   # 三参数模式:原来逻辑
   JOB_ID="$(jq -r '.job_id' "$JOB")"
   CONFIGS="${3:-outputs/${JOB_ID}/configs.jsonl}"
   RESULTS="${4:-outputs/${JOB_ID}/results}"
   [ -f "$CONFIGS" ] || { echo "❌ configs 不存在: $CONFIGS(先跑 ./gen_configs.sh $JOB)" >&2; exit 1; }
-  SSH_TARGET="$(jq -r '.ssh_target' "$TARGET")"
-  SSH_PASSWORD="$(jq -r '.ssh_password // ""' "$TARGET")"
-  MODEL_HOST_DIR="$(jq -r '.model_host_dir' "$TARGET")"
-  MODEL_CONTAINER_PATH="$(jq -r '.model_container_path' "$TARGET")"
-  IMAGE_REF="$(jq -r '.image_ref' "$TARGET")"
-  PORT="$(jq -r '.port // 30000' "$TARGET")"
-  REMOTE_OUTPUTS_DIR="$(jq -r '.remote_outputs_dir // ""' "$TARGET")"
-  TARGET_GPU_MODEL="$(jq -r '.gpu_model' "$TARGET")"
-  TARGET_GPU_COUNT="$(jq -r '.gpu_count // 0' "$TARGET")"
-  TARGET_GPU_MEM="$(jq -r '.gpu_memory_gb // 0' "$TARGET")"
   MAX_CAND="$(jq -r '.search.max_candidates // 1' "$JOB")"
 fi
 
@@ -85,10 +140,6 @@ CONTAINER_NAME="llm-infer-tuner-${JOB_ID}"
 echo "▶ 执行器参数一览:" >&2
 echo "    job_id=$JOB_ID  max_candidates=$MAX_CAND" >&2
 echo "    bench_command=deterministic(no AI)" >&2
-echo "    ssh=$SSH_TARGET" >&2
-  echo "    image=$IMAGE_REF  container=$CONTAINER_NAME  port=$PORT" >&2
-echo "    model(host)=$MODEL_HOST_DIR" >&2
-echo "    model(container)=$MODEL_CONTAINER_PATH" >&2
 echo "    configs=$CONFIGS  results=$RESULTS" >&2
 echo >&2
 
@@ -119,20 +170,10 @@ EXTRA_ARGS+=(
 )
 echo "    startup: stall=${STARTUP_STALL_TIMEOUT_SECONDS}s hard=${STARTUP_HARD_TIMEOUT_SECONDS}s attempts=${STARTUP_MAX_ATTEMPTS}; job_timeout=none" >&2
 
-exec uv run python -m runners.executor \
+uv run python -m runners.executor \
   --job "$JOB" \
+  --target "$TARGET" \
   --configs "$CONFIGS" \
   --results "$RESULTS" \
-  --ssh-target "$SSH_TARGET" \
-  --ssh-password "$SSH_PASSWORD" \
-  --image-ref "$IMAGE_REF" \
-  --model-host-dir "$MODEL_HOST_DIR" \
-  --model-container-path "$MODEL_CONTAINER_PATH" \
   --container-name "$CONTAINER_NAME" \
-  --port "$PORT" \
-  --max-candidates "$MAX_CAND" \
-  --remote-outputs-dir "$REMOTE_OUTPUTS_DIR" \
-  --target-gpu-model "$TARGET_GPU_MODEL" \
-  --target-gpu-count "$TARGET_GPU_COUNT" \
-  --target-gpu-memory-gb "$TARGET_GPU_MEM" \
   "${EXTRA_ARGS[@]}"

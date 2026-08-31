@@ -818,6 +818,66 @@ def test_launch_overrides_any_port_spelling_with_assigned_port(
     assert all(_flag_int(command.split(), "--port") == 30005 for command in server_cmds)
 
 
+def test_launch_runtime_argv_removes_all_duplicates_and_preserves_quoted_values() -> None:
+    preserved_value = "模型 family's copy --port marker"
+    original = [
+        "python",
+        "-m",
+        "sglang.launch_server",
+        "--port",
+        "30001",
+        "-p",
+        "30002",
+        "--port=30003",
+        "-p=30004",
+        "--model-path",
+        "/old model",
+        "--model-path=/another old model",
+        "--host",
+        "127.0.0.1",
+        "--host=localhost",
+        "--served-model-name",
+        preserved_value,
+    ]
+
+    effective = ex._canonicalize_launch_runtime_argv(
+        original,
+        model_path="/container/模型 family's copy",
+        port=30123,
+    )
+
+    assert effective[-6:] == [
+        "--model-path",
+        "/container/模型 family's copy",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "30123",
+    ]
+    assert effective.count("--port") == 1
+    assert not any(token == "-p" or token.startswith("-p=") for token in effective)
+    assert sum(token == "--model-path" for token in effective) == 1
+    assert sum(token == "--host" for token in effective) == 1
+    assert effective[effective.index("--served-model-name") + 1] == preserved_value
+
+
+def test_launch_runtime_argv_appends_runtime_flags_when_candidate_omits_them() -> None:
+    effective = ex._canonicalize_launch_runtime_argv(
+        ["python", "-m", "sglang.launch_server", "--tp-size", "2"],
+        model_path="/models/example",
+        port=30005,
+    )
+
+    assert effective[-6:] == [
+        "--model-path",
+        "/models/example",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "30005",
+    ]
+
+
 def test_threshold_marks_but_never_removes_candidates(tmp_path, workloads_output_len):
     cstar = {"baseline": 10, "fast": 16, "slow": 4}
     job_path = _write_job(
