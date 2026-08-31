@@ -207,6 +207,19 @@ JOB_JSON="$(cat "$JOB")"
 # 输出结构约束:一个 {candidates:[...]} 对象
 SCHEMA='{"type":"object","required":["candidates"],"properties":{"candidates":{"type":"array","items":{"type":"object","required":["id","params","cmd","reasons"],"properties":{"id":{"type":"string"},"params":{"type":"object"},"cmd":{"type":"string"},"reasons":{"type":"array","items":{"type":"string"}}}}}}}'
 
+# Candidate generation only needs read access to the checked-in knowledge files.  Keep the
+# model unable to execute commands or mutate the workspace, and ignore project/user settings,
+# hooks, slash commands, browser integration, and ambient MCP servers.
+AGENT_POLICY_ARGS=(
+  --tools "Read,Grep,Glob"
+  --disallowedTools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch"
+  --permission-mode dontAsk
+  --setting-sources ""
+  --strict-mcp-config
+  --disable-slash-commands
+  --no-chrome
+)
+
 PROMPT_PREFIX="$(cat <<'PROMPT_HEAD'
 # llm-infer-tuner 一步出 SGLang 启动配置(JSON)
 
@@ -353,7 +366,7 @@ if [ "$GEN_STREAM" != "0" ]; then
     --json-schema "$SCHEMA"
     --add-dir .
     --add-dir "$SKILL_DIR"
-    --dangerously-skip-permissions
+    "${AGENT_POLICY_ARGS[@]}"
   )
 
   # set -euo pipefail 下临时关 -e；必须第一时间完整保存 PIPESTATUS，
@@ -416,7 +429,7 @@ else
     --json-schema "$SCHEMA"
     --add-dir .
     --add-dir "$SKILL_DIR"
-    --dangerously-skip-permissions
+    "${AGENT_POLICY_ARGS[@]}"
   )
   set +e
   "${GUARD_ARGS[@]}" --stdout-suffix json -- "${TCLAUDE_COMMAND[@]}"
@@ -472,8 +485,10 @@ if [ "$GEN_STREAM" != "0" ]; then
     echo "⚠️  预检未在 NDJSON 里立刻看到 result 事件(大候选集落盘竞态常见),交由解析步骤裁决…" >&2
   fi
   set +e
-  jq -R -e '
-    [ inputs | fromjson? // empty | select(.type=="result") ] | last
+  jq -R -s -e '
+    split("\n")
+    | map(select(test("\\S")) | fromjson)
+    | [ .[] | select(.type=="result") ] | last
     | if (.is_error == true) then error("tclaude 返回 is_error: \(.subtype)") else . end
     | ( .structured_output // (.result | if type=="string" then fromjson else . end) )
     | {candidates: .candidates}
@@ -492,7 +507,8 @@ if [ "$GEN_STREAM" != "0" ]; then
 else
   set +e
   jq -e '
-    ( .structured_output // (.result | if type=="string" then fromjson else . end) // . )
+    if (.is_error == true) then error("tclaude 返回 is_error: \(.subtype)") else . end
+    | ( .structured_output // (.result | if type=="string" then fromjson else . end) // . )
     | {candidates: .candidates}
   ' "$RAW_FILE" > "$OUT_TMP"
   PARSE_RC=$?
@@ -513,9 +529,6 @@ if ! python3 -m schemas.validate_cli candidates "$JOB" "$OUT_TMP"; then
   exit 1
 fi
 
-mv -f -- "$OUT_TMP" "$OUT"
-OUT_TMP=""
-
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 第 6 步:预览输出
 # ─────────────────────────────────────────────────────────────────────────
@@ -525,10 +538,11 @@ OUT_TMP=""
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 候选数必须用 jq 数 .candidates 长度,不能用 wc -l:输出是多行 pretty-print JSON
 # (一条候选占十几行),wc -l 会把总行数(如 33 条≈620 行)误当成候选数。
-N="$(jq '.candidates | length' "$OUT")"
-echo "✅ 已生成 $N 条候选 → $OUT" >&2
-echo "── 预览(id / tp / ep / att / mf / requested_mamba / effective_mamba / page / spec / chunk / kv / sched / radix)──" >&2
-jq -r '.candidates[] | 
+if ! N="$(jq -e '.candidates | length' "$OUT_TMP")"; then
+  echo "❌ 生成结果计数失败；已有输出未修改" >&2
+  exit 1
+fi
+if ! PREVIEW_LINES="$(jq -r '.candidates[] |
   "  " + .id +
   "  tp=" + (.params.tp_size|tostring) +
   "  ep=" + (.params.ep_size // 1 | tostring) +
@@ -542,7 +556,17 @@ jq -r '.candidates[] |
   "  kv=" + (.params.kv_cache_dtype // .params["kv-cache-dtype"] // "auto(default)") +
   "  sched=" + (.params.schedule_conservativeness // .params["schedule-conservativeness"] // "1.0(default)" | tostring) +
   "  radix=off"
-' "$OUT" >&2
+' "$OUT_TMP")"; then
+  echo "❌ 生成结果预览失败；已有输出未修改" >&2
+  exit 1
+fi
+
+mv -f -- "$OUT_TMP" "$OUT"
+OUT_TMP=""
+
+echo "✅ 已生成 $N 条候选 → $OUT" >&2
+echo "── 预览(id / tp / ep / att / mf / requested_mamba / effective_mamba / page / spec / chunk / kv / sched / radix)──" >&2
+printf '%s\n' "$PREVIEW_LINES" >&2
 
 # 整个脚本墙钟耗时(从文件头 SECONDS=0 到此刻),纯展示、不写进 configs.jsonl。
 # 大于 60s 时补一个「Xm Ys」的人类可读形式,方便一眼看出几分钟。

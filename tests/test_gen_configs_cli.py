@@ -178,6 +178,11 @@ def script_project(tmp_path: Path) -> ScriptProject:
         '    if [ "$arg" = "--unbuffered" ]; then exit 55; fi\n'
         '  done\n'
         'fi\n'
+        'if [ "${FAKE_JQ_MODE:-}" = "fail-preview" ]; then\n'
+        '  for arg in "$@"; do\n'
+        '    case "$arg" in *requested_mamba*) exit 56 ;; esac\n'
+        '  done\n'
+        'fi\n'
         'if [ "${FAKE_JQ_MODE:-}" = "block-parse" ]; then\n'
         '  for arg in "$@"; do\n'
         '    case "$arg" in\n'
@@ -213,13 +218,27 @@ def script_project(tmp_path: Path) -> ScriptProject:
         'attempt=$(( $(cat "$FAKE_TCLAUDE_COUNT_FILE") + 1 )); fi\n'
         'printf "%s" "$attempt" > "$FAKE_TCLAUDE_COUNT_FILE"\n'
         'previous=""\n'
+        'available_tools=""\n'
+        'saw_tools=0\n'
+        'dangerous_permissions=0\n'
         'for arg in "$@"; do\n'
         '  if [ "$previous" = "-p" ]; then printf "%s" "$arg" > "$FAKE_TCLAUDE_PROMPT_FILE"; fi\n'
+        '  if [ "$previous" = "--tools" ]; then available_tools="$arg"; saw_tools=1; fi\n'
         '  if [ "$previous" = "--model" ]; then '
         'printf "%s\\n" "$arg" >> "$FAKE_TCLAUDE_MODELS_FILE"; fi\n'
+        '  if [ "$arg" = "--dangerously-skip-permissions" ]; then dangerous_permissions=1; fi\n'
         '  previous="$arg"\n'
         'done\n'
         'mode="${FAKE_TCLAUDE_MODE:-success}"\n'
+        'if [ "$mode" = "model-policy-overwrite" ]; then\n'
+        '  policy_can_write="$dangerous_permissions"\n'
+        '  if [ "$saw_tools" = 0 ]; then policy_can_write=1; fi\n'
+        '  case ",$available_tools," in '
+        '*",Bash,"*|*",Edit,"*|*",Write,"*) policy_can_write=1 ;; esac\n'
+        '  if [ "$policy_can_write" = 1 ]; then '
+        'printf "%s\\n" "agent-overwrite" > "$FAKE_OFFICIAL_OUTPUT"; fi\n'
+        '  exit 42\n'
+        'fi\n'
         'if [ "$mode" = "exit-42" ]; then exit 42; fi\n'
         'if [ "$mode" = "ignore-signals" ]; then\n'
         '  trap "" INT TERM\n'
@@ -240,6 +259,8 @@ def script_project(tmp_path: Path) -> ScriptProject:
         '  if [ "$stream" = 1 ]; then '
         f"printf '%s\\n' '{stream_init}'; fi\n"
         '  printf "%s\\n" "$FAKE_TCLAUDE_RESPONSE"\n'
+        '  if [ -n "${FAKE_TCLAUDE_TRAILING_LINE:-}" ]; then '
+        'printf "%s\\n" "$FAKE_TCLAUDE_TRAILING_LINE"; fi\n'
         '  exit 0\n'
         'fi\n'
         "if [ \"$stream\" = 1 ]; then\n"
@@ -318,6 +339,32 @@ def test_prompt_is_literal_and_never_executes_markdown_backticks(
     assert "`--disable-radix-cache`" in prompt
     assert "`mamba_radix_cache_strategy`" in prompt
     assert "`${MODEL_PATH}`" in prompt
+
+
+def test_agent_is_restricted_to_read_only_tools_and_cannot_overwrite_output(
+    script_project: ScriptProject,
+) -> None:
+    output = script_project.root / "policy-protected.jsonl"
+    original = b"previous-good-output\n"
+    output.write_bytes(original)
+
+    completed, argv = script_project.invoke(
+        str(script_project.job),
+        str(output),
+        env_overrides={
+            "FAKE_TCLAUDE_MODE": "model-policy-overwrite",
+            "FAKE_OFFICIAL_OUTPUT": str(output),
+        },
+    )
+
+    assert completed.returncode == 42
+    assert output.read_bytes() == original
+    assert "--dangerously-skip-permissions" not in argv
+    assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
+    assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
+    assert argv[argv.index("--setting-sources") + 1] == ""
+    assert "--strict-mcp-config" in argv
+    assert "--disable-slash-commands" in argv
 
 
 def test_zero_candidates_fail_validation_and_preserve_existing_output(
@@ -445,6 +492,57 @@ def test_stream_candidate_validation_failure_preserves_existing_output(
     assert output.read_bytes() == original
     assert "candidate validation failed" in completed.stderr
     assert list(script_project.root.glob(".invalid-stream.jsonl.tmp.*")) == []
+
+
+def test_non_stream_error_result_never_replaces_existing_output(
+    script_project: ScriptProject,
+) -> None:
+    output = script_project.root / "non-stream-error.jsonl"
+    original = b"previous-good-output\n"
+    output.write_bytes(original)
+    error_result = json.dumps(
+        {
+            "is_error": True,
+            "subtype": "error_during_execution",
+            "structured_output": {"candidates": [_candidate_payload("c001")]},
+        }
+    )
+
+    completed, _ = script_project.invoke(
+        str(script_project.job),
+        str(output),
+        env_overrides={"GEN_STREAM": "0", "FAKE_TCLAUDE_RESPONSE": error_result},
+    )
+
+    assert completed.returncode != 0
+    assert output.read_bytes() == original
+    assert "is_error" in completed.stderr
+    assert list(script_project.root.glob(".non-stream-error.jsonl.tmp.*")) == []
+
+
+def test_stream_trailing_malformed_event_never_replaces_existing_output(
+    script_project: ScriptProject,
+) -> None:
+    output = script_project.root / "stream-trailing-malformed.jsonl"
+    original = b"previous-good-output\n"
+    output.write_bytes(original)
+
+    completed, _ = script_project.invoke(
+        str(script_project.job),
+        str(output),
+        env_overrides={
+            "GEN_STREAM": "1",
+            "FAKE_TCLAUDE_RESPONSE": _agent_stream_response(
+                [_candidate_payload("c001")]
+            ),
+            "FAKE_TCLAUDE_TRAILING_LINE": "{not-json",
+        },
+    )
+
+    assert completed.returncode != 0
+    assert output.read_bytes() == original
+    assert "解析 candidates 失败" in completed.stderr
+    assert list(script_project.root.glob(".stream-trailing-malformed.jsonl.tmp.*")) == []
 
 
 def test_defaults_to_tclaude_hy3(script_project: ScriptProject) -> None:
@@ -756,6 +854,24 @@ def test_progress_renderer_failure_does_not_retry_or_replace_output(
     assert completed.returncode != 0
     assert script_project.count_file.read_text() == "1"
     assert output.read_text() == "previous-good-output\n"
+
+
+def test_preview_failure_does_not_replace_output_and_cleans_temp(
+    script_project: ScriptProject,
+) -> None:
+    output = script_project.root / "preview-failure.jsonl"
+    original = b"previous-good-output\n"
+    output.write_bytes(original)
+
+    completed, _ = script_project.invoke(
+        str(script_project.job),
+        str(output),
+        env_overrides={"GEN_STREAM": "0", "FAKE_JQ_MODE": "fail-preview"},
+    )
+
+    assert completed.returncode != 0
+    assert output.read_bytes() == original
+    assert list(script_project.root.glob(".preview-failure.jsonl.tmp.*")) == []
 
 
 def test_public_entry_sigint_exits_130_and_cleans_tclaude_tree(
