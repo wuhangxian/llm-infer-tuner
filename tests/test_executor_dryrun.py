@@ -24,7 +24,6 @@ import pytest
 from runners import executor as ex
 from runners.executor import ExecutorConfig, run_executor
 
-
 # --- fakes --------------------------------------------------------------------
 
 
@@ -174,6 +173,22 @@ class _FakeContainer:
         if out_path:
             self._result_files[out_path] = jsonl
         return _FakeResult(0, stdout=jsonl)
+
+
+class _StrictLaunchContainer(_FakeContainer):
+    """Reject malformed executables so a failed launch cannot look healthy."""
+
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate)
+        self.rejected_launches: list[str] = []
+
+    def exec_detached(self, command: str, log_container_path: str, *, timeout=None):
+        if command.split()[:3] != ["python", "-m", "sglang.launch_server"]:
+            self.launched_cmds.append(command)
+            self.rejected_launches.append(command)
+            self.alive = False
+            return _FakeResult(returncode=127, stderr="synthetic invalid executable")
+        return super().exec_detached(command, log_container_path, timeout=timeout)
 
 
 class _FlakyServerContainer(_FakeContainer):
@@ -651,6 +666,56 @@ def test_every_launch_forces_exactly_one_disable_radix(tmp_path, workloads_outpu
         assert "--disable-radix-cache=" not in cmd, (
             f"必须是裸 flag,不能是 =true/=false 形式,实际:{cmd}"
         )
+
+
+def test_params_only_candidate_launches_the_structured_command(
+    tmp_path, workloads_output_len
+):
+    configs_path = tmp_path / "configs.jsonl"
+    configs_path.write_text(
+        json.dumps(
+            {
+                "id": "params-only",
+                "params": {"tp_size": 2, "attention_backend": "flashinfer"},
+                "reasons": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path),
+        configs_path=configs_path,
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=1,
+    )
+    container = _StrictLaunchContainer({"params-only": 2})
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    assert not container.rejected_launches
+    command = next(
+        item
+        for item in container.launched_cmds
+        if item.startswith("python -m sglang.launch_server")
+    )
+    assert command.startswith("python -m sglang.launch_server")
+    assert "--tp-size 2" in command
+    assert "--attention-backend flashinfer" in command
+    assert command.count("--disable-radix-cache") == 1
+    assert "--model-path /models/qwen" in command
+    assert "--host 0.0.0.0" in command
+    assert "--port 30000" in command
+    assert "None" not in command.split()
 
 
 @pytest.mark.parametrize(

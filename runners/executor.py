@@ -869,7 +869,7 @@ def _build_cmd_from_params(params: dict, model_path_placeholder: str = "${MODEL_
 
 
 def _force_disable_radix_cache(cmd: str) -> str:
-    """无条件钉死关 radix/prefix cache —— 不论候选来自 cmd / cmd_parts / params,
+    """无条件钉死关 radix/prefix cache —— 不论候选来自 cmd / params,
     也不论 config 有没有手写,最终启动命令都保证带且仅带一个 `--disable-radix-cache`。
 
     为什么在这里强制、而不是靠 config 写:SGLang 默认 `disable_radix_cache=False`
@@ -951,14 +951,12 @@ def _run_candidate(
     container = ctx.container
     config = ctx.config
     candidate_id = str(candidate.get("id", "unknown"))
-    cmd = str(candidate.get("cmd", ""))
-    # Support cmd_parts array format (each element is one argument)
-    if not cmd and candidate.get("cmd_parts"):
-        cmd = " ".join(str(p) for p in candidate["cmd_parts"])
-    # If no cmd/cmd_parts, build from params dict automatically
+    raw_cmd = candidate.get("cmd")
+    cmd = raw_cmd if isinstance(raw_cmd, str) and raw_cmd.strip() else ""
+    # Structured params are the primary input when the optional legacy cmd is absent.
     if not cmd:
         cmd = _build_cmd_from_params(candidate.get("params", {}), port=ctx.port)
-    # 无条件钉死关 radix/prefix cache（团队硬约束）——不论命令来自 cmd/cmd_parts/params，
+    # 无条件钉死关 radix/prefix cache（团队硬约束）——不论命令来自 cmd/params，
     # 也不论 config 有没有手写，都在此汇合点统一注入，任何来源都跑不掉。
     cmd = _force_disable_radix_cache(cmd)
     candidate_dir = config.results_dir / candidate_id
