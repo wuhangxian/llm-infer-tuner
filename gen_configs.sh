@@ -221,7 +221,6 @@ SCHEMA='{"type":"object","required":["candidates"],"properties":{"candidates":{"
 # model unable to execute commands or mutate the workspace, and ignore project/user settings,
 # hooks, slash commands, browser integration, and ambient MCP servers.
 AGENT_POLICY_ARGS=(
-  --restricted
   --tools "Read,Grep,Glob"
   --disallowedTools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch"
   --permission-mode dontAsk

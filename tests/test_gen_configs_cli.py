@@ -240,6 +240,8 @@ def script_project(tmp_path: Path) -> ScriptProject:
         '  if [ "$previous" = "--model" ]; then '
         'printf "%s\\n" "$arg" >> "$FAKE_TCLAUDE_MODELS_FILE"; fi\n'
         '  if [ "$arg" = "--dangerously-skip-permissions" ]; then dangerous_permissions=1; fi\n'
+        '  if [ "$arg" = "--restricted" ]; then '
+        'echo "error: unknown option --restricted" >&2; exit 64; fi\n'
         '  previous="$arg"\n'
         'done\n'
         'mode="${FAKE_TCLAUDE_MODE:-success}"\n'
@@ -423,7 +425,7 @@ def test_agent_can_read_only_staged_knowledge_not_repository_files(
     assert agent_cwd != script_project.root
     assert not agent_cwd.exists()
     assert add_dirs_file.read_text().splitlines() == ["."]
-    assert "--restricted" in argv
+    assert "--restricted" not in argv
 
 
 def test_zero_candidates_fail_validation_and_preserve_existing_output(
