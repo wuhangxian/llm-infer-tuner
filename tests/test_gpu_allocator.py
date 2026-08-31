@@ -11,6 +11,7 @@ from runners.executor import (
     _allocate_gpus_and_ports,
     _detect_numa_groups,
     _plan_candidate_batches,
+    _plan_fill_host_replica_slices,
 )
 
 
@@ -204,6 +205,65 @@ def test_batch_planner_is_deterministic_and_rejects_unplaceable_candidate() -> N
 
     with pytest.raises(ValueError, match="cross-NUMA"):
         _plan_candidate_batches(_candidates([3]), 4, numa_groups=topology)
+
+
+def test_batch_planner_reuses_ports_across_sequential_batches() -> None:
+    candidates = _candidates([1, 1, 1])
+
+    batches = _plan_candidate_batches(
+        candidates,
+        gpu_count=2,
+        base_port=65534,
+        numa_groups=[[0, 1]],
+    )
+
+    assert [[row["id"] for row in batch] for batch in batches] == [
+        ["c001", "c002"],
+        ["c003"],
+    ]
+    assert [
+        [port for _, _, port in _allocate_gpus_and_ports(
+            batch,
+            gpu_count=2,
+            base_port=65534,
+            numa_groups=[[0, 1]],
+        )]
+        for batch in batches
+    ] == [[65534, 65535], [65534]]
+
+
+def test_fill_host_replica_count_uses_real_numa_placements() -> None:
+    topology = [[0, 1, 2], [3, 4, 5]]
+    topology_before = deepcopy(topology)
+
+    assert _plan_fill_host_replica_slices(
+        list(range(6)),
+        tp_size=2,
+        numa_groups=topology,
+    ) == [[0, 1], [3, 4]]
+    assert _plan_fill_host_replica_slices(
+        list(range(6)),
+        tp_size=2,
+        numa_groups=topology,
+        allow_cross_numa=True,
+    ) == [[0, 1], [3, 4], [2, 5]]
+    assert topology == topology_before
+
+
+def test_fill_host_explicit_cross_numa_allows_one_tp8_replica() -> None:
+    topology = [[0, 1, 2, 3], [4, 5, 6, 7]]
+
+    assert _plan_fill_host_replica_slices(
+        list(range(8)),
+        tp_size=8,
+        numa_groups=topology,
+    ) == []
+    assert _plan_fill_host_replica_slices(
+        list(range(8)),
+        tp_size=8,
+        numa_groups=topology,
+        allow_cross_numa=True,
+    ) == [list(range(8))]
 
 
 def test_generated_tp_sequences_preserve_allocator_invariants() -> None:

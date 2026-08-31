@@ -72,6 +72,25 @@ def test_target_spec_accepts_key_based_ssh_target() -> None:
 
     assert target.ssh_target == "runner@example.test"
     assert target.port == 30000
+    assert target.allow_cross_numa is False
+
+
+def test_target_spec_accepts_explicit_cross_numa_policy() -> None:
+    payload = _valid_target()
+    payload["allow_cross_numa"] = True
+
+    target = TargetSpec.model_validate(payload)
+
+    assert target.allow_cross_numa is True
+
+
+@pytest.mark.parametrize("value", [0, 1, "true"])
+def test_target_spec_rejects_non_boolean_cross_numa_policy(value: object) -> None:
+    payload = _valid_target()
+    payload["allow_cross_numa"] = value
+
+    with pytest.raises(ValidationError):
+        TargetSpec.model_validate(payload)
 
 
 @pytest.mark.parametrize("port", [0, -1, 65536])

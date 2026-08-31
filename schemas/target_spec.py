@@ -56,6 +56,7 @@ class TargetSpec(StrictModel):
     ssh_password_env: EnvironmentVariable | None = None
     remote_outputs_dir: Annotated[str, Field(max_length=4096)] = ""
     exclusive_host: bool = False
+    allow_cross_numa: bool = False
 
     @field_validator("ssh_target", "image_ref", mode="before")
     @classmethod

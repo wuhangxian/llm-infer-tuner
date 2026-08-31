@@ -87,7 +87,8 @@ class ExecutorConfig:
     max_cap: int = DEFAULT_MAX_CAP  # upper bound on concurrency the search will probe
     ssh_password: str = field(default="", repr=False)  # empty = key-based SSH
     max_parallel: int = 8  # 批内并发跑多少个候选(每个独占容器+GPU+端口);1 = 退回串行
-    fill_host: bool = False  # round2 是否把每个候选复制成 floor(gpu/tp) 个实例整机满载实测
+    fill_host: bool = False  # round2 是否按 topology 复制实际可放置实例做整机满载实测
+    allow_cross_numa: bool = False  # 显式 opt-in；默认每个 TP/副本必须保持 NUMA-local
     startup_stall_timeout_s: int = 300
     startup_hard_timeout_s: int = 900
     startup_max_attempts: int = 3
@@ -290,7 +291,7 @@ def _make_evaluate(
 
     ``ports`` 是本候选要同时压的实例端口列表:
     · 缺省(None)= 单实例,只压 ctx.port,instances=1 —— round1 粗筛的原行为,逐字不变;
-    · 整机满载 = floor(gpu/tp) 个副本端口,每档并发压全部端口、由 _aggregate_replicas
+    · 整机满载 = topology 实际可放置的副本端口,每档并发压全部端口、由 _aggregate_replicas
       求和成一条 instances=N 的 per-host 结果(round2 fill_host)。
 
     每次 evaluate 把单一模板按并发档改写,在容器里跑 bench,把 console + 结果拉回
@@ -574,15 +575,17 @@ def _plan_candidate_batches(
     gpu_count: int,
     base_port: int = 30000,
     numa_groups: list[list[int]] | None = None,
+    *,
+    allow_cross_numa: bool = False,
 ) -> list[list[dict[str, Any]]]:
-    """Greedily form deterministic batches that remain NUMA-local.
+    """Greedily form deterministic batches under the selected NUMA policy.
 
-    A candidate that would only fit by consuming fragments from multiple NUMA
-    groups starts a fresh sequential batch. A candidate that cannot fit inside
-    any one physical NUMA group is rejected instead of being silently crossed.
+    By default, a candidate that would only fit by consuming fragments from
+    multiple NUMA groups starts a fresh sequential batch. Explicit cross-NUMA
+    policy permits such a placement without changing the default.
     """
     topology = _normalise_numa_groups(gpu_count, numa_groups)
-    validate_port_span(base_port, max(len(candidates), 1))
+    validate_port_span(base_port, 1)
 
     batches: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
@@ -594,6 +597,7 @@ def _plan_candidate_batches(
             gpu_count,
             base_port=base_port,
             numa_groups=topology,
+            allow_cross_numa=allow_cross_numa,
         )
         trial = [*current, candidate]
         try:
@@ -602,6 +606,7 @@ def _plan_candidate_batches(
                 gpu_count,
                 base_port=base_port,
                 numa_groups=topology,
+                allow_cross_numa=allow_cross_numa,
             )
         except ValueError:
             if current:
@@ -615,6 +620,48 @@ def _plan_candidate_batches(
     if current:
         batches.append(current)
     return batches
+
+
+def _plan_fill_host_replica_slices(
+    device_ids: list[int],
+    tp_size: int,
+    numa_groups: list[list[int]] | None,
+    *,
+    allow_cross_numa: bool = False,
+) -> list[list[int]]:
+    """Return container-visible GPU slices for the replicas that really fit."""
+    topology = _normalise_numa_groups(len(device_ids), numa_groups)
+    if type(tp_size) is not int or tp_size < 1:
+        raise ValueError("tp_size must be a positive integer")
+    if type(allow_cross_numa) is not bool:
+        raise ValueError("allow_cross_numa must be a boolean")
+    if len(device_ids) != len(set(device_ids)) or set(device_ids) != set(
+        range(len(device_ids))
+    ):
+        raise ValueError("fill-host devices must contain each host GPU exactly once")
+
+    host_slices: list[list[int]] = []
+    leftovers: list[int] = []
+    for group in topology:
+        local_replica_count = len(group) // tp_size
+        local_width = local_replica_count * tp_size
+        host_slices.extend(
+            group[offset:offset + tp_size]
+            for offset in range(0, local_width, tp_size)
+        )
+        leftovers.extend(group[local_width:])
+    if allow_cross_numa:
+        cross_width = (len(leftovers) // tp_size) * tp_size
+        host_slices.extend(
+            leftovers[offset:offset + tp_size]
+            for offset in range(0, cross_width, tp_size)
+        )
+
+    container_ordinal = {host_id: index for index, host_id in enumerate(device_ids)}
+    return [
+        [container_ordinal[host_id] for host_id in host_slice]
+        for host_slice in host_slices
+    ]
 
 
 def _format_alloc(alloc: list[tuple[dict[str, Any], str, int]]) -> str:
@@ -644,6 +691,8 @@ def _run_batch_parallel(
     refine: bool,
     seeds_by_id: dict[str, list[RunResult]] | None = None,
     fill_host: bool = False,
+    numa_groups: list[list[int]] | None = None,
+    allow_cross_numa: bool = False,
 ) -> dict[str, SearchOutcome]:
     """Run a batch of candidates in parallel, each in its own container.
 
@@ -653,7 +702,7 @@ def _run_batch_parallel(
     且每个候选独占容器+GPU+端口,互不串数据)。批内并发上限由 config.max_parallel 控制。
 
     fill_host=True(round2 整机满载):批内每个候选独占整机,容器拿到全部 gpu_count 张卡,
-    在容器内复制成 N=floor(n_devices/tp_size) 个实例(各自 CUDA_VISIBLE_DEVICES 切片 +
+    在容器内按 topology 复制实际可放置的实例(各自 CUDA_VISIBLE_DEVICES 切片 +
     各自端口),压测求和 —— 实测整机满载 goodput,不再靠外推。此模式下候选应各自成批
     (调用方保证 batch 只含一个候选),批间串行。
     """
@@ -667,27 +716,36 @@ def _run_batch_parallel(
     # Create one container per candidate in this batch
     for candidate, gpu_ids_str, port in batch:
         candidate_id = str(candidate.get("id", "unknown"))
-        _tp_size = max(1, int(candidate.get("params", {}).get("tp_size", 1)))
-        _devices = [d for d in gpu_ids_str.replace("device=", "").split(",") if d]
+        _tp_size = _candidate_tp_size(candidate)
+        _devices = [
+            int(device_id)
+            for device_id in gpu_ids_str.replace("device=", "").split(",")
+            if device_id
+        ]
         _n_devices = len(_devices)
         replica_ports: list[int] | None = None
         replica_gpus: list[str] | None = None
         if fill_host:
-            # 整机满载:容器拿到全部 device,内部复制成 N=floor(n_devices/tp) 个实例。
-            n_replicas = _n_devices // _tp_size
+            # 整机满载:按真实 NUMA topology 切副本；碎片不会被默认拼成跨 NUMA TP。
+            replica_slices = _plan_fill_host_replica_slices(
+                _devices,
+                _tp_size,
+                numa_groups,
+                allow_cross_numa=allow_cross_numa,
+            )
+            n_replicas = len(replica_slices)
             if n_replicas < 1:
                 raise ValueError(
                     f"candidate {candidate_id}: 整机 {_n_devices} 卡放不下一个 tp_size={_tp_size} 实例。"
                 )
             replica_ports = [port + i for i in range(n_replicas)]
-            # 容器内 GPU 从 0 连续编号(docker --gpus 已把宿主卡映射进来),
-            # 按 tp_size 连续切片分给各副本,避免跨副本共享卡。
             replica_gpus = [
-                ",".join(str(g) for g in range(i * _tp_size, (i + 1) * _tp_size))
-                for i in range(n_replicas)
+                ",".join(str(gpu_id) for gpu_id in replica_slice)
+                for replica_slice in replica_slices
             ]
             _log(f"[{round_label}] {candidate_id}: 整机满载 {n_replicas} 实例 "
-                 f"(tp={_tp_size}×{n_replicas}={_n_devices}卡), 端口 {replica_ports}")
+                 f"(tp={_tp_size}×{n_replicas}={_tp_size * n_replicas}/"
+                 f"{_n_devices}卡), 端口 {replica_ports}")
         else:
             # 启动前一致性断言:分到的 device 数必须等于 tp_size,否则容器会以
             # --tp {tp_size} 却少卡的方式崩在 CUDA "invalid device ordinal"。
@@ -1447,14 +1505,22 @@ def run_executor(
         job.gpu_count,
         base_port=config.port,
         numa_groups=numa_groups,
+        allow_cross_numa=config.allow_cross_numa,
     )
+    numa_policy = "cross-NUMA allowed" if config.allow_cross_numa else "NUMA-local"
     _log(f"{len(candidates)} candidates split into {len(batches)} batch(es) "
-         f"(max {job.gpu_count} GPUs per batch, NUMA-local)")
+         f"(max {job.gpu_count} GPUs per batch, {numa_policy})")
 
     # ---- ROUND 1: coarse expansion over ALL candidates (batch-parallel) ----
     for batch_idx, batch in enumerate(batches):
         # Allocate GPUs within this batch (NUMA-aware, reset cursor per batch)
-        alloc = _allocate_gpus_and_ports(batch, job.gpu_count, base_port=config.port, numa_groups=numa_groups)
+        alloc = _allocate_gpus_and_ports(
+            batch,
+            job.gpu_count,
+            base_port=config.port,
+            numa_groups=numa_groups,
+            allow_cross_numa=config.allow_cross_numa,
+        )
         _log(f"round-1 batch {batch_idx + 1}/{len(batches)}: "
              + _format_alloc(alloc))
         outcomes = _run_batch_parallel(
@@ -1464,6 +1530,7 @@ def run_executor(
             max_probes=ROUND1_MAX_PROBES,
             confirm=ROUND1_CONFIRM,
             refine=False,
+            numa_groups=numa_groups,
         )
         for candidate_id, outcome in outcomes.items():
             results_by_candidate[candidate_id] = outcome.results
@@ -1506,6 +1573,7 @@ def run_executor(
             job.gpu_count,
             base_port=config.port,
             numa_groups=numa_groups,
+            allow_cross_numa=config.allow_cross_numa,
         )
 
     for batch_idx, batch in enumerate(top_batches):
@@ -1514,7 +1582,13 @@ def run_executor(
             all_devices = "device=" + ",".join(str(g) for g in range(job.gpu_count))
             alloc = [(batch[0], all_devices, config.port)]
         else:
-            alloc = _allocate_gpus_and_ports(batch, job.gpu_count, base_port=config.port, numa_groups=numa_groups)
+            alloc = _allocate_gpus_and_ports(
+                batch,
+                job.gpu_count,
+                base_port=config.port,
+                numa_groups=numa_groups,
+                allow_cross_numa=config.allow_cross_numa,
+            )
         _log(f"round-2 batch {batch_idx + 1}/{len(top_batches)}: "
              + _format_alloc(alloc))
         # 满载 round2 的结果是 instances=N 的实测求和;round1 种子是 instances=1 的
@@ -1530,6 +1604,8 @@ def run_executor(
             refine=True,
             seeds_by_id=seeds,
             fill_host=config.fill_host,
+            numa_groups=numa_groups,
+            allow_cross_numa=config.allow_cross_numa,
         )
         for candidate_id, outcome in outcomes.items():
             results_by_candidate[candidate_id] = outcome.results
@@ -1658,7 +1734,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--container-name", default=None)
     parser.add_argument(
         "--fill-host", action="store_true",
-        help="round2 把每个候选复制成 floor(gpu_count/tp_size) 个实例整机满载、"
+        help="round2 按 NUMA topology 把每个候选复制成实际可放置的实例整机满载、"
              "多端口并发压测求和,得到实测整机 goodput(而非单实例 × 实例数 纸面外推)。"
              "round1 仍单实例粗筛。",
     )
@@ -1698,6 +1774,7 @@ def main(argv: list[str] | None = None) -> int:
         target_gpu_count=target.gpu_count,
         target_gpu_memory_gb=target.gpu_memory_gb,
         fill_host=args.fill_host,
+        allow_cross_numa=target.allow_cross_numa,
         max_parallel=args.max_parallel,
         startup_stall_timeout_s=args.startup_stall_timeout,
         startup_hard_timeout_s=args.startup_hard_timeout,

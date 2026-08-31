@@ -158,7 +158,8 @@ if [ -n "$SINGLE_FILE" ]; then
         image_ref: $m.image_ref,
         port: ($m.port // 30000),
         remote_outputs_dir: ($m.remote_outputs_dir // ""),
-        exclusive_host: ($m.exclusive_host // false)
+        exclusive_host: ($m.exclusive_host // false),
+        allow_cross_numa: ($m.allow_cross_numa // false)
       }
       + (if (($m.ssh_password_env? // "") | length) > 0
          then {ssh_password_env: $m.ssh_password_env}
@@ -191,13 +192,13 @@ echo >&2
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 可选:整机满载(round2)。用环境变量开,默认关,不影响原有单参数用法。
 #   FILL_HOST=1 ./run_executor.sh <configs.json>   # round2 把 top-K 各复制成
-#     floor(gpu/tp) 个实例整机满载、多端口并发实测求和(而非单实例纸面外推)。
+#     按 NUMA topology 复制实际可放置实例,整机满载、多端口并发实测求和。
 #   MAX_PARALLEL=N  批内候选并发上限(满载下每候选独占整机,通常不用改)。
 # ─────────────────────────────────────────────────────────────────────────
 EXTRA_ARGS=()
 if [ "${FILL_HOST:-0}" = "1" ] || [ "${FILL_HOST:-}" = "true" ]; then
   EXTRA_ARGS+=(--fill-host)
-  echo "    ⚡ fill_host=ON:round2 整机满载实测(floor(gpu/tp) 实例并发求和)" >&2
+  echo "    ⚡ fill_host=ON:round2 整机满载实测(topology-aware 实例并发求和)" >&2
 fi
 if [ -n "${MAX_PARALLEL:-}" ]; then
   EXTRA_ARGS+=(--max-parallel "$MAX_PARALLEL")

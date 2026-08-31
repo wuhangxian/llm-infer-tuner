@@ -229,6 +229,7 @@ def test_jsonl_bundle_infers_baseline_count_and_never_exposes_plaintext_secret(
         "benchmark_method": "benchmark-test",
         "sla": {"max_avg_ttft_ms": 100.0, "max_avg_tpot_ms": 20.0},
         **_target_payload(),
+        "allow_cross_numa": True,
         "ssh_password": sentinel,
     }
     candidates = [
@@ -255,6 +256,10 @@ def test_jsonl_bundle_infers_baseline_count_and_never_exposes_plaintext_secret(
     )
     assert generated_job["search"]["max_candidates"] == 2
     assert generated_job["search"]["baseline"] == {}
+    generated_target = json.loads(
+        (project.snapshot_dir / "target.content").read_text(encoding="utf-8")
+    )
+    assert generated_target["allow_cross_numa"] is True
     for label in ("job", "target", "configs"):
         content = (project.snapshot_dir / f"{label}.content").read_text(encoding="utf-8")
         assert sentinel not in content
@@ -449,7 +454,13 @@ def test_python_executor_cli_loads_target_and_resolves_password_environment(
     password_env = "LLM_TUNER_TEST_RUNTIME_PASSWORD"
     password = "target-env-password-sentinel"
     target.write_text(
-        json.dumps({**_target_payload(), "ssh_password_env": password_env}),
+        json.dumps(
+            {
+                **_target_payload(),
+                "ssh_password_env": password_env,
+                "allow_cross_numa": True,
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setenv(password_env, password)
@@ -481,6 +492,7 @@ def test_python_executor_cli_loads_target_and_resolves_password_environment(
     assert config.ssh_target == "runner@example.test"
     assert config.ssh_password == password
     assert config.port == 30000
+    assert config.allow_cross_numa is True
     assert password not in repr(config)
 
 

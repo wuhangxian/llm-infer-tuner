@@ -265,12 +265,13 @@ def _write_job(
     baseline_threshold_pct: float = 0,
     max_candidates: int = 1,
     baseline: bool = False,
+    gpu_count: int = 8,
 ) -> Path:
     job = {
         "job_id": "dryrun-job",
         "engine": "sglang",
          "gpu_model": "pro5000",
-         "gpu_count": 8,
+         "gpu_count": gpu_count,
          "gpu_memory_gb": 72,
         "model": "qwen36-35b",
         "image": "sglang-test",
@@ -602,6 +603,112 @@ def test_round2_fill_host_benches_n_replicas_no_double_count(tmp_path, workloads
         )
         # 且第一个词不能是裸 KEY=VAL(那正是 nohup 会当成程序名的东西)。
         assert "=" not in cmd.strip().split(None, 1)[0]
+
+
+def test_round2_fill_host_tp3_uses_only_numa_local_replicas(
+    tmp_path, workloads_output_len
+):
+    """On dual-NUMA 4+4, TP3 has two real local replicas, never flat [3,4,5]."""
+    cstar = {"full": 4}
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path),
+        configs_path=_write_configs_with_params(tmp_path, {"full": {"tp_size": 3}}),
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=1,
+        fill_host=True,
+    )
+    container = _FakeContainer(cstar)
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    pinned = {
+        token.split("=", 1)[1]
+        for command in container.launched_cmds
+        for token in command.split()
+        if token.startswith("CUDA_VISIBLE_DEVICES=")
+    }
+    assert pinned == {"0,1,2", "4,5,6"}
+    assert summary["ranking"][0]["instances_per_host"] == 2.0
+    assert {port for cand, _conc, port in container.bench_ports if cand == "full"} <= {
+        30000,
+        30001,
+    }
+
+
+def test_explicit_cross_numa_target_allows_tp8_on_dual_numa_host(
+    tmp_path, workloads_output_len
+):
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path),
+        configs_path=_write_configs_with_params(tmp_path, {"wide": {"tp_size": 8}}),
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=1,
+        allow_cross_numa=True,
+    )
+    container = _FakeContainer({"wide": 2})
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    assert summary["task_status"] == "COMPLETED"
+    assert summary["ranking"][0]["candidate_id"] == "wide"
+    assert summary["ranking"][0]["tp_size"] == 8
+
+
+def test_executor_reuses_high_ports_after_topology_aware_batch_split(
+    tmp_path, workloads_output_len
+):
+    candidate_ids = ["c001", "c002", "c003"]
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path, max_candidates=3, gpu_count=2),
+        configs_path=_write_configs_with_params(
+            tmp_path,
+            {candidate_id: {"tp_size": 1} for candidate_id in candidate_ids},
+        ),
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=3,
+        port=65534,
+    )
+    container = _FakeContainer(dict.fromkeys(candidate_ids, 2))
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    assert summary["task_status"] == "COMPLETED"
+    assert [row["round1_batch"] for row in summary["candidates"]] == [
+        "1/2",
+        "1/2",
+        "2/2",
+    ]
+    assert {
+        port
+        for _candidate, _concurrency, port in container.bench_ports
+    } == {65534, 65535}
 
 
 def _index_of(summary: dict, candidate_id: str) -> int:

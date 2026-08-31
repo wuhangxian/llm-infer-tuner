@@ -160,7 +160,8 @@ JSON 格式:
     "model_host_dir": "/data/models/your-model/",
     "model_container_path": "/data/models/your-model/",
     "image_ref": "hai-beijing.tencentcloudcr.com/ai/sglang:v0.5.16-cu129",
-    "port": 30000
+    "port": 30000,
+    "allow_cross_numa": false
   },
   "candidates": [
     {
@@ -222,6 +223,9 @@ JSON 格式:
 - TP1 × 4 → GPU 4,5,6,7(NUMA 1)
 - TP2 × 2 → GPU 0,1 + GPU 2,3(NUMA 0)
 - TP4 × 1 → GPU 0,1,2,3(整个 NUMA 0)
+
+默认 `allow_cross_numa: false`。只有目标文件或单文件 `_meta` 显式设置为 `true` 时，
+才允许一个 TP 实例跨 NUMA；`fill_host` 的副本切片也遵循同一策略。
 
 ### 并行压测
 
@@ -386,7 +390,8 @@ llm-infer-tuner/
   "model_host_dir": "/data/models/Qwen3.8-27B-FP8/",
   "model_container_path": "/data/models/Qwen3.8-27B-FP8/",
   "image_ref": "hai-beijing.tencentcloudcr.com/ai/sglang:v0.5.16-cu129",
-  "port": 30000
+  "port": 30000,
+  "allow_cross_numa": false
 }
 ```
 
