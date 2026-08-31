@@ -126,6 +126,18 @@ def executor_script_project(tmp_path: Path) -> ExecutorScriptProject:
         '  trap "exit 143" TERM\n'
         '  sleep 30\n'
         'fi\n'
+        'if [ "${FAKE_UV_MODE:-}" = "stubborn-child" ]; then\n'
+        '  printf "%s" "$$" > "$FAKE_UV_PID_FILE"\n'
+        '  trap "exit 130" INT\n'
+        '  trap "exit 143" TERM\n'
+        '  (\n'
+        '    trap "" INT TERM\n'
+        '    printf "%s" "$BASHPID" > "$FAKE_UV_CHILD_PID_FILE"\n'
+        '    : > "$FAKE_UV_READY_FILE"\n'
+        '    while :; do sleep 30; done\n'
+        '  ) &\n'
+        '  wait\n'
+        'fi\n'
         'exit "${FAKE_UV_EXIT_CODE:-0}"\n',
         encoding="utf-8",
     )
@@ -351,6 +363,78 @@ def test_bundle_temporary_files_are_removed_on_signal(
     assert all(not path.exists() for path in temp_paths)
     with pytest.raises(ProcessLookupError):
         os.kill(runner_pid, 0)
+
+
+def test_signal_kills_runner_descendants_that_ignore_term(
+    executor_script_project: ExecutorScriptProject,
+) -> None:
+    project = executor_script_project
+    bundle = project.root / "stubborn-signal-bundle.json"
+    bundle.write_text(
+        json.dumps(
+            {
+                "_meta": {
+                    "job_id": "stubborn-signal-bundle",
+                    "workload": "workload-test",
+                    "benchmark_method": "benchmark-test",
+                    "sla": {"max_avg_ttft_ms": 100.0, "max_avg_tpot_ms": 20.0},
+                    **_target_payload(),
+                },
+                "candidates": [_candidate("c001")],
+            }
+        ),
+        encoding="utf-8",
+    )
+    ready = project.root / "uv-stubborn.ready"
+    runner_pid_file = project.root / "uv-stubborn.pid"
+    child_pid_file = project.root / "uv-stubborn-child.pid"
+    env = project.env.copy()
+    env.update(
+        {
+            "FAKE_UV_MODE": "stubborn-child",
+            "FAKE_UV_READY_FILE": str(ready),
+            "FAKE_UV_PID_FILE": str(runner_pid_file),
+            "FAKE_UV_CHILD_PID_FILE": str(child_pid_file),
+        }
+    )
+    process = subprocess.Popen(
+        ["./run_executor.sh", str(bundle)],
+        cwd=project.root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not ready.exists():
+        time.sleep(0.02)
+    assert ready.exists(), "stubborn fake runner did not start"
+    runner_pid = int(runner_pid_file.read_text())
+    child_pid = int(child_pid_file.read_text())
+    temp_paths = [
+        Path((project.snapshot_dir / f"{label}.path").read_text())
+        for label in ("job", "target", "configs")
+    ]
+
+    os.kill(process.pid, signal.SIGTERM)
+    try:
+        stdout, stderr = process.communicate(timeout=7)
+    except subprocess.TimeoutExpired:
+        for process_group in (runner_pid, process.pid):
+            try:
+                os.killpg(process_group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        process.communicate(timeout=5)
+        pytest.fail("wrapper leaked a runner descendant that ignored SIGTERM")
+
+    assert process.returncode == 143, (stdout, stderr)
+    assert all(not path.exists() for path in temp_paths)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and Path(f"/proc/{child_pid}").exists():
+        time.sleep(0.02)
+    assert not Path(f"/proc/{child_pid}").exists()
 
 
 def test_python_executor_cli_loads_target_and_resolves_password_environment(

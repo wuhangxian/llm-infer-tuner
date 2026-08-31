@@ -45,8 +45,15 @@ stop_runner() {
   fi
   wait "$RUNNER_PID" 2>/dev/null || true
   if [ -n "$watchdog_pid" ]; then
-    kill "$watchdog_pid" 2>/dev/null || true
+    if kill -0 -- "$runner_group" 2>/dev/null; then
+      wait "$watchdog_pid" 2>/dev/null || true
+    else
+      kill "$watchdog_pid" 2>/dev/null || true
+    fi
     wait "$watchdog_pid" 2>/dev/null || true
+  fi
+  if kill -0 -- "$runner_group" 2>/dev/null; then
+    kill -s KILL -- "$runner_group" 2>/dev/null || true
   fi
   RUNNER_PID=""
   return 0
