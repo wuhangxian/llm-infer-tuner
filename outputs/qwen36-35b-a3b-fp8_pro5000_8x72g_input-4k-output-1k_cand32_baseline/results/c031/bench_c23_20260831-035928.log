@@ -1,0 +1,69 @@
+$ python -m sglang.bench_serving --backend sglang --dataset-name random-ids --random-range-ratio 1.0 --host 127.0.0.1 --port 30002 --model /data/autotune/models/Qwen3.6-35B-A3B-FP8 --dataset-path '' --max-concurrency 23 --random-input-len 4096 --random-output-len 1024 --output-file /workspace/outputs/c031/bench_c23_20260831-035928.jsonl --num-prompts 92
+# exit code: 0
+
+----- stdout -----
+benchmark_args=Namespace(backend='sglang', base_url=None, host='127.0.0.1', port=30002, ready_check_timeout_sec=60, dataset_name='random-ids', dataset_path='', dataset_offset=0, agentic_max_turns=None, speed_bench_category=None, speed_bench_output_len=512, model='/data/autotune/models/Qwen3.6-35B-A3B-FP8', served_model_name=None, tokenizer=None, num_prompts=92, sharegpt_output_len=None, sharegpt_context_len=None, random_input_len=4096, random_output_len=1024, random_range_ratio=1.0, image_count=1, image_resolution='1080p', random_image_count=False, image_format='jpeg', image_content='random', request_rate=inf, use_trace_timestamps=False, max_concurrency=23, output_file='/workspace/outputs/c031/bench_c23_20260831-035928.jsonl', output_details=False, print_requests=False, disable_tqdm=False, disable_stream=False, return_logprob=False, top_logprobs_num=0, token_ids_logprob=None, logprob_start_len=-1, return_routed_experts=False, cache_report=False, seed=42, disable_ignore_eos=False, temperature=0.0, top_p=1.0, extra_request_body=None, apply_chat_template=False, profile=False, plot_throughput=False, profile_activities=['CPU', 'GPU'], profile_start_step=None, profile_steps=None, profile_num_steps=None, profile_by_stage=False, profile_stages=None, profile_output_dir=None, profile_prefix=None, lora_name=None, lora_request_distribution='uniform', lora_zipf_alpha=1.5, prompt_suffix='', pd_separated=False, profile_prefill_url=None, profile_decode_url=None, flush_cache=False, warmup_requests=1, tokenize_prompt=False, gsp_num_groups=64, gsp_prompts_per_group=16, gsp_system_prompt_len=2048, gsp_question_len=128, gsp_output_len=256, gsp_range_ratio=1.0, gsp_fast_prepare=False, gsp_send_routing_key=False, gsp_num_turns=1, gsp_ordered=False, gsp_group_distribution='uniform', gsp_zipf_alpha=None, mooncake_slowdown_factor=1.0, mooncake_num_rounds=1, mooncake_workload='conversation', fake_prefill=False, tag=None, header=None)
+Waiting up to 60s for http://127.0.0.1:30002/v1/models to become ready...
+Server ready in 0.0s.
+Namespace(backend='sglang', base_url=None, host='127.0.0.1', port=30002, ready_check_timeout_sec=60, dataset_name='random-ids', dataset_path='', dataset_offset=0, agentic_max_turns=None, speed_bench_category=None, speed_bench_output_len=512, model='/data/autotune/models/Qwen3.6-35B-A3B-FP8', served_model_name=None, tokenizer=None, num_prompts=92, sharegpt_output_len=None, sharegpt_context_len=None, random_input_len=4096, random_output_len=1024, random_range_ratio=1.0, image_count=1, image_resolution='1080p', random_image_count=False, image_format='jpeg', image_content='random', request_rate=inf, use_trace_timestamps=False, max_concurrency=23, output_file='/workspace/outputs/c031/bench_c23_20260831-035928.jsonl', output_details=False, print_requests=False, disable_tqdm=False, disable_stream=False, return_logprob=False, top_logprobs_num=0, token_ids_logprob=None, logprob_start_len=-1, return_routed_experts=False, cache_report=False, seed=42, disable_ignore_eos=False, temperature=0.0, top_p=1.0, extra_request_body=None, apply_chat_template=False, profile=False, plot_throughput=False, profile_activities=['CPU', 'GPU'], profile_start_step=None, profile_steps=None, profile_num_steps=None, profile_by_stage=False, profile_stages=None, profile_output_dir=None, profile_prefix=None, lora_name=None, lora_request_distribution='uniform', lora_zipf_alpha=1.5, prompt_suffix='', pd_separated=False, profile_prefill_url=None, profile_decode_url=None, flush_cache=False, warmup_requests=1, tokenize_prompt=False, gsp_num_groups=64, gsp_prompts_per_group=16, gsp_system_prompt_len=2048, gsp_question_len=128, gsp_output_len=256, gsp_range_ratio=1.0, gsp_fast_prepare=False, gsp_send_routing_key=False, gsp_num_turns=1, gsp_ordered=False, gsp_group_distribution='uniform', gsp_zipf_alpha=None, mooncake_slowdown_factor=1.0, mooncake_num_rounds=1, mooncake_workload='conversation', fake_prefill=False, tag=None, header=None)
+
+#Input tokens: 376832
+#Output tokens: 94208
+Starting warmup with 1 sequences...
+Warmup completed with 1 sequences. Starting main benchmark run...
+
+============ Serving Benchmark Result ============
+Backend:                                 sglang    
+Traffic request rate:                    inf       
+Max request concurrency:                 23        
+Successful requests:                     92        
+Benchmark duration (s):                  102.10    
+Total input tokens:                      376832    
+Total input text tokens:                 376832    
+Total generated tokens:                  94208     
+Total generated tokens (retokenized):    93915     
+Request throughput (req/s):              0.90      
+Input token throughput (tok/s):          3690.87   
+Output token throughput (tok/s):         922.72    
+Peak output token throughput (tok/s):    1150.00   
+Peak concurrent requests:                46        
+Total token throughput (tok/s):          4613.58   
+Concurrency:                             22.99     
+----------------End-to-End Latency----------------
+Mean E2E Latency (ms):                   25515.02  
+Median E2E Latency (ms):                 25549.01  
+P90 E2E Latency (ms):                    26303.96  
+P95 E2E Latency (ms):                    26305.01  
+P99 E2E Latency (ms):                    26305.91  
+---------------Time to First Token----------------
+Mean TTFT (ms):                          1982.79   
+Median TTFT (ms):                        2105.99   
+P90 TTFT (ms):                           3192.89   
+P95 TTFT (ms):                           3249.55   
+P99 TTFT (ms):                           3275.93   
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          23.00     
+Median TPOT (ms):                        22.90     
+P90 TPOT (ms):                           24.41     
+P95 TPOT (ms):                           24.65     
+P99 TPOT (ms):                           24.98     
+---------------Inter-Token Latency----------------
+Mean ITL (ms):                           23.01     
+Median ITL (ms):                         21.77     
+P90 ITL (ms):                            22.94     
+P95 ITL (ms):                            23.17     
+P99 ITL (ms):                            23.54     
+Max ITL (ms):                            2983.04   
+==================================================
+
+----- stderr -----
+/sgl-workspace/sglang/python/sglang/bench_serving.py:13: FutureWarning: `sglang.bench_serving` is deprecated and will be removed in a future release; use `sglang.benchmark.serving` instead (e.g. `python -m sglang.benchmark.serving`).
+  warnings.warn(
+
+  0%|          | 0/92 [00:00<?, ?it/s]
+  1%|          | 1/92 [00:24<37:24, 24.66s/it]
+ 26%|██▌       | 24/92 [00:50<02:03,  1.82s/it]
+ 51%|█████     | 47/92 [01:16<01:04,  1.43s/it]
+ 76%|███████▌  | 70/92 [01:42<00:28,  1.28s/it]
+100%|██████████| 92/92 [01:42<00:00,  1.11s/it]
+

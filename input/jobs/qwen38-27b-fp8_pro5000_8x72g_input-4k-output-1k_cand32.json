@@ -30,6 +30,6 @@
       "page_size": 64,
       "tp_size": 1
     },
-    "baseline_threshold_pct": 15
+    "baseline_threshold_pct": 0
   }
 }

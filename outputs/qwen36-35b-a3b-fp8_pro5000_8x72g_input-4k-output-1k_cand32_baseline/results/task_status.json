@@ -1,0 +1,10 @@
+{
+  "report_schema_version": 1,
+  "job_id": "qwen36-35b-a3b-fp8_pro5000_8x72g_input-4k-output-1k_cand32_baseline",
+  "task_status": "INCOMPLETE",
+  "ranking_status": "PROVISIONAL",
+  "interrupted": false,
+  "total_candidates": 33,
+  "completed_candidates": 32,
+  "failed_candidates": 1
+}
