@@ -1,3 +1,8 @@
+import json
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -202,6 +207,61 @@ def test_job_spec_rejects_unsupported_engine_and_unknown_fields() -> None:
 
 def test_job_spec_exports_json_schema() -> None:
     assert "properties" in JobSpec.model_json_schema()
+
+
+def test_validation_cli_accepts_valid_job_and_candidate_set_without_mutation(
+    tmp_path: Path,
+) -> None:
+    job_path = tmp_path / "job.json"
+    candidate_path = tmp_path / "candidates.jsonl"
+    job_path.write_text(json.dumps(_valid_job()))
+    candidate_path.write_text(json.dumps({"candidates": [_candidate("c001", tp_size=1)]}))
+    job_before = job_path.read_bytes()
+    candidates_before = candidate_path.read_bytes()
+
+    job_result = subprocess.run(
+        [sys.executable, "-m", "schemas.validate_cli", "job", str(job_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    candidates_result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "schemas.validate_cli",
+            "candidates",
+            str(job_path),
+            str(candidate_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert job_result.returncode == 0, job_result.stderr
+    assert candidates_result.returncode == 0, candidates_result.stderr
+    assert job_result.stdout == candidates_result.stdout == ""
+    assert job_path.read_bytes() == job_before
+    assert candidate_path.read_bytes() == candidates_before
+
+
+def test_validation_cli_reports_duplicate_job_keys_without_invoking_traceback(
+    tmp_path: Path,
+) -> None:
+    job_path = tmp_path / "duplicate-job.json"
+    job_path.write_text('{"job_id":"first","job_id":"second"}')
+
+    result = subprocess.run(
+        [sys.executable, "-m", "schemas.validate_cli", "job", str(job_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "duplicate JSON key 'job_id'" in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_job_has_no_required_overall_runtime_limit() -> None:

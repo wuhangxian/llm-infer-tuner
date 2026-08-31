@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import re
 import shlex
 import sys
@@ -35,7 +34,7 @@ from runners.reporting import (
     render_candidate_preview,
     write_reports,
 )
-from schemas.candidate_spec import CandidateSet
+from schemas.document_io import load_candidates, load_job
 from schemas.job_spec import JobSpec, SearchBudget
 from schemas.parameter_contract import MAMBA_STRATEGY_PARAMETERS, normalise_parameter_name
 
@@ -93,8 +92,7 @@ class ExecutorConfig:
 
 
 def _load_job(job_path: Path) -> JobSpec:
-    data = json.loads(job_path.read_text(encoding="utf-8"))
-    return JobSpec.model_validate(data)
+    return load_job(job_path)
 
 
 def _load_output_len(workload: str, *, workloads_path: Path = DEFAULT_WORKLOADS_PATH) -> int:
@@ -134,87 +132,8 @@ def _load_num_prompts_multiplier(method_id: str, *, project_root: Path) -> int:
     return 4
 
 
-def _strict_json_load(text: str, *, source: str) -> Any:
-    """Decode JSON while rejecting duplicate keys and JSON non-finite constants."""
-
-    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"{source}: duplicate JSON key {key!r}")
-            result[key] = value
-        return result
-
-    def reject_constant(value: str) -> None:
-        raise ValueError(f"{source}: non-finite JSON value {value!r} is not allowed")
-
-    def reject_nonfinite_float(value: str) -> float:
-        parsed = float(value)
-        if not math.isfinite(parsed):
-            raise ValueError(f"{source}: non-finite JSON value {value!r} is not allowed")
-        return parsed
-
-    return json.loads(
-        text,
-        object_pairs_hook=reject_duplicate_keys,
-        parse_constant=reject_constant,
-        parse_float=reject_nonfinite_float,
-    )
-
-
 def _load_candidates(configs_path: Path, *, search: SearchBudget) -> list[dict[str, Any]]:
-    """Load one complete candidate set and reject every malformed input.
-
-    JSON objects containing ``candidates``, JSON arrays, and strict JSONL are
-    supported.  A semantically invalid JSON document is never reinterpreted as
-    JSONL, and no row is skipped or capped.
-    """
-    text = configs_path.read_text(encoding="utf-8")
-    source = str(configs_path)
-    try:
-        document = _strict_json_load(text, source=source)
-    except json.JSONDecodeError:
-        document = None
-
-    if document is not None:
-        if isinstance(document, list):
-            candidates = document
-        elif isinstance(document, dict):
-            if "id" in document:
-                candidates = [document]
-            else:
-                unsupported = set(document) - {"candidates", "_meta"}
-                if unsupported or "candidates" not in document:
-                    raise ValueError(
-                        f"{source}: top-level JSON object must contain only candidates "
-                        "(and optional _meta)"
-                    )
-                candidates = document["candidates"]
-        else:
-            raise ValueError(f"{source}: top-level JSON must be an object or array of candidates")
-        if not isinstance(candidates, list):
-            raise ValueError(f"{source}: candidates must be a JSON array")
-    else:
-        candidates = []
-        lines = text.splitlines()
-        if not lines:
-            raise ValueError(f"{source}: candidate file is empty")
-        for row_number, line in enumerate(lines, start=1):
-            if not line.strip():
-                raise ValueError(f"{source}: row {row_number} is empty")
-            try:
-                row = _strict_json_load(line, source=f"{source}: row {row_number}")
-            except (json.JSONDecodeError, ValueError) as exc:
-                raise ValueError(f"{source}: row {row_number} is not valid JSON: {exc}") from exc
-            if not isinstance(row, dict):
-                raise ValueError(f"{source}: row {row_number} must be a candidate object")
-            candidates.append(row)
-
-    try:
-        candidate_set = CandidateSet.from_candidates(candidates, search=search)
-    except ValueError as exc:
-        raise ValueError(f"{source}: candidate validation failed: {exc}") from exc
-    return [candidate.model_dump() for candidate in candidate_set.candidates]
+    return load_candidates(configs_path, search=search)
 
 
 def _run_result_dict(result: RunResult) -> dict[str, Any]:

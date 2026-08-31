@@ -14,6 +14,47 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _agent_response(candidates: list[dict[str, object]]) -> str:
+    return json.dumps({"structured_output": {"candidates": candidates}})
+
+
+def _agent_stream_response(candidates: list[dict[str, object]]) -> str:
+    return json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "structured_output": {"candidates": candidates},
+        }
+    )
+
+
+def _candidate_payload(candidate_id: str, *, tp_size: int = 1) -> dict[str, object]:
+    return {
+        "id": candidate_id,
+        "params": {"tp_size": tp_size, "mem_fraction_static": 0.8},
+        "cmd": (
+            "python -m sglang.launch_server --model-path ${MODEL_PATH} "
+            f"--tp-size {tp_size} --mem-fraction-static 0.8"
+        ),
+        "reasons": ["test"],
+    }
+
+
+def _candidate_with_mamba(candidate_id: str, strategy: str) -> dict[str, object]:
+    candidate = _candidate_payload(candidate_id)
+    params = candidate["params"]
+    assert isinstance(params, dict)
+    candidate["params"] = {
+        **params,
+        "mamba_radix_cache_strategy": strategy,
+    }
+    candidate["cmd"] = (
+        f"{candidate['cmd']} --mamba-radix-cache-strategy {strategy}"
+    )
+    return candidate
+
+
 def _process_is_alive(pid: int) -> bool:
     stat = Path(f"/proc/{pid}/stat")
     if not stat.exists():
@@ -47,6 +88,7 @@ class ScriptProject:
     args_file: Path
     count_file: Path
     models_file: Path
+    prompt_file: Path
     env: dict[str, str]
 
     def invoke(
@@ -54,7 +96,12 @@ class ScriptProject:
     ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
         env = self.env.copy()
         env.update(env_overrides or {})
-        for recorded_file in (self.args_file, self.count_file, self.models_file):
+        for recorded_file in (
+            self.args_file,
+            self.count_file,
+            self.models_file,
+            self.prompt_file,
+        ):
             if recorded_file.exists():
                 recorded_file.unlink()
         completed = subprocess.run(
@@ -95,13 +142,30 @@ def script_project(tmp_path: Path) -> ScriptProject:
     (skill_dir / "SKILL.md").write_text("# test skill\n")
 
     job = tmp_path / "job.json"
-    job.write_text(json.dumps({"job_id": "tclaude-cli-test"}))
+    job.write_text(
+        json.dumps(
+            {
+                "job_id": "tclaude-cli-test",
+                "engine": "sglang",
+                "gpu_model": "test-gpu",
+                "gpu_count": 1,
+                "gpu_memory_gb": 16.0,
+                "model": "test-model",
+                "image": "test-image",
+                "workload": "test-workload",
+                "benchmark_method": "test-method",
+                "sla": {"max_avg_ttft_ms": 100.0, "max_avg_tpot_ms": 20.0},
+                "search": {"max_candidates": 1},
+            }
+        )
+    )
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     args_file = tmp_path / "tclaude.args"
     count_file = tmp_path / "tclaude.count"
     models_file = tmp_path / "tclaude.models"
+    prompt_file = tmp_path / "tclaude.prompt"
 
 
     real_jq = shutil.which("jq")
@@ -129,12 +193,7 @@ def script_project(tmp_path: Path) -> ScriptProject:
     )
     fake_jq.chmod(0o755)
 
-    candidate = {
-        "id": "c001",
-        "params": {"tp_size": 1, "mem_fraction_static": 0.8},
-        "cmd": "python3 -m sglang.launch_server --model-path ${MODEL_PATH}",
-        "reasons": ["test"],
-    }
+    candidate = _candidate_payload("c001")
     payload = json.dumps({"structured_output": {"candidates": [candidate]}})
     stream_payload = json.dumps(
         {
@@ -155,6 +214,7 @@ def script_project(tmp_path: Path) -> ScriptProject:
         'printf "%s" "$attempt" > "$FAKE_TCLAUDE_COUNT_FILE"\n'
         'previous=""\n'
         'for arg in "$@"; do\n'
+        '  if [ "$previous" = "-p" ]; then printf "%s" "$arg" > "$FAKE_TCLAUDE_PROMPT_FILE"; fi\n'
         '  if [ "$previous" = "--model" ]; then '
         'printf "%s\\n" "$arg" >> "$FAKE_TCLAUDE_MODELS_FILE"; fi\n'
         '  previous="$arg"\n'
@@ -176,6 +236,12 @@ def script_project(tmp_path: Path) -> ScriptProject:
         'for arg in "$@"; do\n'
         '  [ "$arg" = "stream-json" ] && stream=1\n'
         "done\n"
+        'if [ -n "${FAKE_TCLAUDE_RESPONSE:-}" ]; then\n'
+        '  if [ "$stream" = 1 ]; then '
+        f"printf '%s\\n' '{stream_init}'; fi\n"
+        '  printf "%s\\n" "$FAKE_TCLAUDE_RESPONSE"\n'
+        '  exit 0\n'
+        'fi\n'
         "if [ \"$stream\" = 1 ]; then\n"
         f"  printf '%s\\n' '{stream_init}'\n"
         f"  printf '%s\\n' '{stream_payload}'\n"
@@ -216,10 +282,169 @@ def script_project(tmp_path: Path) -> ScriptProject:
             "FAKE_TCLAUDE_ARGS_FILE": str(args_file),
             "FAKE_TCLAUDE_COUNT_FILE": str(count_file),
             "FAKE_TCLAUDE_MODELS_FILE": str(models_file),
+            "FAKE_TCLAUDE_PROMPT_FILE": str(prompt_file),
             "GEN_STREAM": "0",
+            "PYTHONPATH": str(REPO_ROOT),
         }
     )
-    return ScriptProject(tmp_path, job, args_file, count_file, models_file, env)
+    return ScriptProject(tmp_path, job, args_file, count_file, models_file, prompt_file, env)
+
+
+def test_invalid_job_fails_before_invoking_agent_and_preserves_output(
+    script_project: ScriptProject,
+) -> None:
+    output = script_project.root / "invalid-job.jsonl"
+    original = b'{"candidates":[{"id":"old"}]}\n'
+    output.write_bytes(original)
+    invalid_job = script_project.root / "invalid-job.json"
+    invalid_job.write_text(json.dumps({"job_id": "missing-required-fields"}))
+
+    completed, recorded = script_project.invoke(str(invalid_job), str(output))
+
+    assert completed.returncode != 0
+    assert recorded == []
+    assert output.read_bytes() == original
+    assert "job validation failed" in completed.stderr
+
+
+def test_prompt_is_literal_and_never_executes_markdown_backticks(
+    script_project: ScriptProject,
+) -> None:
+    completed, _ = script_project.run(output_name="literal-prompt.jsonl")
+
+    assert completed.returncode == 0, completed.stderr
+    assert "command not found" not in completed.stderr
+    prompt = script_project.prompt_file.read_text()
+    assert "`--disable-radix-cache`" in prompt
+    assert "`mamba_radix_cache_strategy`" in prompt
+    assert "`${MODEL_PATH}`" in prompt
+
+
+def test_zero_candidates_fail_validation_and_preserve_existing_output(
+    script_project: ScriptProject,
+) -> None:
+    output = script_project.root / "zero-candidates.jsonl"
+    original = b'{"candidates":[{"id":"previous"}]}\n'
+    output.write_bytes(original)
+
+    completed, _ = script_project.invoke(
+        str(script_project.job),
+        str(output),
+        env_overrides={"FAKE_TCLAUDE_RESPONSE": _agent_response([])},
+    )
+
+    assert completed.returncode != 0
+    assert script_project.count_file.read_text() == "1"
+    assert output.read_bytes() == original
+    assert "candidate validation failed" in completed.stderr
+    assert list(script_project.root.glob(".zero-candidates.jsonl.tmp.*")) == []
+
+
+@pytest.mark.parametrize(
+    ("job_search", "candidates", "expected_error"),
+    [
+        (
+            {"max_candidates": 2},
+            [_candidate_payload("c001"), _candidate_payload("c001", tp_size=2)],
+            "candidate IDs must be unique",
+        ),
+        (
+            {"max_candidates": 2},
+            [
+                _candidate_with_mamba("c001", "extra_buffer"),
+                _candidate_with_mamba("c002", "no_buffer"),
+            ],
+            "duplicates c001",
+        ),
+        (
+            {"max_candidates": 2},
+            [_candidate_payload("c001")],
+            "expected 2 candidates",
+        ),
+        (
+            {"max_candidates": 1, "baseline": {"tp_size": 1}},
+            [_candidate_payload("c001")],
+            "configured baseline requires",
+        ),
+        (
+            {"max_candidates": 1},
+            [
+                {
+                    **_candidate_payload("c001"),
+                    "params": {"tp_size": "1", "mem_fraction_static": 0.8},
+                }
+            ],
+            "tp_size",
+        ),
+    ],
+    ids=[
+        "duplicate-id",
+        "duplicate-effective-config",
+        "wrong-count",
+        "baseline-mismatch",
+        "malformed-candidate",
+    ],
+)
+def test_semantically_invalid_candidate_sets_preserve_existing_output(
+    script_project: ScriptProject,
+    job_search: dict[str, object],
+    candidates: list[dict[str, object]],
+    expected_error: str,
+) -> None:
+    job = json.loads(script_project.job.read_text())
+    job["search"] = job_search
+    script_project.job.write_text(json.dumps(job))
+    output = script_project.root / "invalid-candidate-set.jsonl"
+    original = b'{"candidates":[{"id":"previous"}]}\n'
+    output.write_bytes(original)
+
+    completed, _ = script_project.invoke(
+        str(script_project.job),
+        str(output),
+        env_overrides={"FAKE_TCLAUDE_RESPONSE": _agent_response(candidates)},
+    )
+
+    assert completed.returncode != 0
+    assert output.read_bytes() == original
+    assert expected_error in completed.stderr
+    assert list(script_project.root.glob(".invalid-candidate-set.jsonl.tmp.*")) == []
+
+
+def test_successful_generation_atomically_replaces_existing_output(
+    script_project: ScriptProject,
+) -> None:
+    output = script_project.root / "atomic-success.jsonl"
+    output.write_bytes(b"previous-good-output\n")
+
+    completed, _ = script_project.invoke(str(script_project.job), str(output))
+
+    assert completed.returncode == 0, completed.stderr
+    document = json.loads(output.read_text())
+    assert document["candidates"][0]["id"] == "c001"
+    assert list(script_project.root.glob(".atomic-success.jsonl.tmp.*")) == []
+    assert output.stat().st_mode & 0o077 == 0
+
+
+def test_stream_candidate_validation_failure_preserves_existing_output(
+    script_project: ScriptProject,
+) -> None:
+    output = script_project.root / "invalid-stream.jsonl"
+    original = b"previous-good-output\n"
+    output.write_bytes(original)
+
+    completed, _ = script_project.invoke(
+        str(script_project.job),
+        str(output),
+        env_overrides={
+            "GEN_STREAM": "1",
+            "FAKE_TCLAUDE_RESPONSE": _agent_stream_response([]),
+        },
+    )
+
+    assert completed.returncode != 0
+    assert output.read_bytes() == original
+    assert "candidate validation failed" in completed.stderr
+    assert list(script_project.root.glob(".invalid-stream.jsonl.tmp.*")) == []
 
 
 def test_defaults_to_tclaude_hy3(script_project: ScriptProject) -> None:
@@ -457,12 +682,19 @@ def test_invalid_guard_config_fails_before_tclaude(
 
 
 def test_ordinary_tclaude_failure_is_not_retried(script_project: ScriptProject) -> None:
-    completed, _ = script_project.run(
-        env_overrides={"FAKE_TCLAUDE_MODE": "exit-42"}
+    output = script_project.root / "agent-failure.jsonl"
+    original = b"previous-good-output\n"
+    output.write_bytes(original)
+
+    completed, _ = script_project.invoke(
+        str(script_project.job),
+        str(output),
+        env_overrides={"FAKE_TCLAUDE_MODE": "exit-42"},
     )
 
     assert completed.returncode == 42
     assert script_project.count_file.read_text() == "1"
+    assert output.read_bytes() == original
 
 
 def test_startup_prints_timeout_protection(script_project: ScriptProject) -> None:
@@ -491,21 +723,22 @@ def test_preview_distinguishes_requested_and_effective_mamba_cache(
     assert "radix=off" in completed.stderr
 
 
+@pytest.mark.parametrize("stream_mode", ["0", "1"])
 def test_malformed_raw_preserves_existing_output_and_cleans_temp(
-    script_project: ScriptProject,
+    script_project: ScriptProject, stream_mode: str
 ) -> None:
-    output = script_project.root / "existing.jsonl"
+    output = script_project.root / f"malformed-{stream_mode}.jsonl"
     output.write_text("previous-good-output\n")
 
     completed, _ = script_project.invoke(
         str(script_project.job),
         str(output),
-        env_overrides={"GEN_STREAM": "0", "FAKE_TCLAUDE_MODE": "malformed"},
+        env_overrides={"GEN_STREAM": stream_mode, "FAKE_TCLAUDE_MODE": "malformed"},
     )
 
     assert completed.returncode != 0
     assert output.read_text() == "previous-good-output\n"
-    assert list(script_project.root.glob(".existing.jsonl.tmp.*")) == []
+    assert list(script_project.root.glob(f".malformed-{stream_mode}.jsonl.tmp.*")) == []
 
 
 def test_progress_renderer_failure_does_not_retry_or_replace_output(

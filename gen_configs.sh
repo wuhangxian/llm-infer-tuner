@@ -15,6 +15,7 @@
 # cmd 里的 --model-path 恒为占位符 ${MODEL_PATH}(路径是机器事实,非调优决策),
 # 第二步由 targets.json 填入。故 configs.jsonl 机器无关,可跨机搬运。
 set -euo pipefail
+umask 077
 
 # 记录整个脚本的墙钟起点(从这里到第 6 步预览完的总耗时)。
 # 用 bash 内置 SECONDS:赋 0 即从此刻开始按秒累计,零依赖、不受子进程影响。
@@ -144,6 +145,10 @@ fi
 command -v jq >/dev/null || { echo "❌ 需要 jq" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "❌ 需要 python3" >&2; exit 1; }
 [ -f "$JOB" ] || { echo "❌ job 文件不存在: $JOB" >&2; exit 1; }
+if ! python3 -m schemas.validate_cli job "$JOB"; then
+  echo "❌ job validation failed: $JOB" >&2
+  exit 1
+fi
 
 SKILL_DIR=".claude/skills/sglang-server-config-gen"
 [ -f "$SKILL_DIR/SKILL.md" ] || { echo "❌ 找不到 skill: $SKILL_DIR/SKILL.md(请在 repo 根运行)" >&2; exit 1; }
@@ -181,7 +186,7 @@ mkdir -p "$(dirname "$OUT")"
 #      — 绝不写 --context-length(§0 红线)
 #      — 模型专属 flag(reasoning-parser 等)从 models.yaml 原样取,不自己编
 #      — attention 后端必须在 SM 短名单内
-#      — 候选数 ≤ max_candidates
+#      — 候选数必须严格匹配 max_candidates(+可选 baseline)
 #
 #   3. 输出 JSON Schema
 #      — 约束 tclaude 返回 {candidates:[...]} 结构
@@ -202,27 +207,30 @@ JOB_JSON="$(cat "$JOB")"
 # 输出结构约束:一个 {candidates:[...]} 对象
 SCHEMA='{"type":"object","required":["candidates"],"properties":{"candidates":{"type":"array","items":{"type":"object","required":["id","params","cmd","reasons"],"properties":{"id":{"type":"string"},"params":{"type":"object"},"cmd":{"type":"string"},"reasons":{"type":"array","items":{"type":"string"}}}}}}}'
 
-read -r -d '' PROMPT <<EOF || true
+PROMPT_PREFIX="$(cat <<'PROMPT_HEAD'
 # llm-infer-tuner 一步出 SGLang 启动配置(JSON)
 
 你要为下面这个 job 生成一组**可直接执行**的 SGLang 启动配置候选。
 
 ## JobSpec
-\`\`\`json
-${JOB_JSON}
-\`\`\`
+```json
+PROMPT_HEAD
+)"
+
+PROMPT_SUFFIX="$(cat <<'PROMPT_TAIL'
+```
 
 ## 基线配置(可选)
 
-如果 JobSpec 里有 \`baseline\` 字段(在 search.baseline 下):
-- 你必须在 candidates 数组**最前面**插入一条基线候选,id 为 "baseline",params 里加 \`"is_baseline": true\`
-- **严格模式(重要)**:基线是"用户基线复现",不是调优候选。params **只放** baseline 字段里用户显式写的参数,原样保留、不增不改(\`is_baseline\` 标记除外)。
+如果 JobSpec 里有 `baseline` 字段(在 search.baseline 下):
+- 你必须在 candidates 数组**最前面**插入一条基线候选,id 为 "baseline",params 里加 `"is_baseline": true`
+- **严格模式(重要)**:基线是"用户基线复现",不是调优候选。params **只放** baseline 字段里用户显式写的参数,原样保留、不增不改(`is_baseline` 标记除外)。
   用户没写的参数**一律不补**——不补 §4 pin(含 --schedule-policy 等)、不补 §3 各轴搜索默认档、不补 §4 default_flags 里的 parser 类 flag。让 SGLang 用它自己的内部默认(即命令里根本不出现该 flag)。
 - **唯一例外(硬启动依赖,不补则 server 直接崩,故必须补)**:
-  1. 若 catalogs/models.yaml 该模型 \`default_flags\` 含 \`trust-remote-code: true\`,即使用户没写也必须补 \`--trust-remote-code\`(CLI 安全开关,模型默认无法翻成 true)。
-  2. 若用户写了 \`mamba_radix_cache_strategy: extra_buffer\` 但没写 \`page_size\`,必须补 \`--page-size 64\`(\`FLA_CHUNK_SIZE(64) % page_size == 0\` 硬约束,否则启动报错)。
+  1. 若 catalogs/models.yaml 该模型 `default_flags` 含 `trust-remote-code: true`,即使用户没写也必须补 `--trust-remote-code`(CLI 安全开关,模型默认无法翻成 true)。
+  2. 若用户写了 `mamba_radix_cache_strategy: extra_buffer` 但没写 `page_size`,必须补 `--page-size 64`(`FLA_CHUNK_SIZE(64) % page_size == 0` 硬约束,否则启动报错)。
   这两个例外若要补,必须同时写进 baseline 的 params(不能只写进 cmd),使 executor 兜底路径也一致。除此之外不补任何默认 flag。
-- 基线的 cmd 严格 = {用户在 baseline 里列的 flag} + {上面必要的硬启动依赖例外} + {运行时占位符:\`--model-path \${MODEL_PATH}\` \`--host 0.0.0.0\` \`--port 30000\`}。用户写的某 flag 值恰好等于模型默认时,仍照写(尊重显式意图)。
+- 基线的 cmd 严格 = {用户在 baseline 里列的 flag} + {上面必要的硬启动依赖例外} + {运行时占位符:`--model-path ${MODEL_PATH}` `--host 0.0.0.0` `--port 30000`}。用户写的某 flag 值恰好等于模型默认时,仍照写(尊重显式意图)。
 - **基线不算在 max_candidates 名额里**,总候选数 = max_candidates + 1
 - 你正常生成 max_candidates 条候选,排在基线后面(**这 max_candidates 条是正常调优候选,仍按 §3/§4 正常补全 pin 和 default_flags,严格模式只约束 baseline 那一条**)
 
@@ -235,24 +243,27 @@ ${JOB_JSON}
 
 ## 执行方式
 
-请按 \`${SKILL_DIR}/SKILL.md\` 的流程执行:读 knowledge.md + catalogs/*.yaml(含 sglang-images.yaml),
+请按 `.claude/skills/sglang-server-config-gen/SKILL.md` 的流程执行:读 knowledge.md + catalogs/*.yaml(含 sglang-images.yaml),
 按其中的约束和推导步骤生成候选配置。所有调优判据、硬约束、输出格式
 都在 SKILL.md 和 knowledge.md 里,这里不重复。
 
 ## 探索边界(必须遵守,直接影响耗时)
 
-- **输出格式的唯一权威是本 prompt 末尾的 JSON Schema 和 SKILL.md**。禁止为"对齐格式"去读 \`outputs/\`、\`claude-raw-outputs/\` 里任何历史生成结果(configs.json/configs.jsonl/ranking.json/*.jsonl raw)。那些是过往产物、可能过时或来自不同 job,不是格式标准,参照它们只会拖慢并引入不一致。
+- **输出格式的唯一权威是本 prompt 末尾的 JSON Schema 和 SKILL.md**。禁止为"对齐格式"去读 `outputs/`、`claude-raw-outputs/` 里任何历史生成结果(configs.json/configs.jsonl/ranking.json/*.jsonl raw)。那些是过往产物、可能过时或来自不同 job,不是格式标准,参照它们只会拖慢并引入不一致。
 - **只读你推导所必需的输入**:SKILL.md、knowledge.md、catalogs/*.yaml(按 job 里的 ID 查表)。不要浏览 sibling job、不要翻别的 job 的 job.json/结果、不要 git log。本 job 的 JobSpec 已在上文给全。
 - **不要参考任何"之前跑过的类似 job"的候选或压测排名来做本次决策**。每个 job 独立按知识库推导;历史结果不构成本次判据。
 - 拿到查表所需事实后**尽快进入推导与产出**,不要做超出上述范围的探索性文件浏览。
 
 ## 运行时信息(知识库里没有的)
 
-- --model-path 用占位符 \`${MODEL_PATH}\`,不绑定任何机器路径(第二步由 targets.json 填入)。
+- --model-path 用占位符 `${MODEL_PATH}`,不绑定任何机器路径(第二步由 targets.json 填入)。
 - --host 0.0.0.0 --port 30000。
 - store_true 类 flag(如 --trust-remote-code)为 true 时写裸 flag、false 时省略。
-- 候选数 ≤ JobSpec 的 max_candidates。
-EOF
+- 候选数必须严格等于 JobSpec 的 max_candidates；配置了 baseline 时总数必须为 max_candidates + 1。
+PROMPT_TAIL
+)"
+
+PROMPT="${PROMPT_PREFIX}"$'\n'"${JOB_JSON}"$'\n'"${PROMPT_SUFFIX}"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 第 4 步:调 tclaude(AI 决策,约 2 分钟)
@@ -495,6 +506,11 @@ else
     [ ! -e "$OUT" ] || echo "ℹ️  已有输出未修改: $OUT" >&2
     exit 1
   fi
+fi
+
+if ! python3 -m schemas.validate_cli candidates "$JOB" "$OUT_TMP"; then
+  echo "❌ candidate validation failed: $OUT_TMP；已有输出未修改" >&2
+  exit 1
 fi
 
 mv -f -- "$OUT_TMP" "$OUT"
