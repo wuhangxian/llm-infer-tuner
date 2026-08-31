@@ -15,6 +15,7 @@ import pytest
 
 from runners.concurrency_search import search_saturation
 from runners.executor import _classify_probe_for_search, _make_evaluate
+from runners.lifecycle import ExecutorLifecycle
 from runners.metrics import (
     ProbeStatus,
     RunResult,
@@ -809,6 +810,44 @@ class _ProbeContainer:
         self.bench_writes_result = bench_writes_result
         self.output_record = stale_record
         self.result_exists = bool(stale_record)
+        self.monitored_pid_value = 7001
+        self.monitored_returncode = 0
+        self.pid_paths: set[str] = set()
+
+    def start_monitored(
+        self, command, log_path, status_path, pid_path, *, timeout=None
+    ) -> CommandResult:
+        del log_path, status_path, timeout
+        result = self.exec(command)
+        self.monitored_returncode = result.returncode
+        self.pid_paths.add(pid_path)
+        return CommandResult(0, f"{self.monitored_pid_value}\n", "")
+
+    def monitored_pid(self, pid_path: str, *, timeout=None) -> CommandResult:
+        del timeout
+        if pid_path not in self.pid_paths:
+            return CommandResult(1, "", "missing")
+        return CommandResult(0, f"{self.monitored_pid_value}\n", "")
+
+    def monitored_state(self, pid: int, status_path: str, *, timeout=None) -> CommandResult:
+        del status_path, timeout
+        assert pid == self.monitored_pid_value
+        return CommandResult(0, f"EXIT {self.monitored_returncode}\n", "")
+
+    def process_group_state(self, pid: int, *, timeout=None) -> CommandResult:
+        del timeout
+        assert pid == self.monitored_pid_value
+        return CommandResult(0, "MISSING\n", "")
+
+    def file_progress(self, paths, *, timeout=None) -> CommandResult:
+        del timeout
+        return CommandResult(0, json.dumps({path: "1" for path in paths}), "")
+
+    def health(self, port: int, *, timeout=None) -> CommandResult:
+        return self.exec(f"curl -sf http://127.0.0.1:{port}/health", timeout=timeout)
+
+    def signal_process_group(self, pid: int, signal_name: str, *, timeout=None):
+        raise AssertionError(f"unexpected signal for completed pid {pid}: {signal_name}")
 
     def exec(self, command: str, *, timeout: int | None = None) -> CommandResult:
         del timeout
@@ -855,31 +894,35 @@ def _evaluate_once(
     candidate: dict[str, object] | None = None,
     engine_version: str = "0.5.16",
 ) -> RunResult:
-    context = SimpleNamespace(
-        container=container,
-        bench_template=(
-            "python -m sglang.bench_serving --max-concurrency 1 --num-prompts 4 "
-            "--host ${BENCHMARK_HOST} --port ${BENCHMARK_PORT} "
-            "--model ${MODEL_PATH}"
-        ),
-        multiplier=4,
-        outputs_container_path="/workspace/outputs",
-        port=30000,
-        config=SimpleNamespace(
-            model_container_path="/models/qwen",
-        ),
-        job=SimpleNamespace(job_id="job"),
-        engine_version=engine_version,
-    )
-    evaluate, _warmup = _make_evaluate(
-        cast(Any, context),
-        "c001",
-        tmp_path,
-        tp_size=4,
-        output_len=1024,
-        candidate=candidate,
-    )
-    return evaluate(8)
+    lifecycle = ExecutorLifecycle(tmp_path / "lifecycle", job_id="job")
+    with lifecycle:
+        context = SimpleNamespace(
+            container=container,
+            bench_template=(
+                "python -m sglang.bench_serving --max-concurrency 1 --num-prompts 4 "
+                "--host ${BENCHMARK_HOST} --port ${BENCHMARK_PORT} "
+                "--model ${MODEL_PATH}"
+            ),
+            multiplier=4,
+            outputs_container_path="/workspace/outputs",
+            port=30000,
+            config=SimpleNamespace(
+                model_container_path="/models/qwen",
+            ),
+            job=SimpleNamespace(job_id="job"),
+            engine_version=engine_version,
+            lifecycle=lifecycle,
+            replica_server_logs={0: "/workspace/outputs/c001/server.log"},
+        )
+        evaluate, _warmup = _make_evaluate(
+            cast(Any, context),
+            "c001",
+            tmp_path,
+            tp_size=4,
+            output_len=1024,
+            candidate=candidate,
+        )
+        return evaluate(8)
 
 
 def test_nonzero_benchmark_exit_cannot_reuse_a_stale_valid_result(tmp_path) -> None:

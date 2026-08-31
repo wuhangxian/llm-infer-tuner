@@ -10,7 +10,9 @@ import re
 import shlex
 import sys
 import tempfile
+import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -20,13 +22,20 @@ from typing import Any
 import yaml
 
 from runners.bench_runner import (
+    benchmark_artifact_paths,
     build_benchmark_command_template,
+    cleanup_monitored_benchmark,
     rewrite_bench_command,
-    run_benchmark,
+    run_benchmark_monitored,
     substitute_placeholders,
 )
 from runners.concurrency_search import SearchOutcome, search_saturation
 from runners.container import Container, ContainerConfig
+from runners.lifecycle import (
+    ExecutorLifecycle,
+    LifecycleAborted,
+    LifecycleInterrupted,
+)
 from runners.metrics import (
     SEARCH_VERDICT_STATUSES,
     ProbeStatus,
@@ -43,7 +52,11 @@ from runners.preflight import (
     validate_local_preflight,
 )
 from runners.ranker import data_health_check, passes_sla, rank_candidates
-from runners.readiness import make_health_probe, wait_until_ready
+from runners.readiness import (
+    ReadinessTransportError,
+    make_health_probe,
+    wait_until_ready,
+)
 from runners.remote import CommandFailureKind, CommandResult, RemoteRunner
 from runners.reporting import (
     annotate_baseline_threshold,
@@ -77,6 +90,10 @@ SERVER_CLEANUP_TERM_POLL_ATTEMPTS = 21
 SERVER_CLEANUP_TERM_POLL_INTERVAL_S = 0.5
 SERVER_CLEANUP_KILL_POLL_ATTEMPTS = 5
 SERVER_CLEANUP_KILL_POLL_INTERVAL_S = 0.1
+REMOTE_START_COMMAND_TIMEOUT_S = 30
+LIFECYCLE_CLEANUP_COMMAND_TIMEOUT_S = 10
+BENCHMARK_MAX_ATTEMPTS = 3
+PROCESS_TERMINATE_GRACE_S = 10
 
 DEFAULT_WORKLOADS_PATH = Path(__file__).resolve().parents[1] / "catalogs" / "workloads.yaml"
 
@@ -243,6 +260,9 @@ class _CandidateContext:
     container_present: bool = False
     container_start_failures: list[dict[str, Any]] = field(default_factory=list)
     engine_version: str = ""
+    lifecycle: ExecutorLifecycle | None = None
+    container_resource: str | None = None
+    replica_server_logs: dict[int, str] = field(default_factory=dict)
 
 
 def _resolve_bench_template(
@@ -272,13 +292,29 @@ def _aggregate_replicas(replicas: list[RunResult], *, expected: int) -> RunResul
     candidate_id = replicas[0].candidate_id if replicas else "unknown"
     tp_size = replicas[0].tp_size if replicas else 1
     if not healthy or len(healthy) < expected:
-        failed = next(
+        failure_priority = {
+            ProbeStatus.RUNTIME_FAILED: 0,
+            ProbeStatus.TRANSPORT_FAILED: 1,
+            ProbeStatus.INVALID_RESULT: 2,
+            ProbeStatus.STARTUP_FAILED: 3,
+            ProbeStatus.BENCHMARK_FAILED: 4,
+        }
+        failed = min(
             (
                 result
                 for result in replicas
                 if result is not None and result.status != ProbeStatus.OK
             ),
-            None,
+            key=lambda result: (
+                failure_priority.get(ProbeStatus(result.status), 99),
+                # A peer cancellation is consequential evidence, not the
+                # originating failure.  Do not let replica ordering replace a
+                # same-class bench/transport diagnostic from the failed peer.
+                1
+                if "peer replica" in (result.failure_reason or "").lower()
+                else 0,
+            ),
+            default=None,
         )
         status = (
             ProbeStatus(failed.status)
@@ -304,6 +340,8 @@ def _aggregate_replicas(replicas: list[RunResult], *, expected: int) -> RunResul
         agg.tp_size = tp_size
         agg.instances = expected
         agg.full_host_measured = True
+        if failed is not None:
+            agg.raw.update(failed.raw)
         return agg
     aggregate_values = {
         "success_rate": min(r.success_rate for r in healthy),
@@ -446,7 +484,9 @@ def _make_evaluate(
     ports: list[int] | None = None,
     *,
     output_len: int,
+    round_label: str = "r1",
     candidate: dict[str, Any] | None = None,
+    recover_servers=None,
 ):
     """Build the (evaluate, warmup) closures the search uses.
 
@@ -468,14 +508,41 @@ def _make_evaluate(
     candidate_out = f"{ctx.outputs_container_path}/{candidate_id}"
     full_host_measurement = ports is not None
     bench_ports = ports if ports is not None else [ctx.port]
+    lifecycle = ctx.lifecycle
+    if lifecycle is None:  # pragma: no cover - production always supplies it
+        raise RuntimeError("executor lifecycle is required")
 
-    def _bench_one_port(concurrency: int, port: int, tag: str) -> RunResult:
+    def _bench_one_port(
+        concurrency: int,
+        port: int,
+        tag: str,
+        *,
+        recovery_attempt: int = 0,
+        repeat: int = 0,
+        peer_cancelled=None,
+        monitor_server_ports: list[int] | None = None,
+    ) -> RunResult:
         command_tpl, num_prompts = rewrite_bench_command(
             ctx.bench_template, concurrency=concurrency, multiplier=ctx.multiplier
         )
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        result_name = f"bench_c{concurrency}{tag}_{timestamp}.jsonl"
-        result_container_path = f"{candidate_out}/{result_name}"
+        timestamp = str(time.time_ns())
+        replica_match = re.search(r"_i(\d+)$", tag)
+        replica_index = int(replica_match.group(1)) if replica_match else 0
+        (
+            result_container_path,
+            log_container_path,
+            status_container_path,
+            pid_container_path,
+        ) = benchmark_artifact_paths(
+            candidate_out,
+            round_label=round_label,
+            concurrency=concurrency,
+            repeat=repeat,
+            recovery_attempt=recovery_attempt,
+            replica_index=replica_index,
+        )
+        result_name = Path(result_container_path).name
+        log_name = Path(log_container_path).name
         base_command = substitute_placeholders(
             command_tpl,
             host="127.0.0.1",
@@ -485,7 +552,19 @@ def _make_evaluate(
             timestamp=timestamp,
         )
         command = _force_output_file(base_command, result_container_path)
-        cleared = container.exec(f"rm -f -- {shlex.quote(result_container_path)}")
+        cleared = container.exec(
+            "rm -f -- "
+            + " ".join(
+                shlex.quote(path)
+                for path in (
+                    result_container_path,
+                    log_container_path,
+                    status_container_path,
+                    pid_container_path,
+                )
+            ),
+            timeout=5,
+        )
         if not cleared.ok:
             status = (
                 ProbeStatus.TRANSPORT_FAILED
@@ -504,13 +583,88 @@ def _make_evaluate(
             f"    [{candidate_id}] bench C={concurrency}{tag} @port{port} "
             f"(num_prompts={num_prompts}) ..."
         )
-        bench_run = run_benchmark(container, command)
+        resource_name = f"benchmark:{Path(pid_container_path).name}"
 
-        log_name = f"bench_c{concurrency}{tag}_{timestamp}.log"
+        def _start_benchmark() -> CommandResult:
+            return lifecycle.start_resource(
+                resource_name,
+                starter=lambda: container.start_monitored(
+                    command,
+                    log_container_path,
+                    status_container_path,
+                    pid_container_path,
+                    timeout=5,
+                ),
+                cleanup=lambda: cleanup_monitored_benchmark(
+                    container,
+                    pid_path=pid_container_path,
+                    status_path=status_container_path,
+                    terminate_grace_s=PROCESS_TERMINATE_GRACE_S,
+                    poll_timeout_s=5,
+                ),
+            )
+
+        cleanup_failures: list[str] = []
+        try:
+            bench_run = run_benchmark_monitored(
+                container,
+                command,
+                log_path=log_container_path,
+                result_path=result_container_path,
+                status_path=status_container_path,
+                pid_path=pid_container_path,
+                server_ports=(
+                    [port]
+                    if monitor_server_ports is None
+                    else monitor_server_ports
+                ),
+                starter=_start_benchmark,
+                cancelled=lambda: (
+                    "executor lifecycle"
+                    if lifecycle.cancelled
+                    else (
+                        "peer replica infrastructure failure"
+                        if peer_cancelled is not None and peer_cancelled()
+                        else False
+                    )
+                ),
+                terminate_grace_s=PROCESS_TERMINATE_GRACE_S,
+                poll_timeout_s=5,
+            )
+        finally:
+            active_exception = sys.exc_info()[1]
+            if lifecycle.is_registered(resource_name):
+                try:
+                    cleanup_failures = cleanup_monitored_benchmark(
+                        container,
+                        pid_path=pid_container_path,
+                        status_path=status_container_path,
+                        terminate_grace_s=PROCESS_TERMINATE_GRACE_S,
+                        poll_timeout_s=5,
+                    )
+                except LifecycleInterrupted:
+                    raise
+                except Exception as exc:
+                    cleanup_failures = [f"checked cleanup raised {exc!r}"]
+            if cleanup_failures:
+                detail = (
+                    f"benchmark cleanup failed for {candidate_id} C={concurrency}: "
+                    + "; ".join(cleanup_failures)
+                )
+                lifecycle.abort(detail)
+                if not isinstance(active_exception, LifecycleInterrupted):
+                    raise CleanupError(detail)
+            elif lifecycle.is_registered(resource_name):
+                lifecycle.release(resource_name)
+
+        console_result = container.exec(
+            f"cat {shlex.quote(log_container_path)}", timeout=5
+        )
         bench_console = (
             f"$ {command}\n"
             f"# exit code: {bench_run.returncode}\n\n"
-            f"----- stdout -----\n{bench_run.stdout}\n"
+            f"----- stdout -----\n"
+            f"{console_result.stdout if console_result.ok else bench_run.stdout}\n"
             f"----- stderr -----\n{bench_run.stderr}\n"
         )
         (candidate_dir / log_name).write_text(bench_console, encoding="utf-8")
@@ -525,7 +679,41 @@ def _make_evaluate(
                 num_prompts=num_prompts,
             )
 
-        post_health = container.exec(f"curl -sf http://127.0.0.1:{port}/health")
+        failed_server_match = re.search(
+            r"server port (\d+) became unhealthy", bench_run.stderr
+        )
+        if failed_server_match is not None:
+            failed_port = int(failed_server_match.group(1))
+            failed_replica_index = bench_ports.index(failed_port)
+            failed_log_path = (
+                ctx.replica_server_logs.get(failed_replica_index)
+                or f"{candidate_out}/server_replica{failed_replica_index}.log"
+            )
+            failed_log = container.exec(
+                f"cat {shlex.quote(failed_log_path)}", timeout=5
+            )
+            result = _probe_failure_result(
+                candidate_id,
+                f"server port {failed_port} became unhealthy during benchmark",
+                status=ProbeStatus.RUNTIME_FAILED,
+                tp_size=tp_size,
+                concurrency=concurrency,
+                num_prompts=num_prompts,
+                known_issue=classify_known_runtime_issue(
+                    engine_version=ctx.engine_version,
+                    attention_backend=_candidate_param(candidate, "attention_backend"),
+                    speculative_algorithm=_candidate_param(
+                        candidate, "speculative_algorithm"
+                    ),
+                    traceback_text=failed_log.stdout if failed_log.ok else "",
+                ),
+            )
+            result.raw.update(
+                {"replica_index": failed_replica_index, "port": failed_port}
+            )
+            return result
+
+        post_health = container.health(port, timeout=5)
         if _is_transport_failure(post_health):
             return _probe_failure_result(
                 candidate_id,
@@ -537,15 +725,12 @@ def _make_evaluate(
                 num_prompts=num_prompts,
             )
         if not post_health.ok:
-            replica_match = re.search(r"_i(\d+)$", tag)
-            replica_index = int(replica_match.group(1)) if replica_match else 0
             server_log_path = (
-                f"{candidate_out}/server.log"
-                if replica_index == 0
-                else f"{candidate_out}/server_i{replica_index}.log"
+                ctx.replica_server_logs.get(replica_index)
+                or f"{candidate_out}/server_replica{replica_index}.log"
             )
             server_log_result = container.exec(
-                f"cat {shlex.quote(server_log_path)}"
+                f"cat {shlex.quote(server_log_path)}", timeout=5
             )
             traceback_text = server_log_result.stdout if server_log_result.ok else ""
             known_issue = classify_known_runtime_issue(
@@ -576,7 +761,9 @@ def _make_evaluate(
                 num_prompts=num_prompts,
             )
 
-        read_result = container.exec(f"cat {shlex.quote(result_container_path)}")
+        read_result = container.exec(
+            f"cat {shlex.quote(result_container_path)}", timeout=5
+        )
         if _is_transport_failure(read_result):
             return _probe_failure_result(
                 candidate_id,
@@ -608,20 +795,267 @@ def _make_evaluate(
         (candidate_dir / result_name).write_text(text, encoding="utf-8")
         return run_result
 
+    attempt_failures: list[dict[str, Any]] = []
+
+    repeat_counters: dict[int, int] = {}
+
+    def _run_group(
+        concurrency: int, recovery_attempt: int, repeat: int
+    ) -> RunResult:
+        if not full_host_measurement:
+            result = _bench_one_port(
+                concurrency,
+                bench_ports[0],
+                "",
+                recovery_attempt=recovery_attempt,
+                repeat=repeat,
+            )
+            result.raw.update({"replica_index": 0, "port": bench_ports[0]})
+            return result
+        peer_failed = threading.Event()
+        group_done = threading.Event()
+        health_root: list[RunResult] = []
+        health_exception: list[BaseException] = []
+
+        def _watch_group_health() -> None:
+            try:
+                while not group_done.is_set() and not lifecycle.cancelled:
+                    observation = container.health_many(bench_ports, timeout=5)
+                    if observation.ok:
+                        group_done.wait(1.0)
+                        continue
+                    failed_match = re.fullmatch(
+                        r"FAILED (\d+) (-?\d+)", observation.stdout.strip()
+                    )
+                    failed_port = (
+                        int(failed_match.group(1))
+                        if failed_match is not None
+                        else None
+                    )
+                    failed_replica = (
+                        bench_ports.index(failed_port)
+                        if failed_port in bench_ports
+                        else None
+                    )
+                    peer_failed.set()
+                    status = (
+                        ProbeStatus.TRANSPORT_FAILED
+                        if _is_transport_failure(observation)
+                        else ProbeStatus.RUNTIME_FAILED
+                    )
+                    traceback_text = ""
+                    if failed_replica is not None:
+                        log_path = (
+                            ctx.replica_server_logs.get(failed_replica)
+                            or f"{candidate_out}/server_replica{failed_replica}.log"
+                        )
+                        pulled = container.exec(
+                            f"cat {shlex.quote(log_path)}", timeout=5
+                        )
+                        if pulled.ok:
+                            traceback_text = pulled.stdout
+                    result = _probe_failure_result(
+                        candidate_id,
+                        (
+                            f"server port {failed_port} became unhealthy"
+                            if failed_port is not None
+                            else "replica group health observation failed: "
+                            + _command_failure_detail(observation)
+                        ),
+                        status=status,
+                        tp_size=tp_size,
+                        concurrency=concurrency,
+                        num_prompts=concurrency * ctx.multiplier,
+                        known_issue=classify_known_runtime_issue(
+                            engine_version=ctx.engine_version,
+                            attention_backend=_candidate_param(
+                                candidate, "attention_backend"
+                            ),
+                            speculative_algorithm=_candidate_param(
+                                candidate, "speculative_algorithm"
+                            ),
+                            traceback_text=traceback_text,
+                        ),
+                    )
+                    if failed_replica is not None and failed_port is not None:
+                        result.raw.update(
+                            {"replica_index": failed_replica, "port": failed_port}
+                        )
+                    health_root.append(result)
+                    return
+            except BaseException as exc:
+                health_exception.append(exc)
+                peer_failed.set()
+
+        health_thread = threading.Thread(target=_watch_group_health, daemon=True)
+        health_thread.start()
+
+        def _one(i_port):
+            i, port = i_port
+            if peer_failed.is_set():
+                skipped = _probe_failure_result(
+                    candidate_id,
+                    "benchmark cancelled by peer replica infrastructure failure",
+                    status=ProbeStatus.BENCHMARK_FAILED,
+                    tp_size=tp_size,
+                    concurrency=concurrency,
+                    num_prompts=concurrency * ctx.multiplier,
+                )
+                skipped.raw.update({"replica_index": i, "port": port})
+                return skipped
+            try:
+                result = _bench_one_port(
+                    concurrency,
+                    port,
+                    f"_i{i}",
+                    recovery_attempt=recovery_attempt,
+                    repeat=repeat,
+                    peer_cancelled=peer_failed.is_set,
+                    monitor_server_ports=[],
+                )
+                result.raw.setdefault("replica_index", i)
+                result.raw.setdefault("port", port)
+            except (
+                AssertionError,
+                LifecycleInterrupted,
+                LifecycleAborted,
+                CleanupError,
+            ):
+                # A peer that never returns a RunResult is still the origin of
+                # a group-wide infrastructure cancellation.  Wake monitored
+                # siblings before ThreadPoolExecutor waits for them.
+                peer_failed.set()
+                raise
+            except Exception as exc:
+                peer_failed.set()
+                result = _probe_failure_result(
+                    candidate_id,
+                    f"replica {i} port {port} raised: {exc!r}",
+                    status=ProbeStatus.BENCHMARK_FAILED,
+                    tp_size=tp_size,
+                    concurrency=concurrency,
+                    num_prompts=concurrency * ctx.multiplier,
+                )
+                result.raw.update({"replica_index": i, "port": port})
+            if result.status not in SEARCH_VERDICT_STATUSES:
+                peer_failed.set()
+            return result
+
+        try:
+            with ThreadPoolExecutor(max_workers=len(bench_ports)) as pool:
+                replicas = list(pool.map(_one, enumerate(bench_ports)))
+        finally:
+            group_done.set()
+            health_thread.join(timeout=6)
+        if health_thread.is_alive():
+            raise CleanupError("replica group health watchdog did not stop")
+        if health_exception:
+            raise health_exception[0]
+        if health_root:
+            root = health_root[0]
+            root_index = root.raw.get("replica_index")
+            if isinstance(root_index, int) and 0 <= root_index < len(replicas):
+                replicas[root_index] = root
+            else:
+                replicas[0] = root
+        return _aggregate_replicas(replicas, expected=len(bench_ports))
+
+    def _record_attempt_failure(result: RunResult, attempt: int) -> None:
+        attempt_failures.append(
+            {
+                "failed_at": datetime.now(UTC).astimezone().isoformat(),
+                "round": int(round_label.removeprefix("r") or 0),
+                "concurrency": result.concurrency,
+                "num_prompts": result.num_prompts,
+                "tp_size": result.tp_size,
+                "attempt": attempt,
+                "stage": "probe_recovery",
+                "status": str(result.status),
+                "reason": result.failure_reason,
+                "known_issue": result.known_issue,
+                "replica_index": result.raw.get("replica_index"),
+                "port": result.raw.get("port"),
+            }
+        )
+
+    def _retry_allowed(counts: dict[str, int], result: RunResult) -> bool:
+        category = str(result.status)
+        counts[category] = counts.get(category, 0) + 1
+        return counts[category] < BENCHMARK_MAX_ATTEMPTS
+
+    def _attempt_exception(concurrency: int, exc: Exception, *, stage: str) -> RunResult:
+        if isinstance(exc, AssertionError):
+            raise exc
+        if isinstance(exc, (CleanupError, LifecycleAborted)):
+            raise exc
+        return _probe_failure_result(
+            candidate_id,
+            f"{stage} raised at C={concurrency}: {exc!r}",
+            status=ProbeStatus.BENCHMARK_FAILED,
+            tp_size=tp_size,
+            concurrency=concurrency,
+            num_prompts=concurrency * ctx.multiplier,
+        )
+
     def evaluate(concurrency: int) -> RunResult:
         try:
-            if not full_host_measurement:
-                run_result = _bench_one_port(concurrency, bench_ports[0], "")
-            else:
-                # 整机满载:N 个副本端口并发各压一份(同一并发档),再求和。
-                # 底层 subprocess.run 线程安全,每个副本写各自的结果文件,互不串。
-                def _one(i_port):
-                    i, port = i_port
-                    return _bench_one_port(concurrency, port, f"_i{i}")
-
-                with ThreadPoolExecutor(max_workers=len(bench_ports)) as pool:
-                    replicas = list(pool.map(_one, enumerate(bench_ports)))
-                run_result = _aggregate_replicas(replicas, expected=len(bench_ports))
+            run_result: RunResult | None = None
+            repeat = repeat_counters.get(concurrency, 0)
+            repeat_counters[concurrency] = repeat + 1
+            category_counts: dict[str, int] = {}
+            for attempt in range(1, BENCHMARK_MAX_ATTEMPTS * 5 + 1):
+                if attempt > 1:
+                    if recover_servers is None:
+                        break
+                    try:
+                        restart_failure = recover_servers(attempt, concurrency, repeat)
+                    except Exception as exc:
+                        restart_failure = _attempt_exception(
+                            concurrency, exc, stage="server recovery"
+                        )
+                    if restart_failure is not None:
+                        run_result = restart_failure
+                        _record_attempt_failure(run_result, attempt)
+                        if not _retry_allowed(category_counts, run_result):
+                            break
+                        continue
+                    # Every fresh server group is warmed before retrying the
+                    # exact same concurrency; warmup evidence is discarded.
+                    warmup_failure = None
+                    for i, port in enumerate(bench_ports):
+                        tag = "_warmup" if len(bench_ports) == 1 else f"_warmup_i{i}"
+                        try:
+                            warmed = _bench_one_port(
+                                WARMUP_CONCURRENCY,
+                                port,
+                                tag,
+                                recovery_attempt=attempt - 1,
+                                repeat=-1,
+                            )
+                        except Exception as exc:
+                            warmed = _attempt_exception(
+                                WARMUP_CONCURRENCY, exc, stage="recovery warmup"
+                            )
+                        if warmed.status not in SEARCH_VERDICT_STATUSES:
+                            warmup_failure = warmed
+                            break
+                    if warmup_failure is not None:
+                        run_result = warmup_failure
+                        _record_attempt_failure(run_result, attempt)
+                        if not _retry_allowed(category_counts, run_result):
+                            break
+                        continue
+                try:
+                    run_result = _run_group(concurrency, attempt - 1, repeat)
+                except Exception as exc:
+                    run_result = _attempt_exception(concurrency, exc, stage="probe")
+                if run_result.status in SEARCH_VERDICT_STATUSES:
+                    break
+                _record_attempt_failure(run_result, attempt)
+                if not _retry_allowed(category_counts, run_result):
+                    break
+            if run_result is None:  # pragma: no cover - max attempts is positive
+                raise RuntimeError("benchmark recovery made no attempt")
             _log(
                 f"      [{candidate_id}] C={concurrency}: tput={run_result.total_throughput:.0f} "
                 f"(x{run_result.instances}) "
@@ -629,6 +1063,11 @@ def _make_evaluate(
                 f"succ={run_result.success_rate:.2f} status={run_result.status}"
             )
             return run_result
+        except AssertionError:
+            raise
+        except (CleanupError, LifecycleAborted) as exc:
+            lifecycle.abort(str(exc))
+            raise
         except Exception as exc:  # typed incomplete evidence, never an SLA verdict
             return _probe_failure_result(
                 candidate_id,
@@ -650,19 +1089,60 @@ def _make_evaluate(
         故障则返回 typed failure，调用方把候选标成 incomplete，而不是继续发布结果。
         """
         try:
-            for i, port in enumerate(bench_ports):
-                tag = "_warmup" if len(bench_ports) == 1 else f"_warmup_i{i}"
-                _log(
-                    f"      [{candidate_id}] warmup C={concurrency} @port{port} "
-                    f"(预热,结果丢弃) ..."
-                )
-                r = _bench_one_port(concurrency, port, tag)
-                _log(
-                    f"      [{candidate_id}] warmup done "
-                    f"(ttft={r.mean_ttft_ms:.0f}ms status={r.status},不计入搜索)"
-                )
-                if r.status not in SEARCH_VERDICT_STATUSES:
-                    return r
+            last_failure: RunResult | None = None
+            category_counts: dict[str, int] = {}
+            for attempt in range(1, BENCHMARK_MAX_ATTEMPTS * 5 + 1):
+                if attempt > 1:
+                    if recover_servers is None:
+                        break
+                    try:
+                        restart_failure = recover_servers(attempt, concurrency, -1)
+                    except Exception as exc:
+                        restart_failure = _attempt_exception(
+                            concurrency, exc, stage="server recovery"
+                        )
+                    if restart_failure is not None:
+                        last_failure = restart_failure
+                        _record_attempt_failure(last_failure, attempt)
+                        if not _retry_allowed(category_counts, last_failure):
+                            break
+                        continue
+                failed = None
+                for i, port in enumerate(bench_ports):
+                    tag = "_warmup" if len(bench_ports) == 1 else f"_warmup_i{i}"
+                    _log(
+                        f"      [{candidate_id}] warmup C={concurrency} @port{port} "
+                        f"(预热,结果丢弃) ..."
+                    )
+                    try:
+                        r = _bench_one_port(
+                            concurrency,
+                            port,
+                            tag,
+                            recovery_attempt=attempt - 1,
+                            repeat=-1,
+                        )
+                    except Exception as exc:
+                        r = _attempt_exception(concurrency, exc, stage="warmup")
+                    _log(
+                        f"      [{candidate_id}] warmup done "
+                        f"(ttft={r.mean_ttft_ms:.0f}ms status={r.status},不计入搜索)"
+                    )
+                    if r.status not in SEARCH_VERDICT_STATUSES:
+                        failed = r
+                        break
+                if failed is None:
+                    return None
+                last_failure = failed
+                _record_attempt_failure(last_failure, attempt)
+                if not _retry_allowed(category_counts, last_failure):
+                    break
+            return last_failure
+        except AssertionError:
+            raise
+        except (CleanupError, LifecycleAborted) as exc:
+            lifecycle.abort(str(exc))
+            raise
         except Exception as exc:
             return _probe_failure_result(
                 candidate_id,
@@ -674,6 +1154,7 @@ def _make_evaluate(
             )
         return None
 
+    evaluate.attempt_failures = attempt_failures  # type: ignore[attr-defined]
     return evaluate, warmup
 
 
@@ -1033,7 +1514,12 @@ def _cleanup_container_checked(
     return [f"candidate {candidate_id}: {failure}" for failure in failures]
 
 
-def _cleanup_servers_checked(container: Container, *, candidate_id: str) -> None:
+def _cleanup_servers_checked(
+    container: Container,
+    *,
+    candidate_id: str,
+    command_timeout_s: int = LIFECYCLE_CLEANUP_COMMAND_TIMEOUT_S,
+) -> None:
     """Bound TERM/KILL cleanup and prove no launch_server process remains."""
     failures: list[str] = []
     pattern = shlex.quote(SERVER_PROCESS_PATTERN)
@@ -1047,7 +1533,9 @@ def _cleanup_servers_checked(container: Container, *, candidate_id: str) -> None
         """Return True/False for absent/still-present, None for unknown state."""
         for attempt in range(attempts):
             try:
-                residual = container.exec(f"pgrep -f {pattern}")
+                residual = container.exec(
+                    f"pgrep -f {pattern}", timeout=command_timeout_s
+                )
             except Exception as exc:  # noqa: BLE001 - unsafe unknown state
                 failures.append(f"{label} pgrep raised {exc!r}")
                 return None
@@ -1064,7 +1552,9 @@ def _cleanup_servers_checked(container: Container, *, candidate_id: str) -> None
         return False
 
     try:
-        terminated = container.exec(f"pkill -TERM -f {pattern}")
+        terminated = container.exec(
+            f"pkill -TERM -f {pattern}", timeout=command_timeout_s
+        )
         if terminated.returncode not in (0, 1):
             failures.append(
                 _result_failure("TERM pkill", terminated) or "TERM pkill failed"
@@ -1079,7 +1569,9 @@ def _cleanup_servers_checked(container: Container, *, candidate_id: str) -> None
     )
     if absent is False:
         try:
-            killed = container.exec(f"pkill -KILL -f {pattern}")
+            killed = container.exec(
+                f"pkill -KILL -f {pattern}", timeout=command_timeout_s
+            )
             if killed.returncode not in (0, 1):
                 failures.append(
                     _result_failure("KILL pkill", killed) or "KILL pkill failed"
@@ -1138,6 +1630,9 @@ def _run_batch_parallel(
     job = ctx_template.job
     bench_template = ctx_template.bench_template
     multiplier = ctx_template.multiplier
+    lifecycle = ctx_template.lifecycle
+    if lifecycle is None:  # pragma: no cover - all production entry points provide it
+        raise RuntimeError("executor lifecycle is required")
     lifecycle_cleanup_failures: list[str] = []
 
     containers: list[tuple[str, Container, _CandidateContext, dict[str, Any], str, int]] = []
@@ -1214,6 +1709,7 @@ def _run_batch_parallel(
             port=port,
             replica_ports=replica_ports,
             replica_gpus=replica_gpus,
+            lifecycle=lifecycle,
         )
         containers.append((candidate_id, container, ctx, candidate, gpu_ids_str, port))
 
@@ -1226,11 +1722,14 @@ def _run_batch_parallel(
                 container,
                 candidate_id=candidate_id,
                 stop_first=True,
-                timeout=config.startup_hard_timeout_s,
+                timeout=LIFECYCLE_CLEANUP_COMMAND_TIMEOUT_S,
             )
             failures.extend(cleanup_failures)
             if not cleanup_failures:
                 ctx.container_present = False
+                if ctx.container_resource is not None:
+                    lifecycle.release(ctx.container_resource)
+                    ctx.container_resource = None
         return failures
 
     # Start all containers in this batch. Container creation (including a
@@ -1243,24 +1742,78 @@ def _run_batch_parallel(
             failed_round = int(round_label.removeprefix("r"))
         except ValueError:
             failed_round = 0
-        for attempt in range(1, max(1, config.startup_max_attempts) + 1):
+        container_category_counts: dict[str, int] = {}
+        per_category_container_budget = max(1, config.startup_max_attempts)
+        for attempt in range(1, per_category_container_budget * 5 + 1):
             _log(
                 f"[{round_label}] {candidate_id}: starting container "
                 f"(GPUs={gpu_ids_str}, port={port}, "
                 f"attempt {attempt}/{config.startup_max_attempts}) ..."
             )
             try:
-                started = container.start(timeout=config.startup_hard_timeout_s)
-                running = started.ok and container.is_running(
-                    timeout=config.startup_hard_timeout_s
+                resource_name = (
+                    f"container:{round_label}:{candidate_id}:attempt{attempt}:"
+                    f"{id(ctx)}"
                 )
+                ctx.container_resource = resource_name
+                started = lifecycle.start_resource(
+                    resource_name,
+                    starter=lambda container=container: container.start(
+                        timeout=min(
+                            config.startup_hard_timeout_s,
+                            REMOTE_START_COMMAND_TIMEOUT_S,
+                        )
+                    ),
+                    cleanup=lambda container=container, candidate_id=candidate_id: (
+                        _cleanup_container_checked(
+                            container,
+                            candidate_id=candidate_id,
+                            stop_first=True,
+                            timeout=LIFECYCLE_CLEANUP_COMMAND_TIMEOUT_S,
+                        )
+                    ),
+                )
+                attempt_status = (
+                    ProbeStatus.TRANSPORT_FAILED
+                    if _is_transport_failure(started)
+                    else ProbeStatus.STARTUP_FAILED
+                )
+                running_state = None
+                if started.ok:
+                    running_state = container.running_state(
+                        timeout=min(
+                            config.startup_hard_timeout_s,
+                            REMOTE_START_COMMAND_TIMEOUT_S,
+                        )
+                    )
+                    if _is_transport_failure(running_state):
+                        attempt_status = ProbeStatus.TRANSPORT_FAILED
+                    running = (
+                        running_state.ok
+                        and running_state.stdout.strip() == "true"
+                    )
+                else:
+                    running = False
                 reason = (
-                    started.stderr.strip()
-                    or started.stdout.strip()
+                    (
+                        _command_failure_detail(running_state)
+                        if running_state is not None and not running_state.ok
+                        else ""
+                    )
+                    or started.stderr.strip()
+                    or (started.stdout.strip() if not started.ok else "")
                     or "container not running"
                 )
+            except (AssertionError, CleanupError, LifecycleAborted):
+                raise
             except Exception as exc:  # noqa: BLE001 - inspect decides safe retry
                 running = False
+                result = getattr(exc, "result", None)
+                attempt_status = (
+                    ProbeStatus.TRANSPORT_FAILED
+                    if result is not None and _is_transport_failure(result)
+                    else ProbeStatus.STARTUP_FAILED
+                )
                 reason = f"container start raised: {exc!r}"
             if running:
                 ctx.container_ready = True
@@ -1273,7 +1826,7 @@ def _run_batch_parallel(
                     "concurrency": 0,
                     "num_prompts": 0,
                     "tp_size": _candidate_tp_size(candidate),
-                    "status": str(ProbeStatus.STARTUP_FAILED),
+                    "status": str(attempt_status),
                     "known_issue": None,
                     "attempt": attempt,
                     "stage": "container_start",
@@ -1281,12 +1834,25 @@ def _run_batch_parallel(
                 }
             )
             _log(f"[{round_label}] {candidate_id}: container start failed: {reason}")
+            status_key = str(attempt_status)
+            container_category_counts[status_key] = (
+                container_category_counts.get(status_key, 0) + 1
+            )
+            category_exhausted = (
+                container_category_counts[status_key]
+                >= per_category_container_budget
+            )
             state, inspect_detail = _container_inspection_state(
                 container,
-                timeout=config.startup_hard_timeout_s,
+                timeout=REMOTE_START_COMMAND_TIMEOUT_S,
             )
             if state == "absent":
                 ctx.container_present = False
+                if ctx.container_resource is not None:
+                    lifecycle.release(ctx.container_resource)
+                    ctx.container_resource = None
+                if category_exhausted:
+                    break
                 continue
             if state == "unknown":
                 ctx.container_present = True
@@ -1300,16 +1866,22 @@ def _run_batch_parallel(
                 container,
                 candidate_id=candidate_id,
                 stop_first=False,
-                timeout=config.startup_hard_timeout_s,
+                timeout=LIFECYCLE_CLEANUP_COMMAND_TIMEOUT_S,
             )
             if cleanup_failures:
                 lifecycle_cleanup_failures.extend(cleanup_failures)
                 abort_startup = True
                 break
             ctx.container_present = False
+            if ctx.container_resource is not None:
+                lifecycle.release(ctx.container_resource)
+                ctx.container_resource = None
+            if category_exhausted:
+                break
 
     if abort_startup:
         lifecycle_cleanup_failures.extend(_cleanup_created_containers())
+        lifecycle.abort("; ".join(lifecycle_cleanup_failures))
         raise CleanupError(
             "executor cleanup failed during startup; refusing new resource starts: "
             + "; ".join(lifecycle_cleanup_failures)
@@ -1325,19 +1897,22 @@ def _run_batch_parallel(
         candidate_tp = _candidate_tp_size(candidate)
         if not ctx.container_ready:
             reason = ctx.container_start_failures[-1]["reason"]
+            terminal_status = ProbeStatus(
+                ctx.container_start_failures[-1]["status"]
+            )
             return candidate_id, SearchOutcome(
                 results=[
                     _probe_failure_result(
                         candidate_id,
                         reason,
-                        status=ProbeStatus.STARTUP_FAILED,
+                        status=terminal_status,
                         tp_size=candidate_tp,
                         concurrency=0,
                         num_prompts=0,
                     )
                 ],
                 c_star=None,
-                stop_reason=ProbeStatus.STARTUP_FAILED,
+                stop_reason=terminal_status,
                 last_pass=None,
                 first_fail=None,
                 num_evals=0,
@@ -1363,6 +1938,8 @@ def _run_batch_parallel(
                 refine=refine,
                 seeds=cand_seeds,
             )
+        except (AssertionError, CleanupError, LifecycleAborted):
+            raise
         except Exception as exc:  # noqa: BLE001 - 单候选崩溃不拖垮同批其他候选
             _log(f"[{round_label}] {candidate_id}: 运行异常,记为失败: {exc!r}")
             if isinstance(exc, CleanupError):
@@ -1425,9 +2002,14 @@ def _run_batch_parallel(
     finally:
         # Stop/remove/postcheck every still-present container. Never let one
         # failure skip cleanup of the remaining owned resources.
-        lifecycle_cleanup_failures.extend(_cleanup_created_containers())
+        # On a signal/abort, leave registered resources to the outer lifecycle's
+        # reverse-order unwind: server/benchmark groups must be proved absent
+        # while their owning container still exists, before container removal.
+        if not lifecycle.cancelled:
+            lifecycle_cleanup_failures.extend(_cleanup_created_containers())
 
         if lifecycle_cleanup_failures:
+            lifecycle.abort("; ".join(lifecycle_cleanup_failures))
             raise CleanupError(
                 "executor cleanup failed; refusing further resource reuse: "
                 + "; ".join(lifecycle_cleanup_failures)
@@ -1655,6 +2237,9 @@ def _run_candidate(
     """
     container = ctx.container
     config = ctx.config
+    lifecycle = ctx.lifecycle
+    if lifecycle is None:  # pragma: no cover - production always supplies it
+        raise RuntimeError("executor lifecycle is required")
     candidate_id = str(candidate.get("id", "unknown"))
     tp_size = _candidate_tp_size(candidate)
     raw_cmd = candidate.get("cmd")
@@ -1672,24 +2257,70 @@ def _run_candidate(
         cmd, model_path=config.model_container_path, port=ctx.port
     )
     candidate_out = f"{ctx.outputs_container_path}/{candidate_id}"
-    container.exec(f"mkdir -p {shlex.quote(candidate_out)}")
+    container.exec(f"mkdir -p {shlex.quote(candidate_out)}", timeout=5)
 
     # 副本计划:满载时用 ctx.replica_ports/replica_gpus(N 个),否则单实例 = [ctx.port]。
     replica_ports = ctx.replica_ports or [ctx.port]
     replica_gpus = ctx.replica_gpus or [None] * len(replica_ports)
     n_replicas = len(replica_ports)
-    server_log = f"{candidate_out}/server.log"  # 首副本日志,崩溃诊断沿用它
+    server_log = f"{candidate_out}/server.log"  # compatibility fallback only
 
-    def _server_alive() -> bool:
-        return container.exec(
-            f"pgrep -f {shlex.quote(SERVER_PROCESS_PATTERN)}"
-        ).ok
+    def _server_alive(pid: int) -> bool:
+        state = container.process_state(pid, timeout=5)
+        if _is_transport_failure(state):
+            raise ReadinessTransportError(state, observation=f"server pid {pid}")
+        return state.ok and state.stdout.strip() == "RUNNING"
 
-    def _startup_progress() -> str:
-        result = container.exec(f"stat -c '%s:%Y' {shlex.quote(server_log)}")
+    def _startup_progress(log_path: str) -> str:
+        result = container.exec(
+            f"stat -c '%s:%Y' {shlex.quote(log_path)}", timeout=5
+        )
+        if _is_transport_failure(result):
+            raise ReadinessTransportError(
+                result, observation=f"server log progress {log_path}"
+            )
         return result.stdout.strip() if result.ok else ""
 
     startup_failures: list[dict[str, Any]] = list(ctx.container_start_failures)
+    server_resources: list[str] = []
+    server_replicas: list[tuple[int, int, str, str]] = []  # pid, port, log, pidfile
+
+    def _cleanup_server_group() -> None:
+        failures: list[str] = []
+        for _pid, _port, _log, pid_path in list(server_replicas):
+            try:
+                failures.extend(
+                    cleanup_monitored_benchmark(
+                        container,
+                        pid_path=pid_path,
+                        status_path=f"{pid_path}.unused-status",
+                        terminate_grace_s=PROCESS_TERMINATE_GRACE_S,
+                        poll_timeout_s=5,
+                    )
+                )
+            except LifecycleInterrupted:
+                raise
+            except Exception as exc:
+                failures.append(f"{pid_path}: checked cleanup raised {exc!r}")
+        try:
+            _cleanup_servers_checked(container, candidate_id=candidate_id)
+        except LifecycleInterrupted:
+            raise
+        except Exception as exc:
+            failures.append(f"global server cleanup raised {exc!r}")
+        if failures:
+            detail = (
+                f"server cleanup failed for candidate {candidate_id}: "
+                + "; ".join(failures)
+            )
+            lifecycle.abort(detail)
+            raise CleanupError(detail)
+        for resource_name in server_resources:
+            lifecycle.release(resource_name)
+        server_resources.clear()
+        server_replicas.clear()
+        ctx.replica_server_logs.clear()
+
     ready = False
     startup_attempt = 0
     try:
@@ -1697,42 +2328,123 @@ def _run_candidate(
     except ValueError:
         failed_round = 0
 
-    for startup_attempt in range(1, max(1, config.startup_max_attempts) + 1):
+    startup_category_counts: dict[str, int] = {}
+    per_category_startup_budget = max(1, config.startup_max_attempts)
+    for startup_attempt in range(1, per_category_startup_budget * 5 + 1):
+        launch_ok = True
+        attempt_status = ProbeStatus.STARTUP_FAILED
+        attempt_detail = ""
+        failed_replica_index: int | None = None
+        failed_replica_port: int | None = None
+        failed_replica_log: str | None = None
+        attempt_logs: list[tuple[int, int, str]] = []
         for idx, (rport, rgpu) in enumerate(zip(replica_ports, replica_gpus)):
             # 每个副本换到自己的端口;满载时再用 CUDA_VISIBLE_DEVICES 把它钉在自己那段卡上。
             rcmd = _override_launch_port(base_cmd, rport)
             if rgpu is not None:
                 rcmd = f"env CUDA_VISIBLE_DEVICES={rgpu} {rcmd}"
-            rlog = server_log if idx == 0 else f"{candidate_out}/server_i{idx}.log"
+            identity = f"{time.time_ns()}_{uuid.uuid4().hex}"
+            rlog = (
+                f"{candidate_out}/server_{round_label}_startup{startup_attempt}_"
+                f"replica{idx}_{identity}.log"
+            )
+            pid_path = rlog.removesuffix(".log") + ".pid"
+            attempt_logs.append((idx, rport, rlog))
+            ctx.replica_server_logs[idx] = rlog
             tag = "" if n_replicas == 1 else (
                 f" 副本 {idx + 1}/{n_replicas} (GPU={rgpu}@{rport})"
             )
             _log(
                 f"[{round_label}] {candidate_id}: starting server{tag} "
-                f"(attempt {startup_attempt}/{config.startup_max_attempts}), "
+                f"(attempt {startup_attempt}, per-class budget "
+                f"{per_category_startup_budget}), "
                 "waiting for /health ..."
             )
-            container.exec_detached(rcmd, rlog)
+            resource_name = (
+                f"server:{round_label}:{candidate_id}:attempt{startup_attempt}:"
+                f"replica{idx}:port{rport}:{id(ctx)}"
+            )
+            server_resources.append(resource_name)
+            launched = lifecycle.start_resource(
+                resource_name,
+                starter=lambda rcmd=rcmd, rlog=rlog, pid_path=pid_path: (
+                    container.start_server_monitored(
+                        rcmd,
+                        rlog,
+                        pid_path,
+                        timeout=REMOTE_START_COMMAND_TIMEOUT_S,
+                    )
+                ),
+                cleanup=lambda pid_path=pid_path: cleanup_monitored_benchmark(
+                    container,
+                    pid_path=pid_path,
+                    status_path=f"{pid_path}.unused-status",
+                    terminate_grace_s=PROCESS_TERMINATE_GRACE_S,
+                    poll_timeout_s=5,
+                ),
+            )
+            pid_text = launched.stdout.strip() if launched.ok else ""
+            if (
+                not launched.ok
+                or re.fullmatch(r"[0-9]+", pid_text) is None
+                or int(pid_text) <= 1
+            ):
+                launch_ok = False
+                failed_replica_index = idx
+                failed_replica_port = rport
+                failed_replica_log = rlog
+                attempt_detail = _command_failure_detail(launched)
+                if _is_transport_failure(launched):
+                    attempt_status = ProbeStatus.TRANSPORT_FAILED
+                break
+            server_replicas.append((int(pid_text), rport, rlog, pid_path))
 
         # 满载:所有副本端口都要 /health 通过才算就绪。
-        ready = True
-        for rport in replica_ports:
-            probe = make_health_probe(container, port=rport)
-            if not wait_until_ready(
-                probe,
-                is_alive=_server_alive,
-                timeout_s=config.startup_hard_timeout_s,
-                stall_timeout_s=config.startup_stall_timeout_s,
-                progress=_startup_progress,
-            ):
+        ready = launch_ok and len(server_replicas) == len(replica_ports)
+        for idx, (pid, rport, rlog, _pid_path) in enumerate(server_replicas):
+            probe = make_health_probe(container, port=rport, timeout_s=5)
+            try:
+                replica_ready = wait_until_ready(
+                    probe,
+                    is_alive=lambda pid=pid: _server_alive(pid),
+                    timeout_s=config.startup_hard_timeout_s,
+                    stall_timeout_s=config.startup_stall_timeout_s,
+                    progress=lambda rlog=rlog: _startup_progress(rlog),
+                    cancelled=lambda: lifecycle.cancelled,
+                )
+            except ReadinessTransportError as exc:
+                replica_ready = False
+                attempt_status = ProbeStatus.TRANSPORT_FAILED
+                attempt_detail = str(exc)
+            if not replica_ready:
                 ready = False
+                failed_replica_index = idx
+                failed_replica_port = rport
+                failed_replica_log = rlog
                 break
+        if lifecycle.cancelled:
+            lifecycle.assert_start_allowed()
         if ready:
             break
 
-        local_log = candidate_dir / f"server.{round_label}.attempt{startup_attempt}.log"
-        _pull_container_file(container, server_log, local_log)
-        reason = _extract_failure_reason(local_log)
+        failed_local_log: Path | None = None
+        for idx, rport, rlog in attempt_logs:
+            remote_name = Path(rlog).name
+            replica_marker = f"_replica{idx}_"
+            local_name = remote_name.replace(
+                replica_marker,
+                f"{replica_marker}port{rport}_",
+                1,
+            )
+            local_log = candidate_dir / local_name
+            _pull_container_file(container, rlog, local_log)
+            if rlog == failed_replica_log:
+                failed_local_log = local_log
+        reason = attempt_detail
+        if not reason and failed_local_log is not None:
+            reason = _extract_failure_reason(failed_local_log)
+        if not reason:
+            reason = "server did not become ready"
         startup_failures.append(
             {
                 "failed_at": datetime.now(UTC).astimezone().isoformat(),
@@ -1740,17 +2452,25 @@ def _run_candidate(
                 "concurrency": 0,
                 "num_prompts": 0,
                 "tp_size": tp_size,
-                "status": str(ProbeStatus.STARTUP_FAILED),
+                "status": str(attempt_status),
                 "known_issue": None,
                 "attempt": startup_attempt,
                 "stage": "server_start",
+                "replica_index": failed_replica_index,
+                "port": failed_replica_port,
                 "reason": f"server did not become ready: {reason}",
             }
         )
         _log(
             f"[{round_label}] {candidate_id}: startup attempt {startup_attempt} failed: {reason}"
         )
-        _cleanup_servers_checked(container, candidate_id=candidate_id)
+        _cleanup_server_group()
+        status_key = str(attempt_status)
+        startup_category_counts[status_key] = (
+            startup_category_counts.get(status_key, 0) + 1
+        )
+        if startup_category_counts[status_key] >= per_category_startup_budget:
+            break
 
     try:
         if not ready:
@@ -1759,10 +2479,15 @@ def _run_candidate(
                 f"{startup_attempt} attempt(s)"
             )
             reason = startup_failures[-1]["reason"] if startup_failures else "unknown"
+            terminal_status = (
+                ProbeStatus(startup_failures[-1]["status"])
+                if startup_failures
+                else ProbeStatus.STARTUP_FAILED
+            )
             failed = _probe_failure_result(
                 candidate_id,
                 reason,
-                status=ProbeStatus.STARTUP_FAILED,
+                status=terminal_status,
                 tp_size=tp_size,
                 concurrency=0,
                 num_prompts=0,
@@ -1770,7 +2495,7 @@ def _run_candidate(
             outcome = SearchOutcome(
                 results=[failed],
                 c_star=None,
-                stop_reason=ProbeStatus.STARTUP_FAILED,
+                stop_reason=terminal_status,
                 last_pass=None,
                 first_fail=None,
                 num_evals=0,
@@ -1783,20 +2508,151 @@ def _run_candidate(
             )
         else:
             _log(f"[{round_label}] {candidate_id}: server ready, probing concurrency ...")
-            version_result = container.exec(ENGINE_VERSION_COMMAND)
+            version_result = container.exec(ENGINE_VERSION_COMMAND, timeout=5)
             ctx.engine_version = (
                 version_result.stdout.strip().splitlines()[0]
                 if version_result.ok and version_result.stdout.strip()
                 else ""
             )
+
+            def _recover_servers(
+                recovery_attempt: int, concurrency: int, repeat: int
+            ) -> RunResult | None:
+                _cleanup_server_group()
+                launch_ok = True
+                recovery_status = ProbeStatus.STARTUP_FAILED
+                recovery_detail = ""
+                failed_replica_index: int | None = None
+                failed_replica_port: int | None = None
+                failed_replica_log: str | None = None
+                recovery_logs: list[tuple[int, int, str]] = []
+                for idx, (rport, rgpu) in enumerate(
+                    zip(replica_ports, replica_gpus)
+                ):
+                    rcmd = _override_launch_port(base_cmd, rport)
+                    if rgpu is not None:
+                        rcmd = f"env CUDA_VISIBLE_DEVICES={rgpu} {rcmd}"
+                    identity = f"{time.time_ns()}_{uuid.uuid4().hex}"
+                    rlog = (
+                        f"{candidate_out}/server_{round_label}_c{concurrency}_"
+                        f"repeat{repeat}_"
+                        f"recovery{recovery_attempt}_replica{idx}_{identity}.log"
+                    )
+                    pid_path = rlog.removesuffix(".log") + ".pid"
+                    recovery_logs.append((idx, rport, rlog))
+                    ctx.replica_server_logs[idx] = rlog
+                    resource_name = (
+                        f"server:{round_label}:{candidate_id}:"
+                        f"recovery{recovery_attempt}:replica{idx}:"
+                        f"port{rport}:{id(ctx)}"
+                    )
+                    server_resources.append(resource_name)
+                    launched = lifecycle.start_resource(
+                        resource_name,
+                        starter=lambda rcmd=rcmd, rlog=rlog, pid_path=pid_path: (
+                            container.start_server_monitored(
+                                rcmd,
+                                rlog,
+                                pid_path,
+                                timeout=REMOTE_START_COMMAND_TIMEOUT_S,
+                            )
+                        ),
+                        cleanup=lambda pid_path=pid_path: cleanup_monitored_benchmark(
+                            container,
+                            pid_path=pid_path,
+                            status_path=f"{pid_path}.unused-status",
+                            terminate_grace_s=PROCESS_TERMINATE_GRACE_S,
+                            poll_timeout_s=5,
+                        ),
+                    )
+                    pid_text = launched.stdout.strip() if launched.ok else ""
+                    if (
+                        not launched.ok
+                        or re.fullmatch(r"[0-9]+", pid_text) is None
+                        or int(pid_text) <= 1
+                    ):
+                        launch_ok = False
+                        failed_replica_index = idx
+                        failed_replica_port = rport
+                        failed_replica_log = rlog
+                        recovery_detail = _command_failure_detail(launched)
+                        if _is_transport_failure(launched):
+                            recovery_status = ProbeStatus.TRANSPORT_FAILED
+                        break
+                    server_replicas.append((int(pid_text), rport, rlog, pid_path))
+
+                recovered = launch_ok and len(server_replicas) == len(replica_ports)
+                for idx, (pid, rport, rlog, _pid_path) in enumerate(server_replicas):
+                    try:
+                        replica_ready = wait_until_ready(
+                            make_health_probe(container, port=rport, timeout_s=5),
+                            is_alive=lambda pid=pid: _server_alive(pid),
+                            timeout_s=config.startup_hard_timeout_s,
+                            stall_timeout_s=config.startup_stall_timeout_s,
+                            progress=lambda rlog=rlog: _startup_progress(rlog),
+                            cancelled=lambda: lifecycle.cancelled,
+                        )
+                    except ReadinessTransportError as exc:
+                        replica_ready = False
+                        recovery_status = ProbeStatus.TRANSPORT_FAILED
+                        recovery_detail = str(exc)
+                    if not replica_ready:
+                        recovered = False
+                        failed_replica_index = idx
+                        failed_replica_port = rport
+                        failed_replica_log = rlog
+                        break
+                if lifecycle.cancelled:
+                    lifecycle.assert_start_allowed()
+                if recovered:
+                    return None
+                failed_local_log: Path | None = None
+                for idx, rport, rlog in recovery_logs:
+                    local_log = candidate_dir / Path(rlog).name
+                    _pull_container_file(container, rlog, local_log)
+                    if rlog == failed_replica_log:
+                        failed_local_log = local_log
+                if not recovery_detail and failed_local_log is not None:
+                    recovery_detail = _extract_failure_reason(failed_local_log)
+                if not recovery_detail:
+                    recovery_detail = "server did not become ready"
+                _cleanup_server_group()
+                failure = _probe_failure_result(
+                    candidate_id,
+                    f"server recovery {recovery_attempt} failed"
+                    + (
+                        f" on replica {failed_replica_index}"
+                        f" port {failed_replica_port}: {recovery_detail}"
+                    ),
+                    status=recovery_status,
+                    tp_size=tp_size,
+                    concurrency=concurrency,
+                    num_prompts=concurrency * ctx.multiplier,
+                )
+                failure.raw.update(
+                    {
+                        "replica_index": failed_replica_index,
+                        "port": failed_replica_port,
+                    }
+                )
+                return failure
+
             evaluate, warmup = _make_evaluate(
                 ctx, candidate_id, candidate_dir, tp_size=tp_size,
                 ports=ctx.replica_ports,
                 output_len=output_len,
+                round_label=round_label,
                 candidate=candidate,
+                recover_servers=_recover_servers,
             )
+            recovery_failures = evaluate.attempt_failures  # type: ignore[attr-defined]
 
             def on_evaluate_exception(concurrency: int, exc: Exception) -> RunResult:
+                if isinstance(exc, AssertionError):
+                    raise exc
+                if isinstance(exc, (CleanupError, LifecycleAborted)):
+                    lifecycle.abort(str(exc))
+                    raise exc
                 return _probe_failure_result(
                     candidate_id,
                     f"evaluate raised at C={concurrency}: {exc!r}",
@@ -1833,8 +2689,32 @@ def _run_candidate(
                     seeds=seeds,
                     on_evaluate_exception=on_evaluate_exception,
                 )
+            terminal_infra = [
+                result
+                for result in outcome.results
+                if result.status not in SEARCH_VERDICT_STATUSES
+            ]
+            if terminal_infra:
+                failed_concurrencies = {result.concurrency for result in terminal_infra}
+                outcome.results = [
+                    result
+                    for result in outcome.results
+                    if result.status in SEARCH_VERDICT_STATUSES
+                ]
+                outcome.newly_probed = [
+                    concurrency
+                    for concurrency in outcome.newly_probed
+                    if concurrency not in failed_concurrencies
+                ]
+                # search_saturation invoked evaluate once for the logical C;
+                # its internal recovery attempts are infrastructure accounting,
+                # never statistical/search-budget consumption.
+                outcome.num_evals = max(0, outcome.num_evals - 1)
+
             _pull_container_file(
-                container, server_log, candidate_dir / f"server.{round_label}.log"
+                container,
+                ctx.replica_server_logs.get(0, server_log),
+                candidate_dir / f"server.{round_label}.log",
             )
             _write_json(
                 candidate_dir / f"run_result.{round_label}.json",
@@ -1858,12 +2738,31 @@ def _run_candidate(
                     "reason": result.failure_reason,
                     "known_issue": result.known_issue,
                 }
-                for result in outcome.results
+                for result in terminal_infra
                 if result.status not in SEARCH_VERDICT_STATUSES
             ]
-            outcome.failures = startup_failures + probe_failures
+            outcome.failures = startup_failures + recovery_failures
+            seen_failures = {
+                (
+                    failure.get("round"),
+                    failure.get("status"),
+                    failure.get("concurrency"),
+                    failure.get("reason"),
+                )
+                for failure in outcome.failures
+            }
+            for failure in probe_failures:
+                identity = (
+                    failure.get("round"),
+                    failure.get("status"),
+                    failure.get("concurrency"),
+                    failure.get("reason"),
+                )
+                if identity not in seen_failures:
+                    outcome.failures.append(failure)
+                    seen_failures.add(identity)
     finally:
-        _cleanup_servers_checked(container, candidate_id=candidate_id)
+        _cleanup_server_group()
 
     return outcome
 
@@ -1929,6 +2828,32 @@ def run_executor(
     config: ExecutorConfig,
     *,
     remote: RemoteRunner | None = None,
+    lifecycle: ExecutorLifecycle | None = None,
+) -> dict:
+    """Run one invocation under the process-wide lifecycle and signal guard."""
+    if lifecycle is not None:
+        return _run_executor_impl(config, remote=remote, lifecycle=lifecycle)
+    _prepare_local_results_dir(config.results_dir)
+    owned_lifecycle = ExecutorLifecycle(
+        config.results_dir, job_id=config.job_path.stem
+    )
+    result: dict | None = None
+    with owned_lifecycle:
+        job = _load_job(config.job_path)
+        owned_lifecycle.job_id = job.job_id
+        result = _run_executor_impl(
+            config, remote=remote, lifecycle=owned_lifecycle
+        )
+    if result is None:  # defensive: a lifecycle context must never suppress errors
+        raise RuntimeError("executor lifecycle suppressed execution without a result")
+    return result
+
+
+def _run_executor_impl(
+    config: ExecutorConfig,
+    *,
+    remote: RemoteRunner | None = None,
+    lifecycle: ExecutorLifecycle,
 ) -> dict:
     """Orchestrate the 8-step executor loop and return a summary dict.
 
@@ -2007,6 +2932,7 @@ def run_executor(
         multiplier=multiplier,
         outputs_container_path=outputs_container_path,
         port=config.port,
+        lifecycle=lifecycle,
     )
 
     candidate_by_id = {str(candidate["id"]): candidate for candidate in candidates}
@@ -2177,7 +3103,7 @@ def _pull_container_file(container: Container, container_path: str, local_path: 
     (server.log, bench stdout) must be read back over the exec channel. Returns
     True when something was written.
     """
-    result = container.exec(f"cat {shlex.quote(container_path)}")
+    result = container.exec(f"cat {shlex.quote(container_path)}", timeout=5)
     if not result.ok:
         return False
     local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2243,41 +3169,48 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--startup-max-attempts", type=int, default=3)
     args = parser.parse_args(argv)
 
+    _prepare_local_results_dir(args.results)
+    lifecycle = ExecutorLifecycle(args.results, job_id=args.job.stem)
     try:
-        job = load_job(args.job)
-        target, ssh_password = _resolve_target_password(args.target)
-    except ValueError as exc:
-        parser.error(str(exc))
+        with lifecycle:
+            try:
+                job = load_job(args.job)
+                lifecycle.job_id = job.job_id
+                target, ssh_password = _resolve_target_password(args.target)
+            except ValueError as exc:
+                parser.error(str(exc))
 
-    config = ExecutorConfig(
-        job_path=args.job,
-        configs_path=args.configs,
-        results_dir=args.results,
-        ssh_target=target.ssh_target,
-        ssh_password=ssh_password,
-        image_ref=target.image_ref,
-        model_host_dir=target.model_host_dir,
-        model_container_path=target.model_container_path,
-        project_root=args.project_root,
-        max_candidates=job.search.max_candidates,
-        concurrencies=_parse_concurrencies(args.concurrencies),
-        port=target.port,
-        container_name=args.container_name or f"llm-infer-tuner-{job.job_id}",
-        remote_outputs_dir=target.remote_outputs_dir,
-        top_k=args.top_k,
-        max_cap=args.max_cap,
-        target_gpu_model=target.gpu_model,
-        target_gpu_count=target.gpu_count,
-        target_gpu_memory_gb=target.gpu_memory_gb,
-        fill_host=args.fill_host,
-        allow_cross_numa=target.allow_cross_numa,
-        exclusive_host=target.exclusive_host,
-        max_parallel=args.max_parallel,
-        startup_stall_timeout_s=args.startup_stall_timeout,
-        startup_hard_timeout_s=args.startup_hard_timeout,
-        startup_max_attempts=args.startup_max_attempts,
-    )
-    summary = run_executor(config)
+            config = ExecutorConfig(
+                job_path=args.job,
+                configs_path=args.configs,
+                results_dir=args.results,
+                ssh_target=target.ssh_target,
+                ssh_password=ssh_password,
+                image_ref=target.image_ref,
+                model_host_dir=target.model_host_dir,
+                model_container_path=target.model_container_path,
+                project_root=args.project_root,
+                max_candidates=job.search.max_candidates,
+                concurrencies=_parse_concurrencies(args.concurrencies),
+                port=target.port,
+                container_name=args.container_name or f"llm-infer-tuner-{job.job_id}",
+                remote_outputs_dir=target.remote_outputs_dir,
+                top_k=args.top_k,
+                max_cap=args.max_cap,
+                target_gpu_model=target.gpu_model,
+                target_gpu_count=target.gpu_count,
+                target_gpu_memory_gb=target.gpu_memory_gb,
+                fill_host=args.fill_host,
+                allow_cross_numa=target.allow_cross_numa,
+                exclusive_host=target.exclusive_host,
+                max_parallel=args.max_parallel,
+                startup_stall_timeout_s=args.startup_stall_timeout,
+                startup_hard_timeout_s=args.startup_hard_timeout,
+                startup_max_attempts=args.startup_max_attempts,
+            )
+            summary = run_executor(config, lifecycle=lifecycle)
+    except LifecycleInterrupted as exc:
+        return exc.exit_code
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 

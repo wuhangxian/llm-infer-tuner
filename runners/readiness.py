@@ -6,6 +6,26 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from runners.remote import CommandFailureKind
+
+
+class ReadinessTransportError(RuntimeError):
+    """A readiness observation failed at the remote transport boundary."""
+
+    def __init__(self, result: Any, *, observation: str) -> None:
+        self.result = result
+        self.observation = observation
+        detail = (getattr(result, "stderr", "") or getattr(result, "stdout", "")).strip()
+        super().__init__(f"{observation} transport failed: {detail or 'unknown error'}")
+
+
+def _raise_transport(result: Any, *, observation: str) -> None:
+    kind = getattr(result, "failure_kind", None)
+    if kind in {CommandFailureKind.TRANSPORT, CommandFailureKind.TIMEOUT} or (
+        kind is None and getattr(result, "returncode", None) == 255
+    ):
+        raise ReadinessTransportError(result, observation=observation)
+
 
 def wait_until_ready(
     probe: Callable[[], bool],
@@ -14,6 +34,7 @@ def wait_until_ready(
     timeout_s: int = 1800,
     stall_timeout_s: int | None = None,
     progress: Callable[[], object] | None = None,
+    cancelled: Callable[[], bool] | None = None,
     interval_s: float = 5.0,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.monotonic,
@@ -24,11 +45,15 @@ def wait_until_ready(
     reports False (the server process crashed), returns False immediately. Returns
     False when ``timeout_s`` elapses without a successful probe.
     """
+    if cancelled is not None and cancelled():
+        return False
     started_at = now()
     deadline = started_at + timeout_s
     last_progress_at = started_at
     last_progress = progress() if progress is not None else None
     while True:
+        if cancelled is not None and cancelled():
+            return False
         if is_alive is not None and not is_alive():
             return False
         if probe():
@@ -51,11 +76,14 @@ def make_health_probe(
     *,
     host: str = "127.0.0.1",
     port: int = 30000,
+    timeout_s: int = 5,
 ) -> Callable[[], bool]:
     """Build a probe that curls the SGLang ``/health`` endpoint from inside the container."""
     command = f"curl -sf http://{host}:{port}/health"
 
     def probe() -> bool:
-        return container.exec(command).ok
+        result = container.exec(command, timeout=timeout_s)
+        _raise_transport(result, observation=f"health probe {host}:{port}")
+        return result.ok
 
     return probe

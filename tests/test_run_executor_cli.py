@@ -127,6 +127,11 @@ def executor_script_project(tmp_path: Path) -> ExecutorScriptProject:
         '  trap "exit 143" TERM\n'
         '  sleep 30\n'
         'fi\n'
+        'if [ "${FAKE_UV_MODE:-}" = "early-unhandled" ]; then\n'
+        '  printf "%s" "$$" > "$FAKE_UV_PID_FILE"\n'
+        '  : > "$FAKE_UV_READY_FILE"\n'
+        '  exec sleep 30\n'
+        'fi\n'
         'if [ "${FAKE_UV_MODE:-}" = "stubborn-child" ]; then\n'
         '  printf "%s" "$$" > "$FAKE_UV_PID_FILE"\n'
         '  trap "exit 130" INT\n'
@@ -138,6 +143,24 @@ def executor_script_project(tmp_path: Path) -> ExecutorScriptProject:
         '    while :; do sleep 30; done\n'
         '  ) &\n'
         '  wait\n'
+        'fi\n'
+        'if [ "${FAKE_UV_MODE:-}" = "leader-exits-slow-child" ]; then\n'
+        '  printf "%s" "$$" > "$FAKE_UV_PID_FILE"\n'
+        '  trap "exit 143" TERM\n'
+        '  (\n'
+        "    trap 'sleep 3.2; exit 0' TERM\n"
+        '    printf "%s" "$BASHPID" > "$FAKE_UV_CHILD_PID_FILE"\n'
+        '    : > "$FAKE_UV_READY_FILE"\n'
+        '    while :; do sleep 30; done\n'
+        '  ) &\n'
+        '  wait\n'
+        'fi\n'
+        'if [ "${FAKE_UV_MODE:-}" = "slow-cleanup" ]; then\n'
+        '  printf "%s" "$$" > "$FAKE_UV_PID_FILE"\n'
+        '  : > "$FAKE_UV_READY_FILE"\n'
+        "  trap 'printf done > \"$FAKE_UV_CLEANUP_MARKER\"; sleep 3.2; exit 143' TERM\n"
+        "  trap 'printf done > \"$FAKE_UV_CLEANUP_MARKER\"; sleep 3.2; exit 130' INT\n"
+        '  while :; do sleep 30; done\n'
         'fi\n'
         'exit "${FAKE_UV_EXIT_CODE:-0}"\n',
         encoding="utf-8",
@@ -401,6 +424,7 @@ def test_signal_kills_runner_descendants_that_ignore_term(
             "FAKE_UV_READY_FILE": str(ready),
             "FAKE_UV_PID_FILE": str(runner_pid_file),
             "FAKE_UV_CHILD_PID_FILE": str(child_pid_file),
+            "LLM_INFER_TUNER_SHUTDOWN_GRACE_SECONDS": "0.2",
         }
     )
     process = subprocess.Popen(
@@ -443,6 +467,274 @@ def test_signal_kills_runner_descendants_that_ignore_term(
     assert not Path(f"/proc/{child_pid}").exists()
 
 
+def test_wrapper_allows_cleanup_past_three_seconds_and_ignores_second_signal(
+    executor_script_project: ExecutorScriptProject,
+) -> None:
+    project = executor_script_project
+    ready = project.root / "uv-slow.ready"
+    runner_pid_file = project.root / "uv-slow.pid"
+    cleanup_marker = project.root / "uv-slow.cleanup"
+    env = project.env.copy()
+    env.update(
+        {
+            "FAKE_UV_MODE": "slow-cleanup",
+            "FAKE_UV_READY_FILE": str(ready),
+            "FAKE_UV_PID_FILE": str(runner_pid_file),
+            "FAKE_UV_CLEANUP_MARKER": str(cleanup_marker),
+            "LLM_INFER_TUNER_SHUTDOWN_GRACE_SECONDS": "20",
+        }
+    )
+    process = subprocess.Popen(
+        ["./run_executor.sh", str(project.job), str(project.target), str(project.configs)],
+        cwd=project.root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not ready.exists():
+        time.sleep(0.02)
+    assert ready.exists(), "slow-cleanup runner did not start"
+
+    started = time.monotonic()
+    os.kill(process.pid, signal.SIGTERM)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and not cleanup_marker.exists():
+        time.sleep(0.02)
+    assert cleanup_marker.exists(), "runner did not enter its cleanup handler"
+    os.kill(process.pid, signal.SIGINT)
+    stdout, stderr = process.communicate(timeout=7)
+
+    assert process.returncode == 143, (stdout, stderr)
+    elapsed = time.monotonic() - started
+    assert 3.0 <= elapsed < 5.0
+    runner_pid = int(runner_pid_file.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(runner_pid, 0)
+
+
+def test_wrapper_returns_when_slow_descendant_cleanup_finishes_before_grace(
+    executor_script_project: ExecutorScriptProject,
+) -> None:
+    project = executor_script_project
+    ready = project.root / "uv-slow-child.ready"
+    runner_pid_file = project.root / "uv-slow-child.pid"
+    child_pid_file = project.root / "uv-slow-child-child.pid"
+    env = project.env.copy()
+    env.update(
+        {
+            "FAKE_UV_MODE": "leader-exits-slow-child",
+            "FAKE_UV_READY_FILE": str(ready),
+            "FAKE_UV_PID_FILE": str(runner_pid_file),
+            "FAKE_UV_CHILD_PID_FILE": str(child_pid_file),
+            "LLM_INFER_TUNER_SHUTDOWN_GRACE_SECONDS": "20",
+        }
+    )
+    process = subprocess.Popen(
+        ["./run_executor.sh", str(project.job), str(project.target), str(project.configs)],
+        cwd=project.root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not ready.exists():
+        time.sleep(0.02)
+    assert ready.exists()
+
+    started = time.monotonic()
+    os.kill(process.pid, signal.SIGTERM)
+    try:
+        stdout, stderr = process.communicate(timeout=6)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate(timeout=5)
+        pytest.fail("wrapper waited for the full shutdown grace after its group exited")
+
+    assert process.returncode == 143, (stdout, stderr)
+    assert 3.0 <= time.monotonic() - started < 5.0
+    for pid_file in (runner_pid_file, child_pid_file):
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(pid_file.read_text()), 0)
+
+
+def test_early_sigint_before_python_handler_is_not_inherited_as_ignored(
+    executor_script_project: ExecutorScriptProject,
+) -> None:
+    project = executor_script_project
+    ready = project.root / "uv-early-int.ready"
+    runner_pid_file = project.root / "uv-early-int.pid"
+    env = project.env.copy()
+    env.update(
+        {
+            "FAKE_UV_MODE": "early-unhandled",
+            "FAKE_UV_READY_FILE": str(ready),
+            "FAKE_UV_PID_FILE": str(runner_pid_file),
+        }
+    )
+    process = subprocess.Popen(
+        ["./run_executor.sh", str(project.job), str(project.target), str(project.configs)],
+        cwd=project.root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not ready.exists():
+        time.sleep(0.02)
+    assert ready.exists()
+
+    started = time.monotonic()
+    os.kill(process.pid, signal.SIGINT)
+    stdout, stderr = process.communicate(timeout=3)
+
+    assert process.returncode == 130, (stdout, stderr)
+    assert time.monotonic() - started < 2
+    runner_pid = int(runner_pid_file.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(runner_pid, 0)
+
+
+def test_signal_during_fork_to_process_group_publication_is_deferred_and_cleaned(
+    executor_script_project: ExecutorScriptProject,
+) -> None:
+    project = executor_script_project
+    real_setsid = shutil.which("setsid", path=os.defpath)
+    assert real_setsid is not None
+    setsid_shim = project.root / "bin" / "setsid"
+    setsid_shim.write_text(
+        "#!/bin/bash\n"
+        'kill -TERM "$PPID"\n'
+        "sleep 0.1\n"
+        'exec "$REAL_SETSID" "$@"\n',
+        encoding="utf-8",
+    )
+    setsid_shim.chmod(0o755)
+    ready = project.root / "uv-publication.ready"
+    runner_pid_file = project.root / "uv-publication.pid"
+    env = project.env.copy()
+    env.update(
+        {
+            "REAL_SETSID": real_setsid,
+            "FAKE_UV_MODE": "block",
+            "FAKE_UV_READY_FILE": str(ready),
+            "FAKE_UV_PID_FILE": str(runner_pid_file),
+            "LLM_INFER_TUNER_SHUTDOWN_GRACE_SECONDS": "0.5",
+        }
+    )
+    results = project.root / "early-signal-results"
+    results.mkdir()
+    (results / "task_status.json").write_text(
+        json.dumps(
+            {
+                "task_status": "COMPLETED",
+                "ranking_status": "FINAL",
+                "interrupted": False,
+                "cleanup_failures": ["stale cleanup failure"],
+                "failure_type": "OldError",
+                "job_id": "old-job",
+                "sentinel": "stale",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            "./run_executor.sh",
+            str(project.job),
+            str(project.target),
+            str(project.configs),
+            str(results),
+        ],
+        cwd=project.root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=7,
+    )
+
+    assert completed.returncode == 143, completed.stderr
+    status = json.loads((results / "task_status.json").read_text(encoding="utf-8"))
+    assert status["task_status"] == "INTERRUPTED"
+    assert status["ranking_status"] == "PROVISIONAL"
+    assert status["interrupted"] is True
+    assert status["signal"] == "SIGTERM"
+    assert status["job_id"] == "executor-cli-test"
+    assert status["cleanup_failures"] == []
+    assert "sentinel" not in status
+    if runner_pid_file.exists():
+        runner_pid = int(runner_pid_file.read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(runner_pid, 0)
+
+
+@pytest.mark.parametrize("failing_tool", ["ps", "awk"])
+def test_process_group_probe_error_still_uses_bounded_watchdog_and_kills_runner(
+    executor_script_project: ExecutorScriptProject, failing_tool: str
+) -> None:
+    project = executor_script_project
+    real_tool = shutil.which(failing_tool, path=os.defpath)
+    assert real_tool is not None
+    failure_marker = project.root / f"fail-{failing_tool}"
+    shim = project.root / "bin" / failing_tool
+    shim.write_text(
+        "#!/bin/bash\n"
+        'if [ -e "$FAKE_PROBE_FAILURE_MARKER" ]; then exit 2; fi\n'
+        'exec "$REAL_PROBE_TOOL" "$@"\n',
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    ready = project.root / f"uv-{failing_tool}.ready"
+    runner_pid_file = project.root / f"uv-{failing_tool}.pid"
+    env = project.env.copy()
+    env.update(
+        {
+            "REAL_PROBE_TOOL": real_tool,
+            "FAKE_PROBE_FAILURE_MARKER": str(failure_marker),
+            "FAKE_UV_MODE": "block",
+            "FAKE_UV_READY_FILE": str(ready),
+            "FAKE_UV_PID_FILE": str(runner_pid_file),
+            "LLM_INFER_TUNER_SHUTDOWN_GRACE_SECONDS": "0.2",
+        }
+    )
+    process = subprocess.Popen(
+        ["./run_executor.sh", str(project.job), str(project.target), str(project.configs)],
+        cwd=project.root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not ready.exists():
+        time.sleep(0.02)
+    assert ready.exists()
+    runner_pid = int(runner_pid_file.read_text())
+    failure_marker.touch()
+    os.kill(process.pid, signal.SIGTERM)
+    stdout, stderr = process.communicate(timeout=4)
+
+    assert process.returncode == 143, (stdout, stderr)
+    with pytest.raises(ProcessLookupError):
+        os.kill(runner_pid, 0)
+    status_path = project.root / "outputs/executor-cli-test/results/task_status.json"
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["task_status"] == "INTERRUPTED"
+    assert any(
+        "absence could not be proven" in failure
+        for failure in status["cleanup_failures"]
+    )
+
+
 def test_python_executor_cli_loads_target_and_resolves_password_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -467,8 +759,9 @@ def test_python_executor_cli_loads_target_and_resolves_password_environment(
     monkeypatch.setenv(password_env, password)
     captured: list[object] = []
 
-    def fake_run(config):
+    def fake_run(config, *, lifecycle=None):
         captured.append(config)
+        assert lifecycle is not None
         return {"task_status": "COMPLETED"}
 
     monkeypatch.setattr(executor_module, "run_executor", fake_run)
@@ -497,6 +790,49 @@ def test_python_executor_cli_loads_target_and_resolves_password_environment(
     assert password not in repr(config)
 
 
+def test_python_cli_early_signal_invalidates_stale_final_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = tmp_path / "job.json"
+    target = tmp_path / "target.json"
+    configs = tmp_path / "configs.jsonl"
+    results = tmp_path / "results"
+    results.mkdir()
+    stale_status = results / "task_status.json"
+    stale_status.write_text(
+        json.dumps({"task_status": "COMPLETED", "ranking_status": "FINAL"}),
+        encoding="utf-8",
+    )
+    job.write_text(json.dumps(_job_payload()), encoding="utf-8")
+    target.write_text(json.dumps(_target_payload()), encoding="utf-8")
+    configs.write_text(json.dumps(_candidate("c001")) + "\n", encoding="utf-8")
+
+    def interrupt_while_loading(_path):
+        os.kill(os.getpid(), signal.SIGTERM)
+        raise AssertionError("signal control flow must leave the loader")
+
+    monkeypatch.setattr(executor_module, "load_job", interrupt_while_loading)
+
+    rc = executor_module.main(
+        [
+            "--job",
+            str(job),
+            "--target",
+            str(target),
+            "--configs",
+            str(configs),
+            "--results",
+            str(results),
+        ]
+    )
+
+    assert rc == 143
+    status = json.loads(stale_status.read_text(encoding="utf-8"))
+    assert status["task_status"] == "INTERRUPTED"
+    assert status["ranking_status"] == "PROVISIONAL"
+    assert status["signal"] == "SIGTERM"
+
+
 @pytest.mark.parametrize("password_value", [None, ""], ids=["missing", "empty"])
 def test_python_executor_cli_rejects_missing_password_environment_before_execution(
     tmp_path: Path,
@@ -519,7 +855,7 @@ def test_python_executor_cli_rejects_missing_password_environment_before_executi
         monkeypatch.setenv(variable, password_value)
     called = False
 
-    def fake_run(config):
+    def fake_run(config, *, lifecycle=None):
         nonlocal called
         called = True
         return {}
@@ -618,7 +954,13 @@ def test_executor_rejects_exact_fill_host_port_overflow_before_output_mutation(
 
     assert constructed is True
     assert config.results_dir.is_dir()
-    assert list(config.results_dir.iterdir()) == []
+    assert {path.name for path in config.results_dir.iterdir()} == {"task_status.json"}
+    status = json.loads(
+        (config.results_dir / "task_status.json").read_text(encoding="utf-8")
+    )
+    assert status["task_status"] == "INCOMPLETE"
+    assert status["ranking_status"] == "PROVISIONAL"
+    assert not (config.results_dir / "ranking.json").exists()
 
 
 def test_executor_rejects_impossible_tp_before_constructing_remote_runner(

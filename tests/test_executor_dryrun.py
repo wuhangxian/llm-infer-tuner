@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import threading
 import time
@@ -29,6 +30,7 @@ import pytest
 
 from runners import executor as ex
 from runners.executor import ExecutorConfig, run_executor
+from runners.lifecycle import ExecutorLifecycle, LifecycleInterrupted
 from runners.preflight import (
     CONTAINERS_QUERY_COMMAND,
     GPU_PIDS_QUERY_COMMAND,
@@ -40,6 +42,7 @@ from runners.preflight import (
     CandidatePlacement,
     PreflightPlan,
 )
+from runners.remote import CommandFailureKind
 
 # --- fakes --------------------------------------------------------------------
 
@@ -47,10 +50,17 @@ from runners.preflight import (
 class _FakeResult:
     """Mimics remote.CommandResult (returncode / stdout / stderr / .ok)."""
 
-    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+    def __init__(
+        self,
+        returncode: int = 0,
+        stdout: str = "",
+        stderr: str = "",
+        failure_kind=None,
+    ) -> None:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+        self.failure_kind = failure_kind
 
     @property
     def ok(self) -> bool:
@@ -94,7 +104,7 @@ class _FakeRemote:
             return _FakeResult()
         if command.startswith("mkdir -p"):
             return _FakeResult()
-        return _FakeResult(returncode=127, stderr=f"unexpected fake command: {command}")
+        raise AssertionError(f"unexpected remote command: {command}")
 
 
 class _FakeContainer:
@@ -128,6 +138,11 @@ class _FakeContainer:
         self.last_bench_jsonl = ""
         self._result_files: dict[str, str] = {}   # container path -> jsonl text
         self.launched_cmds: list[str] = []        # 每次 exec_detached 收到的 server 启动命令
+        self._next_monitored_pid = 5000
+        self._monitored: dict[int, int] = {}
+        self._monitored_pids: dict[str, int] = {}
+        self._next_server_pid = 1000
+        self._server_pids: dict[int, int] = {}
         self.container_exists = False
 
     def _owned_ports(self) -> set[int]:
@@ -183,6 +198,9 @@ class _FakeContainer:
     def is_running(self, *, timeout=None) -> bool:
         return True
 
+    def running_state(self, *, timeout=None) -> _FakeResult:
+        return _FakeResult(0, "true\n" if self.is_running(timeout=timeout) else "false\n", "")
+
     def stop(self, *, timeout=None) -> _FakeResult:
         return _FakeResult()
 
@@ -211,7 +229,104 @@ class _FakeContainer:
                 f"nohup: failed to run command '{first_word}': No such file or directory"
             ))
         self.alive = True
-        return _FakeResult(stdout="1234\n")
+        self._result_files.setdefault(log_container_path, "")
+        self._next_server_pid += 1
+        pid = self._next_server_pid
+        self._server_pids[pid] = _flag_int(shlex.split(command), "--port")
+        return _FakeResult(stdout=f"{pid}\n")
+
+    def process_state(self, pid: int, *, timeout=None) -> _FakeResult:
+        del timeout
+        if pid not in self._server_pids:
+            raise AssertionError(f"unknown server pid: {pid}")
+        port = self._server_pids[pid]
+        with self._server_lock:
+            alive = port in self._alive_ports
+        return _FakeResult(0, "RUNNING\n" if alive else "MISSING\n", "")
+
+    def start_server_monitored(
+        self, command, log_path, pid_path, *, timeout=None
+    ) -> _FakeResult:
+        result = self.exec_detached(command, log_path, timeout=timeout)
+        if result.ok and result.stdout.strip().isdigit():
+            self._monitored_pids[pid_path] = int(result.stdout.strip())
+        return result
+
+    def start_monitored(
+        self, command, log_path, status_path, pid_path, *, timeout=None
+    ) -> _FakeResult:
+        del timeout
+        result = self._run_bench(command)
+        self._next_monitored_pid += 1
+        pid = self._next_monitored_pid
+        self._monitored[pid] = result.returncode
+        self._monitored_pids[pid_path] = pid
+        self._result_files[log_path] = result.stdout
+        self._result_files[status_path] = str(result.returncode)
+        self._result_files[pid_path] = str(pid)
+        return _FakeResult(stdout=f"{pid}\n")
+
+    def monitored_pid(self, pid_path: str, *, timeout=None) -> _FakeResult:
+        del timeout
+        pid = self._monitored_pids.get(pid_path)
+        return _FakeResult(0, f"{pid}\n", "") if pid else _FakeResult(1, "", "missing")
+
+    def monitored_state(self, pid: int, status_path: str, *, timeout=None) -> _FakeResult:
+        del status_path, timeout
+        if pid not in self._monitored:
+            raise AssertionError(f"unknown monitored pid: {pid}")
+        return _FakeResult(0, f"EXIT {self._monitored[pid]}\n", "")
+
+    def process_group_state(self, pid: int, *, timeout=None) -> _FakeResult:
+        del timeout
+        if pid in self._server_pids:
+            port = self._server_pids[pid]
+            with self._server_lock:
+                alive = port in self._alive_ports
+            return _FakeResult(0, "RUNNING\n" if alive else "MISSING\n", "")
+        if pid not in self._monitored:
+            raise AssertionError(f"unknown monitored pid: {pid}")
+        return _FakeResult(0, "MISSING\n", "")
+
+    def file_progress(self, paths, *, timeout=None) -> _FakeResult:
+        del timeout
+        return _FakeResult(
+            0,
+            json.dumps(
+                {
+                    path: str(len(self._result_files[path]))
+                    if path in self._result_files
+                    else "missing"
+                    for path in paths
+                }
+            ),
+            "",
+        )
+
+    def health(self, port: int, *, timeout=None) -> _FakeResult:
+        return self.exec(f"curl -sf http://127.0.0.1:{port}/health", timeout=timeout)
+
+    def health_many(self, ports, *, timeout=None) -> _FakeResult:
+        for port in ports:
+            result = self.health(int(port), timeout=timeout)
+            if not result.ok:
+                return _FakeResult(
+                    result.returncode,
+                    f"FAILED {port} {result.returncode}\n",
+                    result.stderr,
+                    failure_kind=result.failure_kind,
+                )
+        return _FakeResult(0, "HEALTHY\n", "")
+
+    def signal_process_group(self, pid: int, signal_name: str, *, timeout=None):
+        del signal_name, timeout
+        if pid not in self._monitored:
+            if pid not in self._server_pids:
+                raise AssertionError(f"unknown monitored pid: {pid}")
+            port = self._server_pids[pid]
+            with self._server_lock:
+                self._alive_ports.discard(port)
+        return _FakeResult()
 
     # -- the workhorse ---------------------------------------------------------
     def exec(self, command: str, *, timeout=None) -> _FakeResult:
@@ -224,7 +339,7 @@ class _FakeContainer:
             self._forget_owned_servers()
             self.current = None
             return _FakeResult()
-        if "/health" in command:
+        if re.fullmatch(r"curl -sf http://127\.0\.0\.1:\d+/health", command):
             match = re.search(r":(\d+)/health\b", command)
             if match is not None:
                 with self._server_lock:
@@ -237,12 +352,25 @@ class _FakeContainer:
             path = command.split(None, 2)[-1].strip().strip("'\"")
             self.current = Path(path).name
             return _FakeResult()
+        if command.startswith("rm -f -- "):
+            for raw_path in shlex.split(command)[3:]:
+                self._result_files.pop(raw_path, None)
+            return _FakeResult()
+        if command == ex.ENGINE_VERSION_COMMAND:
+            return _FakeResult(stdout="0.5.10\n")
+        if command.startswith("stat -c "):
+            path = shlex.split(command)[-1]
+            if path not in self._result_files:
+                return _FakeResult(1, "", "missing")
+            return _FakeResult(stdout=f"{len(self._result_files[path])}:1\n")
         if "sglang.bench_serving" in command:
             return self._run_bench(command)
         if command.startswith("cat "):
             path = command.split(None, 1)[1].strip().strip("'\"")
-            return _FakeResult(0, stdout=self._result_files.get(path, ""))
-        return _FakeResult()
+            if path not in self._result_files:
+                return _FakeResult(1, "", "missing")
+            return _FakeResult(0, stdout=self._result_files[path])
+        raise AssertionError(f"unexpected container exec: {command}")
 
     def _run_bench(self, command: str) -> _FakeResult:
         parts = command.split()
@@ -255,7 +383,7 @@ class _FakeContainer:
         cand = Path(out_path).parent.name if out_path else (self.current or "unknown")
         # 预热压测(结果丢弃、不是搜索 probe)走单独的 warmup_calls,
         # 不污染 bench_calls —— 现有用例都把 bench_calls 当"真实搜索档序列"。
-        if "_warmup" in Path(out_path).name:
+        if "_warmup" in Path(out_path).name or "repeat-1" in Path(out_path).name:
             self.warmup_calls.append((cand, conc, num_prompts))
         else:
             self.bench_calls.append((cand, conc, num_prompts))
@@ -319,7 +447,300 @@ class _FlakyServerContainer(_FakeContainer):
             self._result_files[log_container_path] = "RuntimeError: synthetic startup crash"
             return _FakeResult(returncode=1, stderr="synthetic startup crash")
         self.alive = True
-        return _FakeResult(stdout="1234\n")
+        self._next_server_pid += 1
+        pid = self._next_server_pid
+        self._server_pids[pid] = _flag_int(shlex.split(command), "--port")
+        self._result_files.setdefault(log_container_path, "")
+        return _FakeResult(stdout=f"{pid}\n")
+
+
+class _StartupEvidenceFailure(_FakeContainer):
+    def __init__(self, cstar_by_candidate: dict[str, int], label: str) -> None:
+        super().__init__(cstar_by_candidate)
+        self.label = label
+
+    def exec_detached(self, command: str, log_container_path: str, *, timeout=None):
+        self.launched_cmds.append(command)
+        self._record_launch_port(command)
+        self.alive = False
+        self._result_files[log_container_path] = f"RuntimeError: {self.label}\n"
+        return _FakeResult(1, "", self.label)
+
+
+class _MixedReadinessFailures(_FakeContainer):
+    """Two real startup deaths, then one typed transport observation, then ready."""
+
+    def __init__(self, cstar_by_candidate: dict[str, int], observation: str) -> None:
+        super().__init__(cstar_by_candidate)
+        self.observation = observation
+        self.launch_attempt = 0
+        self.pid_attempt: dict[int, int] = {}
+
+    def start_server_monitored(
+        self, command, log_path, pid_path, *, timeout=None
+    ) -> _FakeResult:
+        self.launch_attempt += 1
+        if self.launch_attempt == 3 and self.observation == "launch":
+            self.launched_cmds.append(command)
+            self._result_files[log_path] = ""
+            return _FakeResult(
+                255,
+                "",
+                "ssh connection lost during launch",
+                failure_kind=CommandFailureKind.TRANSPORT,
+            )
+        result = super().start_server_monitored(
+            command, log_path, pid_path, timeout=timeout
+        )
+        if result.ok:
+            self.pid_attempt[int(result.stdout.strip())] = self.launch_attempt
+        return result
+
+    def process_state(self, pid: int, *, timeout=None) -> _FakeResult:
+        attempt = self.pid_attempt[pid]
+        if attempt <= 2:
+            return _FakeResult(0, "MISSING\n", "")
+        if attempt == 3 and self.observation == "process":
+            return _FakeResult(
+                255,
+                "",
+                "ssh connection lost during process probe",
+                failure_kind=CommandFailureKind.TRANSPORT,
+            )
+        return super().process_state(pid, timeout=timeout)
+
+    def exec(self, command: str, *, timeout=None) -> _FakeResult:
+        if self.launch_attempt == 3 and self.observation == "health" and "/health" in command:
+            return _FakeResult(
+                255,
+                "",
+                "ssh connection lost during health probe",
+                failure_kind=CommandFailureKind.TRANSPORT,
+            )
+        if (
+            self.launch_attempt == 3
+            and self.observation == "progress"
+            and command.startswith("stat -c ")
+        ):
+            return _FakeResult(
+                255,
+                "",
+                "ssh connection lost during progress probe",
+                failure_kind=CommandFailureKind.TRANSPORT,
+            )
+        return super().exec(command, timeout=timeout)
+
+
+class _SecondaryStartupDeathContainer(_FakeContainer):
+    def exec_detached(self, command: str, log_container_path: str, *, timeout=None):
+        result = super().exec_detached(command, log_container_path, timeout=timeout)
+        port = _flag_int(shlex.split(command), "--port")
+        self._result_files[log_container_path] = (
+            "SECONDARY_ROOT\n" if port == 30001 else "PRIMARY_OK\n"
+        )
+        return result
+
+    def process_state(self, pid: int, *, timeout=None) -> _FakeResult:
+        if self._server_pids[pid] == 30001:
+            return _FakeResult(0, "MISSING\n", "")
+        return super().process_state(pid, timeout=timeout)
+
+
+class _SecondaryRuntimeDeathOnceContainer(_FakeContainer):
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate)
+        self.died = False
+        self.launch_counts: dict[int, int] = {}
+        self.warmup_ports_observed: list[int] = []
+
+    def exec_detached(self, command: str, log_container_path: str, *, timeout=None):
+        result = super().exec_detached(command, log_container_path, timeout=timeout)
+        port = _flag_int(shlex.split(command), "--port")
+        self.launch_counts[port] = self.launch_counts.get(port, 0) + 1
+        if port == 30001:
+            self._result_files[log_container_path] = (
+                '  File "/sglang/srt/layers/attention/triton_backend.py", line 99, '
+                "in _update_target_verify_buffers\n"
+                "custom_mask diagnostic\n"
+                "RuntimeError: expanded size 4 must match existing size 8\n"
+            )
+        return result
+
+    def exec(self, command: str, *, timeout=None) -> _FakeResult:
+        if command == ex.ENGINE_VERSION_COMMAND:
+            return _FakeResult(0, "0.5.16\n", "")
+        return super().exec(command, timeout=timeout)
+
+    def _run_bench(self, command: str) -> _FakeResult:
+        result = super()._run_bench(command)
+        parts = shlex.split(command)
+        port = _flag_int(parts, "--port")
+        out_path = _flag_str(parts, "--output-file")
+        name = Path(out_path).name
+        if "repeat-1" in name:
+            self.warmup_ports_observed.append(port)
+        elif "r2_" in name and port == 30001 and not self.died:
+            self.died = True
+            with self._server_lock:
+                self._alive_ports.discard(port)
+        return result
+
+
+class _SecondaryRecoveryStartupDeathContainer(_FakeContainer):
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate)
+        self.launch_counts: dict[int, int] = {}
+        self.transport_triggered = False
+        self.transport_pids: set[int] = set()
+
+    def exec_detached(self, command: str, log_container_path: str, *, timeout=None):
+        result = super().exec_detached(command, log_container_path, timeout=timeout)
+        port = _flag_int(shlex.split(command), "--port")
+        self.launch_counts[port] = self.launch_counts.get(port, 0) + 1
+        self._result_files[log_container_path] = (
+            "RuntimeError: SECONDARY_RECOVERY_ROOT\n"
+            if port == 30001 and self.launch_counts[port] >= 2
+            else "PRIMARY_OK\n"
+        )
+        return result
+
+    def process_state(self, pid: int, *, timeout=None) -> _FakeResult:
+        port = self._server_pids[pid]
+        if port == 30001 and self.launch_counts.get(port, 0) >= 2:
+            return _FakeResult(0, "MISSING\n", "")
+        return super().process_state(pid, timeout=timeout)
+
+    def start_monitored(
+        self, command, log_path, status_path, pid_path, *, timeout=None
+    ) -> _FakeResult:
+        result = super().start_monitored(
+            command, log_path, status_path, pid_path, timeout=timeout
+        )
+        parts = shlex.split(command)
+        out_path = _flag_str(parts, "--output-file")
+        if (
+            not self.transport_triggered
+            and "r2_" in Path(out_path).name
+            and "repeat-1" not in Path(out_path).name
+            and _flag_int(parts, "--port") == 30000
+        ):
+            self.transport_triggered = True
+            self.transport_pids.add(int(result.stdout.strip()))
+        return result
+
+    def monitored_state(self, pid: int, status_path: str, *, timeout=None) -> _FakeResult:
+        if pid in self.transport_pids:
+            self.transport_pids.remove(pid)
+            return _FakeResult(
+                255,
+                "",
+                "ssh connection lost",
+                failure_kind=CommandFailureKind.TRANSPORT,
+            )
+        return super().monitored_state(pid, status_path, timeout=timeout)
+
+
+class _SecondaryRaisesWhilePrimaryMonitored(_FakeContainer):
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate)
+        self._alive_ports.update({30000, 30001})
+        self.cancelled_pids: set[int] = set()
+        self.peer_signals: list[tuple[int, str]] = []
+        self.progress_tick = 0
+
+    def exec(self, command: str, *, timeout=None) -> _FakeResult:
+        if command.startswith("rm -f -- ") and "replica1" in command:
+            raise RuntimeError("SECONDARY_EXCEPTION")
+        return super().exec(command, timeout=timeout)
+
+    def monitored_state(self, pid: int, status_path: str, *, timeout=None) -> _FakeResult:
+        if pid in self._monitored and pid not in self.cancelled_pids:
+            return _FakeResult(0, "RUNNING\n", "")
+        return super().monitored_state(pid, status_path, timeout=timeout)
+
+    def file_progress(self, paths, *, timeout=None) -> _FakeResult:
+        del timeout
+        self.progress_tick += 1
+        return _FakeResult(
+            0,
+            json.dumps({path: str(self.progress_tick) for path in paths}),
+            "",
+        )
+
+    def process_group_state(self, pid: int, *, timeout=None) -> _FakeResult:
+        if pid in self._monitored:
+            return _FakeResult(
+                0,
+                "MISSING\n" if pid in self.cancelled_pids else "RUNNING\n",
+                "",
+            )
+        return super().process_group_state(pid, timeout=timeout)
+
+    def signal_process_group(self, pid: int, signal_name: str, *, timeout=None):
+        if pid in self._monitored:
+            self.peer_signals.append((pid, signal_name))
+            self.cancelled_pids.add(pid)
+            return _FakeResult()
+        return super().signal_process_group(pid, signal_name, timeout=timeout)
+
+
+class _SecondaryFinishesThenServerDies(_FakeContainer):
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate)
+        self._alive_ports.update({30000, 30001})
+        self._thread_state = threading.local()
+        self.primary_pids: set[int] = set()
+        self.cancelled_pids: set[int] = set()
+        self.progress_tick = 0
+        self.health_many_calls = 0
+
+    def start_monitored(
+        self, command, log_path, status_path, pid_path, *, timeout=None
+    ) -> _FakeResult:
+        result = super().start_monitored(
+            command, log_path, status_path, pid_path, timeout=timeout
+        )
+        if _flag_int(shlex.split(command), "--port") == 30000:
+            self.primary_pids.add(int(result.stdout.strip()))
+        return result
+
+    def monitored_state(self, pid: int, status_path: str, *, timeout=None) -> _FakeResult:
+        if pid in self.primary_pids and pid not in self.cancelled_pids:
+            return _FakeResult(0, "RUNNING\n", "")
+        if pid not in self.primary_pids:
+            self._thread_state.secondary_finished = True
+        return super().monitored_state(pid, status_path, timeout=timeout)
+
+    def health(self, port: int, *, timeout=None) -> _FakeResult:
+        if port == 30001 and getattr(self._thread_state, "secondary_finished", False):
+            self._thread_state.secondary_finished = False
+            with self._server_lock:
+                self._alive_ports.discard(30001)
+            return _FakeResult(0, "ok\n", "")
+        return super().health(port, timeout=timeout)
+
+    def health_many(self, ports, *, timeout=None) -> _FakeResult:
+        self.health_many_calls += 1
+        return super().health_many(ports, timeout=timeout)
+
+    def file_progress(self, paths, *, timeout=None) -> _FakeResult:
+        self.progress_tick += 1
+        return _FakeResult(
+            0, json.dumps({path: str(self.progress_tick) for path in paths}), ""
+        )
+
+    def process_group_state(self, pid: int, *, timeout=None) -> _FakeResult:
+        if pid in self.primary_pids:
+            return _FakeResult(
+                0, "MISSING\n" if pid in self.cancelled_pids else "RUNNING\n", ""
+            )
+        return super().process_group_state(pid, timeout=timeout)
+
+    def signal_process_group(self, pid: int, signal_name: str, *, timeout=None):
+        if pid in self.primary_pids:
+            self.cancelled_pids.add(pid)
+            return _FakeResult()
+        return super().signal_process_group(pid, signal_name, timeout=timeout)
 
 
 class _FlakyContainerStart(_FakeContainer):
@@ -344,6 +765,40 @@ class _FlakyContainerStart(_FakeContainer):
         self.container_running = False
         self.container_exists = False
         return _FakeResult()
+
+
+class _MixedContainerStartFailures(_FakeContainer):
+    def __init__(self, cstar_by_candidate: dict[str, int], observation: str) -> None:
+        super().__init__(cstar_by_candidate)
+        self.observation = observation
+        self.start_calls = 0
+
+    def start(self, *, timeout=None) -> _FakeResult:
+        self.start_calls += 1
+        if self.start_calls <= 2:
+            self.container_exists = False
+            return _FakeResult(125, "", "synthetic docker startup failure")
+        if self.start_calls == 3 and self.observation == "start":
+            self.container_exists = False
+            return _FakeResult(
+                255,
+                "",
+                "ssh connection lost during docker run",
+                failure_kind=CommandFailureKind.TRANSPORT,
+            )
+        self.container_exists = True
+        return _FakeResult()
+
+    def running_state(self, *, timeout=None) -> _FakeResult:
+        del timeout
+        if self.start_calls == 3 and self.observation == "is_running":
+            return _FakeResult(
+                255,
+                "",
+                "ssh connection lost during docker inspect",
+                failure_kind=CommandFailureKind.TRANSPORT,
+            )
+        return _FakeResult(0, "true\n", "")
 
 
 class _BatchStopFailureContainer(_FakeContainer):
@@ -380,6 +835,33 @@ class _ServerCleanupFailureContainer(_FakeContainer):
         if command == f"pkill -TERM -f {shlex.quote(ex.SERVER_PROCESS_PATTERN)}":
             return _FakeResult(returncode=2, stderr="synthetic pkill failure")
         return super().exec(command, timeout=timeout)
+
+
+class _ServerCleanupExceptionContainer(_FakeContainer):
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate)
+        self.start_calls = 0
+        self.raised_cleanup = False
+
+    def start(self, *, timeout=None) -> _FakeResult:
+        self.start_calls += 1
+        return super().start(timeout=timeout)
+
+    def monitored_pid(self, pid_path: str, *, timeout=None) -> _FakeResult:
+        if "server_" in pid_path and not self.raised_cleanup:
+            self.raised_cleanup = True
+            raise RuntimeError("synthetic server cleanup observation error")
+        return super().monitored_pid(pid_path, timeout=timeout)
+
+
+class _StartCountingContainer(_FakeContainer):
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate)
+        self.start_calls = 0
+
+    def start(self, *, timeout=None) -> _FakeResult:
+        self.start_calls += 1
+        return super().start(timeout=timeout)
 
 
 class _MissingOnFailedStartContainer(_FakeContainer):
@@ -483,6 +965,223 @@ class _RequiresKillServerContainer(_DelayedTermExitContainer):
         if command == f"pgrep -f {self._pattern}" and self.cleanup_active:
             return _FakeResult(0 if self.alive else 1)
         return super().exec(command, timeout=timeout)
+
+    def signal_process_group(self, pid: int, signal_name: str, *, timeout=None):
+        del timeout
+        if pid not in self._server_pids:
+            return super().signal_process_group(pid, signal_name)
+        if signal_name == "TERM":
+            self.term_calls += 1
+            return _FakeResult()
+        self.kill_calls += 1
+        port = self._server_pids[pid]
+        with self._server_lock:
+            self._alive_ports.discard(port)
+        return _FakeResult()
+
+
+class _InterruptBeforeContainerPostcheck(_FakeContainer):
+    """The remote run created the container, then interruption wins the next edge."""
+
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate)
+        self.remove_calls = 0
+
+    def is_running(self, *, timeout=None) -> bool:
+        raise LifecycleInterrupted(signal.SIGINT)
+
+    def remove(self, *, force: bool = True, timeout=None) -> _FakeResult:
+        self.remove_calls += 1
+        return super().remove(force=force, timeout=timeout)
+
+
+class _InterruptDuringServerStart(_FakeContainer):
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate)
+        self.events: list[str] = []
+
+    def start_server_monitored(
+        self, command, log_path, pid_path, *, timeout=None
+    ) -> _FakeResult:
+        super().start_server_monitored(command, log_path, pid_path, timeout=timeout)
+        os.kill(os.getpid(), signal.SIGTERM)
+        raise AssertionError("SIGTERM handler did not interrupt server starter")
+
+    def signal_process_group(self, pid: int, signal_name: str, *, timeout=None):
+        self.events.append(f"server-{signal_name}")
+        return super().signal_process_group(pid, signal_name, timeout=timeout)
+
+    def stop(self, *, timeout=None) -> _FakeResult:
+        self.events.append("container-stop")
+        return super().stop(timeout=timeout)
+
+    def remove(self, *, force: bool = True, timeout=None) -> _FakeResult:
+        self.events.append("container-remove")
+        return super().remove(force=force, timeout=timeout)
+
+
+class _TrackedContainer(_FakeContainer):
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate)
+        self.remove_calls = 0
+
+    def remove(self, *, force: bool = True, timeout=None) -> _FakeResult:
+        self.remove_calls += 1
+        return super().remove(force=force, timeout=timeout)
+
+
+class _RuntimeDeathOnceContainer(_FakeContainer):
+    def __init__(self, cstar_by_candidate: dict[str, int], *, death_c: int) -> None:
+        super().__init__(cstar_by_candidate)
+        self.death_c = death_c
+        self.died = False
+        self.server_launches = 0
+
+    def exec_detached(self, command: str, log_container_path: str, *, timeout=None):
+        self.server_launches += 1
+        return super().exec_detached(command, log_container_path, timeout=timeout)
+
+    def _run_bench(self, command: str) -> _FakeResult:
+        result = super()._run_bench(command)
+        parts = shlex.split(command)
+        out_path = _flag_str(parts, "--output-file")
+        concurrency = _flag_int(parts, "--max-concurrency")
+        if (
+            concurrency == self.death_c
+            and "repeat-1" not in Path(out_path).name
+            and not self.died
+        ):
+            self.died = True
+            self.alive = False
+        return result
+
+
+class _MonitorTransportFailures(_FakeContainer):
+    def __init__(self, cstar_by_candidate: dict[str, int], *, failures: int) -> None:
+        super().__init__(cstar_by_candidate)
+        self.failures_remaining = failures
+        self.transport_pids: set[int] = set()
+
+    def start_monitored(
+        self, command, log_path, status_path, pid_path, *, timeout=None
+    ) -> _FakeResult:
+        result = super().start_monitored(
+            command, log_path, status_path, pid_path, timeout=timeout
+        )
+        out_path = _flag_str(shlex.split(command), "--output-file")
+        if self.failures_remaining > 0 and "repeat-1" not in Path(out_path).name:
+            self.failures_remaining -= 1
+            self.transport_pids.add(int(result.stdout.strip()))
+        return result
+
+    def monitored_state(self, pid: int, status_path: str, *, timeout=None) -> _FakeResult:
+        if pid in self.transport_pids:
+            self.transport_pids.remove(pid)
+            return _FakeResult(
+                255,
+                "",
+                "ssh connection lost",
+                failure_kind=CommandFailureKind.TRANSPORT,
+            )
+        return super().monitored_state(pid, status_path, timeout=timeout)
+
+
+class _InvalidResultFailures(_FakeContainer):
+    def __init__(self, cstar_by_candidate: dict[str, int], *, failures: int) -> None:
+        super().__init__(cstar_by_candidate)
+        self.failures_remaining = failures
+
+    def _run_bench(self, command: str) -> _FakeResult:
+        result = super()._run_bench(command)
+        out_path = _flag_str(shlex.split(command), "--output-file")
+        if self.failures_remaining > 0 and "repeat-1" not in Path(out_path).name:
+            self.failures_remaining -= 1
+            self._result_files[out_path] = '{"max_concurrency": "wrong"}'
+        return result
+
+
+class _CandidateScopedInvalidExhaustion(_FakeContainer):
+    def _run_bench(self, command: str) -> _FakeResult:
+        result = super()._run_bench(command)
+        out_path = _flag_str(shlex.split(command), "--output-file")
+        if Path(out_path).parent.name == "broken" and "repeat-1" not in Path(out_path).name:
+            self._result_files[out_path] = '{"max_concurrency": "wrong"}'
+        return result
+
+
+class _MixedProbeFailures(_MonitorTransportFailures):
+    """One same-C probe fails once in each typed infrastructure category."""
+
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate, failures=0)
+        self.probe_attempt = 0
+
+    def start_monitored(
+        self, command, log_path, status_path, pid_path, *, timeout=None
+    ) -> _FakeResult:
+        result = super().start_monitored(
+            command, log_path, status_path, pid_path, timeout=timeout
+        )
+        out_path = _flag_str(shlex.split(command), "--output-file")
+        if "repeat-1" in Path(out_path).name:
+            return result
+        self.probe_attempt += 1
+        pid = int(result.stdout.strip())
+        if self.probe_attempt == 1:
+            self.transport_pids.add(pid)
+        elif self.probe_attempt == 2:
+            self._monitored[pid] = 2
+        elif self.probe_attempt == 3:
+            self._result_files[out_path] = '{"max_concurrency": "wrong"}'
+        return result
+
+
+class _TransportThenMonitorException(_MonitorTransportFailures):
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate, failures=0)
+        self.probe_attempt = 0
+        self.exception_pids: set[int] = set()
+
+    def start_monitored(
+        self, command, log_path, status_path, pid_path, *, timeout=None
+    ) -> _FakeResult:
+        result = super().start_monitored(
+            command, log_path, status_path, pid_path, timeout=timeout
+        )
+        out_path = _flag_str(shlex.split(command), "--output-file")
+        if "repeat-1" in Path(out_path).name:
+            return result
+        self.probe_attempt += 1
+        pid = int(result.stdout.strip())
+        if self.probe_attempt == 1:
+            self.transport_pids.add(pid)
+        elif self.probe_attempt == 2:
+            self.exception_pids.add(pid)
+        return result
+
+    def monitored_state(self, pid: int, status_path: str, *, timeout=None) -> _FakeResult:
+        if pid in self.exception_pids:
+            self.exception_pids.remove(pid)
+            raise RuntimeError("synthetic monitor boom")
+        return super().monitored_state(pid, status_path, timeout=timeout)
+
+
+class _WarmupTransportOnce(_MonitorTransportFailures):
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate, failures=0)
+        self.failed_warmup = False
+
+    def start_monitored(
+        self, command, log_path, status_path, pid_path, *, timeout=None
+    ) -> _FakeResult:
+        result = super().start_monitored(
+            command, log_path, status_path, pid_path, timeout=timeout
+        )
+        out_path = _flag_str(shlex.split(command), "--output-file")
+        if "repeat-1" in Path(out_path).name and not self.failed_warmup:
+            self.failed_warmup = True
+            self.transport_pids.add(int(result.stdout.strip()))
+        return result
 
 
 def _flag_int(parts: list[str], flag: str) -> int:
@@ -971,6 +1670,191 @@ def test_round2_fill_host_tp3_uses_only_numa_local_replicas(
     }
 
 
+def test_repeated_initial_startup_failures_preserve_unique_local_logs(
+    tmp_path, workloads_output_len
+):
+    config = _lifecycle_test_config(tmp_path, "startup-evidence")
+    original_container = ex.Container
+    try:
+        first = _StartupEvidenceFailure({"startup-evidence": 2}, "FIRST_RUN_ROOT")
+        ex.Container = lambda _remote, _cfg: first
+        run_executor(config, remote=_FakeRemote())
+        candidate_dir = config.results_dir / "startup-evidence"
+        first_paths = set(
+            candidate_dir.glob(
+                "server_r*_startup*_replica0_port30000_*.log"
+            )
+        )
+        assert first_paths
+        assert all("FIRST_RUN_ROOT" in path.read_text() for path in first_paths)
+
+        second = _StartupEvidenceFailure({"startup-evidence": 2}, "SECOND_RUN_ROOT")
+        ex.Container = lambda _remote, _cfg: second
+        run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    all_paths = set(
+        (config.results_dir / "startup-evidence").glob(
+            "server_r*_startup*_replica0_port30000_*.log"
+        )
+    )
+    assert first_paths < all_paths
+    assert all("FIRST_RUN_ROOT" in path.read_text() for path in first_paths)
+    assert any(
+        "SECOND_RUN_ROOT" in path.read_text() for path in all_paths - first_paths
+    )
+
+
+def test_fill_host_secondary_startup_death_records_its_port_and_log_root(
+    tmp_path, workloads_output_len
+):
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path),
+        configs_path=_write_configs_with_params(
+            tmp_path, {"secondary-startup": {"tp_size": 4}}
+        ),
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=1,
+        max_cap=8,
+        fill_host=True,
+        startup_max_attempts=3,
+    )
+    container = _SecondaryStartupDeathContainer({"secondary-startup": 4})
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    row = summary["candidate_results"][0]
+    secondary_failures = [
+        failure
+        for failure in row["failures"]
+        if failure.get("round") == 2 and failure.get("replica_index") == 1
+    ]
+    assert secondary_failures
+    assert all(failure["port"] == 30001 for failure in secondary_failures)
+    assert all("SECONDARY_ROOT" in failure["reason"] for failure in secondary_failures)
+    assert all("PRIMARY_OK" not in failure["reason"] for failure in secondary_failures)
+
+
+def test_fill_host_secondary_runtime_death_restarts_and_rewarms_every_replica(
+    tmp_path, workloads_output_len
+):
+    configs = _write_configs_with_params(
+        tmp_path,
+        {
+            "secondary-runtime": {
+                "tp_size": 4,
+                "attention_backend": "triton",
+                "speculative_algorithm": "EAGLE",
+            }
+        },
+    )
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path),
+        configs_path=configs,
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=1,
+        max_cap=8,
+        fill_host=True,
+    )
+    container = _SecondaryRuntimeDeathOnceContainer({"secondary-runtime": 4})
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    row = summary["candidate_results"][0]
+    runtime_failures = [
+        failure for failure in row["failures"] if failure["status"] == "runtime_failed"
+    ]
+    assert runtime_failures
+    assert runtime_failures[0]["known_issue"] is not None
+    assert runtime_failures[0]["replica_index"] == 1
+    assert runtime_failures[0]["port"] == 30001
+    assert container.launch_counts[30000] >= 3  # r1, r2, whole-group recovery
+    assert container.launch_counts[30001] >= 2  # r2 and whole-group recovery
+    assert container.warmup_ports_observed.count(30000) >= 2
+    assert container.warmup_ports_observed.count(30001) >= 2
+    assert [
+        port
+        for candidate, concurrency, port in container.bench_ports
+        if candidate == "secondary-runtime" and concurrency == 1 and port == 30001
+    ].count(30001) >= 2
+    assert all(
+        point["status"] in {"ok", "sla_failed"}
+        for point in row["concurrency_points"]
+    )
+
+
+def test_secondary_recovery_startup_failure_preserves_replica_log_and_zero_budget(
+    tmp_path, workloads_output_len
+):
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path),
+        configs_path=_write_configs_with_params(
+            tmp_path, {"secondary-recovery": {"tp_size": 4}}
+        ),
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=1,
+        max_cap=8,
+        fill_host=True,
+    )
+    container = _SecondaryRecoveryStartupDeathContainer(
+        {"secondary-recovery": 4}
+    )
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    row = summary["candidate_results"][0]
+    recovery_failures = [
+        failure
+        for failure in row["failures"]
+        if failure.get("stage") == "probe_recovery"
+        and failure.get("status") == "startup_failed"
+    ]
+    assert recovery_failures
+    assert all(failure["replica_index"] == 1 for failure in recovery_failures)
+    assert all(failure["port"] == 30001 for failure in recovery_failures)
+    assert all(
+        "SECONDARY_RECOVERY_ROOT" in failure["reason"]
+        for failure in recovery_failures
+    )
+    assert row["round2"]["num_evals"] == 0
+    assert row["round2"]["newly_probed"] == []
+    preserved_logs = list(
+        (tmp_path / "results" / "secondary-recovery").glob(
+            "server_r2_c*_repeat*_recovery*_replica1_*.log"
+        )
+    )
+    assert preserved_logs
+    assert all("SECONDARY_RECOVERY_ROOT" in path.read_text() for path in preserved_logs)
+
+
 def test_explicit_cross_numa_target_allows_tp8_on_dual_numa_host(
     tmp_path, workloads_output_len
 ):
@@ -1394,6 +2278,41 @@ def test_server_startup_retries_then_completes(tmp_path, workloads_output_len):
     assert all(failure["round"] == 1 for failure in row["failures"])
 
 
+@pytest.mark.parametrize("observation", ["launch", "process", "health", "progress"])
+def test_readiness_transport_has_independent_budget_after_two_startup_deaths(
+    tmp_path, workloads_output_len, observation
+):
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path),
+        configs_path=_write_configs(tmp_path, ["typed-readiness"]),
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=1,
+        max_cap=8,
+        startup_max_attempts=3,
+        startup_hard_timeout_s=0,
+        startup_stall_timeout_s=0,
+    )
+    container = _MixedReadinessFailures({"typed-readiness": 4}, observation)
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    row = summary["candidate_results"][0]
+    assert summary["task_status"] == "COMPLETED"
+    statuses = [failure["status"] for failure in row["failures"]]
+    assert statuses.count("startup_failed") >= 2
+    assert "transport_failed" in statuses
+    assert container.launch_attempt >= 4
+
+
 def test_container_or_ssh_startup_failure_recreates_and_retries(
     tmp_path, workloads_output_len
 ):
@@ -1425,6 +2344,28 @@ def test_container_or_ssh_startup_failure_recreates_and_retries(
     assert row["attempts"] == 4
     assert len(row["failures"]) == 2
     assert all("ssh connection lost" in failure["reason"] for failure in row["failures"])
+
+
+@pytest.mark.parametrize("observation", ["start", "is_running"])
+def test_container_transport_has_independent_budget_after_two_startup_failures(
+    tmp_path, workloads_output_len, observation
+):
+    container = _MixedContainerStartFailures({"typed-container": 4}, observation)
+    config = _lifecycle_test_config(tmp_path, "typed-container")
+    config.max_cap = 8
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    row = summary["candidate_results"][0]
+    assert summary["task_status"] == "COMPLETED"
+    statuses = [failure["status"] for failure in row["failures"]]
+    assert statuses.count("startup_failed") >= 2
+    assert "transport_failed" in statuses
+    assert container.start_calls >= 4
 
 
 def test_exhausted_startup_retries_keeps_failed_candidate_row(
@@ -1465,6 +2406,29 @@ def test_exhausted_startup_retries_keeps_failed_candidate_row(
     assert row["failed_num_prompts"] == 0
     assert row["known_issue"] is None
     assert row["failure_reason"]
+
+
+def test_exhausted_container_ssh_retries_keep_transport_terminal_status(
+    tmp_path, workloads_output_len
+):
+    container = _FlakyContainerStart(
+        {"transport-container": 4}, failures_before_ready=99
+    )
+    config = _lifecycle_test_config(tmp_path, "transport-container")
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    row = summary["candidate_results"][0]
+    assert summary["task_status"] == "INCOMPLETE"
+    assert row["round2"]["stop_reason"] == "transport_failed"
+    assert row["failure_status"] == "transport_failed"
+    assert [failure["status"] for failure in row["failures"]].count(
+        "transport_failed"
+    ) >= 3
 
 
 def _lifecycle_test_config(tmp_path: Path, candidate_id: str) -> ExecutorConfig:
@@ -1537,6 +2501,34 @@ def test_server_pkill_failure_aborts_final_ranking(
     finally:
         ex.Container = original_container
 
+    assert not (tmp_path / "results" / "ranking.json").exists()
+
+
+def test_server_cleanup_exception_closes_gate_before_next_round_container_start(
+    tmp_path, workloads_output_len
+):
+    first = _ServerCleanupExceptionContainer({"cleanup-exception": 2})
+    later = _StartCountingContainer({"cleanup-exception": 2})
+    created = 0
+
+    def factory(_remote, _config):
+        nonlocal created
+        created += 1
+        return first if created == 1 else later
+
+    original_container = ex.Container
+    ex.Container = factory
+    try:
+        with pytest.raises(RuntimeError, match="cleanup"):
+            run_executor(
+                _lifecycle_test_config(tmp_path, "cleanup-exception"),
+                remote=_FakeRemote(),
+            )
+    finally:
+        ex.Container = original_container
+
+    assert first.start_calls == 1
+    assert later.start_calls == 0
     assert not (tmp_path / "results" / "ranking.json").exists()
 
 
@@ -1621,6 +2613,478 @@ def test_startup_cleanup_failure_prevents_starting_later_batch_candidates(
     assert first.remove_calls >= 2  # initial cleanup plus best-effort batch cleanup
     assert second.start_calls == 0
     assert not (tmp_path / "results" / "ranking.json").exists()
+
+
+def test_interrupt_after_container_start_before_postcheck_still_removes_it(
+    tmp_path, workloads_output_len
+):
+    container = _InterruptBeforeContainerPostcheck({"critical-window": 2})
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        with pytest.raises(LifecycleInterrupted) as raised:
+            run_executor(
+                _lifecycle_test_config(tmp_path, "critical-window"),
+                remote=_FakeRemote(),
+            )
+    finally:
+        ex.Container = original_container
+
+    assert raised.value.exit_code == 130
+    assert container.remove_calls >= 1
+    assert container.container_exists is False
+    status = json.loads(
+        (tmp_path / "results" / "task_status.json").read_text(encoding="utf-8")
+    )
+    assert status["task_status"] == "INTERRUPTED"
+    assert status["ranking_status"] == "PROVISIONAL"
+
+
+def test_interrupt_during_server_start_cleans_server_before_container(
+    tmp_path, workloads_output_len
+):
+    container = _InterruptDuringServerStart({"server-window": 2})
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        with pytest.raises(LifecycleInterrupted) as raised:
+            run_executor(
+                _lifecycle_test_config(tmp_path, "server-window"),
+                remote=_FakeRemote(),
+            )
+    finally:
+        ex.Container = original_container
+
+    assert raised.value.exit_code == 143
+    assert container.events.index("server-TERM") < container.events.index(
+        "container-stop"
+    )
+    assert container.container_exists is False
+    status = json.loads(
+        (tmp_path / "results" / "task_status.json").read_text(encoding="utf-8")
+    )
+    assert status["task_status"] == "INTERRUPTED"
+    assert status["cleanup_failures"] == []
+
+
+def test_interrupt_on_second_container_cleans_each_preregistered_container(
+    tmp_path, workloads_output_len
+):
+    first = _TrackedContainer({"first": 2})
+    second = _InterruptBeforeContainerPostcheck({"second": 2})
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path, max_candidates=2),
+        configs_path=_write_configs(tmp_path, ["first", "second"]),
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=2,
+    )
+
+    def factory(_remote, container_config):
+        return first if container_config.name.endswith("-first") else second
+
+    original_container = ex.Container
+    ex.Container = factory
+    try:
+        with pytest.raises(LifecycleInterrupted):
+            run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    assert first.remove_calls >= 1
+    assert second.remove_calls >= 1
+    assert first.container_exists is False
+    assert second.container_exists is False
+
+
+def test_runtime_death_restarts_fresh_server_and_retries_same_concurrency(
+    tmp_path, workloads_output_len
+):
+    container = _RuntimeDeathOnceContainer({"recover": 40}, death_c=48)
+    config = _lifecycle_test_config(tmp_path, "recover")
+    config.max_cap = 64
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    row = summary["candidate_results"][0]
+    assert summary["task_status"] == "COMPLETED"
+    assert container.server_launches >= 3  # r1, r2, and fresh recovery group
+    # one failed infrastructure attempt + two valid confirmation samples;
+    # round2 num_evals counts only the two statistical samples.
+    assert [c for _candidate, c, _n in container.bench_calls].count(48) == 3
+    assert any(
+        failure["status"] == "runtime_failed"
+        and failure["concurrency"] == 48
+        for failure in row["failures"]
+    )
+    assert all(
+        point["status"] in {"ok", "sla_failed"}
+        for point in row["concurrency_points"]
+    )
+    assert row["round2"]["c_star"] == 40
+    assert row["round2"]["num_evals"] == 10
+
+
+@pytest.mark.parametrize(
+    ("container", "expected_status"),
+    [
+        (_MonitorTransportFailures({"recover": 4}, failures=1), "transport_failed"),
+        (_InvalidResultFailures({"recover": 4}, failures=1), "invalid_result"),
+    ],
+)
+def test_probe_infrastructure_failure_recovers_without_search_budget_charge(
+    tmp_path, workloads_output_len, container, expected_status
+):
+    config = _lifecycle_test_config(tmp_path, "recover")
+    config.max_cap = 8
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    row = summary["candidate_results"][0]
+    assert summary["task_status"] == "COMPLETED"
+    assert any(failure["status"] == expected_status for failure in row["failures"])
+    assert all(
+        point["status"] in {"ok", "sla_failed"}
+        for point in row["concurrency_points"]
+    )
+
+
+def test_per_status_recovery_budget_allows_transport_benchmark_invalid_then_ok(
+    tmp_path, workloads_output_len
+):
+    container = _MixedProbeFailures({"mixed": 4})
+    config = _lifecycle_test_config(tmp_path, "mixed")
+    config.max_cap = 8
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    row = summary["candidate_results"][0]
+    assert summary["task_status"] == "COMPLETED"
+    assert {
+        failure["status"] for failure in row["failures"]
+    } >= {"transport_failed", "benchmark_failed", "invalid_result"}
+    assert all(
+        point["status"] in {"ok", "sla_failed"}
+        for point in row["concurrency_points"]
+    )
+
+
+def test_monitor_exception_after_transport_is_retried_and_kept_as_evidence(
+    tmp_path, workloads_output_len
+):
+    container = _TransportThenMonitorException({"monitor-boom": 4})
+    config = _lifecycle_test_config(tmp_path, "monitor-boom")
+    config.max_cap = 8
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    row = summary["candidate_results"][0]
+    assert summary["task_status"] == "COMPLETED"
+    assert any(failure["status"] == "transport_failed" for failure in row["failures"])
+    assert any(
+        failure["status"] == "benchmark_failed"
+        and "synthetic monitor boom" in (failure["reason"] or "")
+        for failure in row["failures"]
+    )
+    assert all(
+        point["status"] in {"ok", "sla_failed"}
+        for point in row["concurrency_points"]
+    )
+
+
+def test_artifact_repeat_increments_per_logical_sample_not_infra_recovery(
+    tmp_path, workloads_output_len
+):
+    container = _MixedProbeFailures({"mixed": 4})
+    config = _lifecycle_test_config(tmp_path, "mixed")
+    config.max_cap = 8
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    names = {Path(path).name for path in container._result_files}
+    first_probe = {name for name in names if "r1_c1_repeat0_" in name}
+    assert any("recovery0_" in name for name in first_probe)
+    assert any("recovery1_" in name for name in first_probe)
+    assert any("recovery2_" in name for name in first_probe)
+    assert any("recovery3_" in name for name in first_probe)
+    # At least one round-2 confirmation is a second logical statistical
+    # sample.  Its retry identity restarts independently at recovery0.
+    assert any("_repeat1_recovery0_" in name for name in names)
+
+
+def test_replica_aggregate_prefers_non_peer_root_for_equal_failure_status():
+    peer = ex._probe_failure_result(
+        "full",
+        "benchmark cancelled by peer replica infrastructure failure",
+        status=ex.ProbeStatus.BENCHMARK_FAILED,
+        tp_size=4,
+        concurrency=8,
+        num_prompts=32,
+    )
+    root = ex._probe_failure_result(
+        "full",
+        "bench exit 2 on replica 1",
+        status=ex.ProbeStatus.BENCHMARK_FAILED,
+        tp_size=4,
+        concurrency=8,
+        num_prompts=32,
+    )
+
+    for replicas in ([peer, root], [root, peer]):
+        aggregate = ex._aggregate_replicas(replicas, expected=2)
+        assert aggregate.status == ex.ProbeStatus.BENCHMARK_FAILED
+        assert "bench exit 2" in (aggregate.failure_reason or "")
+
+
+def test_replica_aggregate_preserves_secondary_runtime_root_and_known_issue():
+    peer = ex._probe_failure_result(
+        "full",
+        "benchmark cancelled by peer replica infrastructure failure",
+        status=ex.ProbeStatus.BENCHMARK_FAILED,
+        tp_size=4,
+        concurrency=8,
+        num_prompts=32,
+    )
+    secondary = ex._probe_failure_result(
+        "full",
+        "secondary server died",
+        status=ex.ProbeStatus.RUNTIME_FAILED,
+        tp_size=4,
+        concurrency=8,
+        num_prompts=32,
+        known_issue="known-secondary-runtime",
+    )
+
+    aggregate = ex._aggregate_replicas([peer, secondary], expected=2)
+
+    assert aggregate.status == ex.ProbeStatus.RUNTIME_FAILED
+    assert aggregate.known_issue == "known-secondary-runtime"
+    assert "secondary server died" in (aggregate.failure_reason or "")
+
+
+def test_secondary_exception_cancels_progressing_primary_without_threadpool_hang(
+    tmp_path, workloads_output_len
+):
+    config = _lifecycle_test_config(tmp_path, "peer-exception")
+    job = ex._load_job(config.job_path)
+    container = _SecondaryRaisesWhilePrimaryMonitored({"peer-exception": 4})
+    lifecycle = ExecutorLifecycle(config.results_dir, job_id=job.job_id)
+    candidate_dir = config.results_dir / "peer-exception"
+    candidate_dir.mkdir(parents=True)
+
+    with lifecycle:
+        context = ex._CandidateContext(
+            container=container,
+            config=config,
+            job=job,
+            bench_template=(
+                "python -m sglang.bench_serving --max-concurrency 1 --num-prompts 4 "
+                "--host ${BENCHMARK_HOST} --port ${BENCHMARK_PORT} "
+                "--model ${MODEL_PATH}"
+            ),
+            multiplier=4,
+            outputs_container_path="/workspace/outputs",
+            port=30000,
+            lifecycle=lifecycle,
+        )
+        evaluate, _warmup = ex._make_evaluate(
+            context,
+            "peer-exception",
+            candidate_dir,
+            tp_size=4,
+            ports=[30000, 30001],
+            output_len=workloads_output_len,
+            round_label="r2",
+        )
+        started = time.monotonic()
+        result = evaluate(1)
+        elapsed = time.monotonic() - started
+
+    assert elapsed < 3
+    assert result.status == ex.ProbeStatus.BENCHMARK_FAILED
+    assert "SECONDARY_EXCEPTION" in (result.failure_reason or "")
+    assert result.raw["replica_index"] == 1
+    assert result.raw["port"] == 30001
+    assert any(signal_name == "TERM" for _pid, signal_name in container.peer_signals)
+
+
+def test_completed_secondary_server_death_is_seen_by_primary_monitor(
+    tmp_path, workloads_output_len
+):
+    config = _lifecycle_test_config(tmp_path, "all-port-health")
+    job = ex._load_job(config.job_path)
+    container = _SecondaryFinishesThenServerDies({"all-port-health": 4})
+    secondary_log = "/workspace/outputs/all-port-health/server-secondary.log"
+    container._result_files[secondary_log] = (
+        '  File "/sglang/srt/layers/attention/triton_backend.py", line 99, '
+        "in _update_target_verify_buffers\ncustom_mask diagnostic\n"
+        "RuntimeError: expanded size 4 must match existing size 8\n"
+    )
+    lifecycle = ExecutorLifecycle(config.results_dir, job_id=job.job_id)
+    candidate_dir = config.results_dir / "all-port-health"
+    candidate_dir.mkdir(parents=True)
+
+    with lifecycle:
+        context = ex._CandidateContext(
+            container=container,
+            config=config,
+            job=job,
+            bench_template=(
+                "python -m sglang.bench_serving --max-concurrency 1 --num-prompts 4 "
+                "--host ${BENCHMARK_HOST} --port ${BENCHMARK_PORT} "
+                "--model ${MODEL_PATH}"
+            ),
+            multiplier=4,
+            outputs_container_path="/workspace/outputs",
+            port=30000,
+            lifecycle=lifecycle,
+            engine_version="0.5.16",
+            replica_server_logs={1: secondary_log},
+        )
+        evaluate, _warmup = ex._make_evaluate(
+            context,
+            "all-port-health",
+            candidate_dir,
+            tp_size=4,
+            ports=[30000, 30001],
+            output_len=workloads_output_len,
+            round_label="r2",
+            candidate={
+                "params": {
+                    "attention_backend": "triton",
+                    "speculative_algorithm": "EAGLE",
+                }
+            },
+        )
+        result = evaluate(1)
+
+    assert result.status == ex.ProbeStatus.RUNTIME_FAILED
+    assert result.raw["replica_index"] == 1
+    assert result.raw["port"] == 30001
+    assert result.known_issue is not None
+    assert 1 <= container.health_many_calls <= 3
+
+
+def test_exhausted_invalid_result_recovery_is_unknown_and_spends_zero_search_evals(
+    tmp_path, workloads_output_len
+):
+    container = _InvalidResultFailures({"broken": 4}, failures=99)
+    config = _lifecycle_test_config(tmp_path, "broken")
+    config.max_cap = 8
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    row = summary["candidate_results"][0]
+    assert summary["task_status"] == "INCOMPLETE"
+    assert row["round2"]["certainty"] == "unknown"
+    assert row["round2"]["num_evals"] == 0
+    assert row["round2"]["newly_probed"] == []
+    invalid_failures = [
+        failure for failure in row["failures"] if failure["status"] == "invalid_result"
+    ]
+    assert {
+        round_number: len(
+            [failure for failure in invalid_failures if failure["round"] == round_number]
+        )
+        for round_number in (1, 2)
+    } == {1: 3, 2: 3}
+    assert len(container.bench_calls) == 6
+    assert row["concurrency_points"] == []
+
+
+def test_exhausted_candidate_does_not_block_other_candidate_from_completing(
+    tmp_path, workloads_output_len
+):
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path, max_candidates=2),
+        configs_path=_write_configs_with_params(
+            tmp_path, {"broken": {"tp_size": 8}, "healthy": {"tp_size": 8}}
+        ),
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=2,
+        max_cap=8,
+        allow_cross_numa=True,
+    )
+    container = _CandidateScopedInvalidExhaustion({"broken": 4, "healthy": 4})
+
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    rows = {row["candidate_id"]: row for row in summary["candidate_results"]}
+    assert summary["task_status"] == "INCOMPLETE"
+    assert rows["broken"]["status"] == "incomplete"
+    assert rows["broken"]["round2"]["num_evals"] == 0
+    assert rows["broken"]["round2"]["newly_probed"] == []
+    assert rows["broken"]["concurrency_points"] == []
+    assert len(
+        [
+            failure
+            for failure in rows["broken"]["failures"]
+            if failure["status"] == "invalid_result"
+        ]
+    ) == 6
+    assert rows["healthy"]["status"] == "completed"
+    assert [row["candidate_id"] for row in summary["ranking"]] == ["healthy"]
+
+
+def test_initial_warmup_transport_failure_gets_fresh_server_recovery(
+    tmp_path, workloads_output_len
+):
+    container = _WarmupTransportOnce({"recover": 4})
+    config = _lifecycle_test_config(tmp_path, "recover")
+    config.max_cap = 8
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    row = summary["candidate_results"][0]
+    assert summary["task_status"] == "COMPLETED"
+    assert len(container.launched_cmds) >= 3  # r1 recovery plus fresh r2 server
+    assert any(
+        failure["status"] == "transport_failed"
+        and failure["stage"] == "probe_recovery"
+        for failure in row["failures"]
+    )
 
 
 def test_server_process_pattern_avoids_self_match_and_finds_real_target():
@@ -1740,6 +3204,10 @@ def test_server_cleanup_allows_bounded_delayed_exit_after_term(
 def test_server_cleanup_escalates_to_kill_then_proves_absence(
     tmp_path, workloads_output_len, monkeypatch
 ):
+    # The fake never advances wall clock while TERM is ignored.  Exercise the
+    # escalation protocol without paying the production ten-second grace; a
+    # real process-group test covers the bounded grace separately.
+    monkeypatch.setattr(ex, "PROCESS_TERMINATE_GRACE_S", 0)
     monkeypatch.setattr(ex, "SERVER_CLEANUP_TERM_POLL_ATTEMPTS", 3)
     monkeypatch.setattr(ex, "SERVER_CLEANUP_TERM_POLL_INTERVAL_S", 0)
     container = _RequiresKillServerContainer({"requires-kill": 2})
