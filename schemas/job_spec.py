@@ -1,14 +1,27 @@
 """Input contract for one llm-infer-tuner tuning job."""
 
-from typing import Annotated, Literal
+import math
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-Identifier = Annotated[str, Field(min_length=1, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")]
+Identifier = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    ),
+]
 
 
 class StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        allow_inf_nan=False,
+        str_strip_whitespace=True,
+    )
 
 
 class SLA(StrictModel):
@@ -22,7 +35,28 @@ class BaselineConfig(StrictModel):
     AI will fill in missing params (default_flags, pin flags, etc.)
     and assemble a complete launch command.
     """
-    model_config = ConfigDict(extra="allow", str_strip_whitespace=True)
+    model_config = ConfigDict(
+        extra="allow",
+        strict=True,
+        allow_inf_nan=False,
+        str_strip_whitespace=True,
+    )
+
+    @model_validator(mode="after")
+    def reject_nonfinite_values(self) -> "BaselineConfig":
+        def validate(value: Any) -> None:
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError("baseline values must be finite")
+            if isinstance(value, dict):
+                for nested in value.values():
+                    validate(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    validate(nested)
+
+        for value in (self.model_extra or {}).values():
+            validate(value)
+        return self
 
 
 class SearchBudget(StrictModel):

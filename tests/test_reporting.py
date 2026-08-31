@@ -46,10 +46,10 @@ def test_report_preserves_requested_cache_params_and_shows_forced_effective_stat
     assert rows[0]["requested_params"]["mamba-radix-cache-strategy"] == "extra_buffer"
     assert rows[0]["effective_params"]["disable_radix_cache"] is True
     assert "disable-radix-cache" not in rows[0]["effective_params"]
-    assert rows[0]["effective_params"]["mamba_cache_strategy"] == "inactive"
+    assert rows[0]["effective_params"]["mamba_cache_strategy"] == "inactive(radix_off)"
     preview = render_candidate_preview(rows)[0]
     assert 'requested_params={"disable-radix-cache":false' in preview
     assert (
         'effective_params={"disable_radix_cache":true,'
-        '"mamba_cache_strategy":"inactive"}' in preview
+        '"mamba_cache_strategy":"inactive(radix_off)"}' in preview
     )

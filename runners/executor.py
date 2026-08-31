@@ -34,7 +34,8 @@ from runners.reporting import (
     render_candidate_preview,
     write_reports,
 )
-from schemas.job_spec import JobSpec
+from schemas.candidate_spec import CandidateSet
+from schemas.job_spec import JobSpec, SearchBudget
 
 # Round-1 = coarse adaptive expansion over ALL candidates (no bisection); round-2
 # = precise bisection over ALL candidates, reusing round-1 probes as seeds. The two
@@ -131,82 +132,78 @@ def _load_num_prompts_multiplier(method_id: str, *, project_root: Path) -> int:
     return 4
 
 
-def _is_baseline(cand: dict[str, Any]) -> bool:
-    """候选是否为「用户基线复现」——当且仅当 params.is_baseline 为真。
+def _strict_json_load(text: str, *, source: str) -> Any:
+    """Decode JSON while rejecting duplicate keys and JSON non-finite constants."""
 
-    无 baseline 字段的场景(gen_configs.sh:172)里第一条锚点候选没有这个标记,
-    因此被当作普通候选计入名额。判定方式与 executor.py 的 auto_flags 兜底
-    (`key == "is_baseline"`)保持一致,只认这个键的真值。
-    """
-    return bool(isinstance(cand, dict) and cand.get("params", {}).get("is_baseline"))
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"{source}: duplicate JSON key {key!r}")
+            result[key] = value
+        return result
 
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"{source}: non-finite JSON value {value!r} is not allowed")
 
-def _cap_candidates(
-    candidates: list[dict[str, Any]], max_candidates: int
-) -> list[dict[str, Any]]:
-    """保留全部 baseline 候选,外加至多 max_candidates 条非 baseline 候选,顺序不变。
-
-    约定(gen_configs.sh:169):baseline 不占 max_candidates 名额,总数 =
-    max_candidates + 1。旧代码用 candidates[:max_candidates] 按裸长度截断,
-    baseline 在场时会吃掉一个名额、把最后一条真候选(如 tp=4 的 c002)静默丢弃。
-    这里改为只对非 baseline 计数。max_candidates <= 0 表示不限。
-    """
-    if max_candidates <= 0:
-        return candidates
-    result: list[dict[str, Any]] = []
-    kept = 0
-    for cand in candidates:
-        if _is_baseline(cand):
-            result.append(cand)
-        elif kept < max_candidates:
-            result.append(cand)
-            kept += 1
-    return result
+    return json.loads(
+        text, object_pairs_hook=reject_duplicate_keys, parse_constant=reject_constant
+    )
 
 
-def _load_candidates(configs_path: Path, max_candidates: int) -> list[dict[str, Any]]:
-    """Read candidates from configs file.
+def _load_candidates(configs_path: Path, *, search: SearchBudget) -> list[dict[str, Any]]:
+    """Load one complete candidate set and reject every malformed input.
 
-    Supports two formats:
-    - JSON: {"candidates": [...]} — reads the candidates array
-    - JSONL: one JSON object per line — reads each line
+    JSON objects containing ``candidates``, JSON arrays, and strict JSONL are
+    supported.  A semantically invalid JSON document is never reinterpreted as
+    JSONL, and no row is skipped or capped.
     """
     text = configs_path.read_text(encoding="utf-8")
-    candidates: list[dict[str, Any]] = []
-
-    # Try JSON format first (single object with candidates array)
+    source = str(configs_path)
     try:
-        data = json.loads(text)
-        if isinstance(data, dict) and "candidates" in data:
-            candidates = data["candidates"]
-        elif isinstance(data, list):
-            candidates = data
-        elif isinstance(data, dict) and "id" in data:
-            candidates = [data]
-        else:
-            # Might be JSONL fallback
-            candidates = []
+        document = _strict_json_load(text, source=source)
     except json.JSONDecodeError:
-        pass
+        document = None
 
-    # If JSON parse failed or no candidates found, try JSONL
-    if not candidates:
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
+    if document is not None:
+        if isinstance(document, list):
+            candidates = document
+        elif isinstance(document, dict):
+            if "id" in document:
+                candidates = [document]
+            else:
+                unsupported = set(document) - {"candidates", "_meta"}
+                if unsupported or "candidates" not in document:
+                    raise ValueError(
+                        f"{source}: top-level JSON object must contain only candidates "
+                        "(and optional _meta)"
+                    )
+                candidates = document["candidates"]
+        else:
+            raise ValueError(f"{source}: top-level JSON must be an object or array of candidates")
+        if not isinstance(candidates, list):
+            raise ValueError(f"{source}: candidates must be a JSON array")
+    else:
+        candidates = []
+        lines = text.splitlines()
+        if not lines:
+            raise ValueError(f"{source}: candidate file is empty")
+        for row_number, line in enumerate(lines, start=1):
+            if not line.strip():
+                raise ValueError(f"{source}: row {row_number} is empty")
             try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(row, dict) and "id" in row:
-                candidates.append(row)
-            # 不在这里按裸长度提前 break:len(candidates) 会把 baseline 也算进去,
-            # 导致 baseline 在场时少读一条真候选。configs 文件很小(max_candidates+1
-            # 行),读完全部再由 _cap_candidates 统一按「baseline 不占名额」截断,
-            # 让 JSON 与 JSONL 两条路径共用同一套截断规则。
+                row = _strict_json_load(line, source=f"{source}: row {row_number}")
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise ValueError(f"{source}: row {row_number} is not valid JSON: {exc}") from exc
+            if not isinstance(row, dict):
+                raise ValueError(f"{source}: row {row_number} must be a candidate object")
+            candidates.append(row)
 
-    return _cap_candidates(candidates, max_candidates)
+    try:
+        candidate_set = CandidateSet.from_candidates(candidates, search=search)
+    except ValueError as exc:
+        raise ValueError(f"{source}: candidate validation failed: {exc}") from exc
+    return [candidate.model_dump() for candidate in candidate_set.candidates]
 
 
 def _run_result_dict(result: RunResult) -> dict[str, Any]:
@@ -845,7 +842,7 @@ def _build_cmd_from_params(params: dict, model_path_placeholder: str = "${MODEL_
         elif val is False or val is None:
             continue
         else:
-            parts.append(f"{flag} {val}")
+            parts.append(f"{flag} {shlex.quote(str(val))}")
 
     # Auto-append host and port if not specified
     if not any(k == "host" for k in params):
@@ -1244,7 +1241,7 @@ def run_executor(
     multiplier = _load_num_prompts_multiplier(
         job.benchmark_method, project_root=config.project_root
     )
-    candidates = _load_candidates(config.configs_path, config.max_candidates)
+    candidates = _load_candidates(config.configs_path, search=job.search)
     _check_hardware_match(job, config)
 
     # Everything needed to construct the benchmark is local and deterministic.

@@ -50,7 +50,7 @@ def _effective_params(candidate: dict[str, Any]) -> dict[str, Any]:
     requested_mamba = params.pop("mamba-radix-cache-strategy", requested_mamba)
     requested_mamba = params.pop("mamba-scheduler-strategy", requested_mamba)
     if requested_mamba is not None:
-        params["mamba_cache_strategy"] = "inactive"
+        params["mamba_cache_strategy"] = "inactive(radix_off)"
     return params
 
 

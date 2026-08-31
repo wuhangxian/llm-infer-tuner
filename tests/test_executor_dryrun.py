@@ -237,7 +237,13 @@ def _flag_str(parts: list[str], flag: str) -> str:
 # --- fixtures -----------------------------------------------------------------
 
 
-def _write_job(tmp_path: Path, *, baseline_threshold_pct: float = 0) -> Path:
+def _write_job(
+    tmp_path: Path,
+    *,
+    baseline_threshold_pct: float = 0,
+    max_candidates: int = 1,
+    baseline: bool = False,
+) -> Path:
     job = {
         "job_id": "dryrun-job",
         "engine": "sglang",
@@ -250,9 +256,10 @@ def _write_job(tmp_path: Path, *, baseline_threshold_pct: float = 0) -> Path:
         "benchmark_method": "sglang-bench-serving",
         "sla": {"max_avg_ttft_ms": 2000.0, "max_avg_tpot_ms": 80.0, "min_success_rate": 0.99},
         "search": {
-            "max_candidates": 16,
+            "max_candidates": max_candidates,
             "max_runtime_minutes": 120,
             "baseline_threshold_pct": baseline_threshold_pct,
+            **({"baseline": {}} if baseline else {}),
         },
     }
     path = tmp_path / "job.json"
@@ -263,13 +270,17 @@ def _write_job(tmp_path: Path, *, baseline_threshold_pct: float = 0) -> Path:
 def _write_configs(tmp_path: Path, candidate_ids: list[str]) -> Path:
     path = tmp_path / "configs.jsonl"
     lines = []
-    for cid in candidate_ids:
+    for index, cid in enumerate(candidate_ids):
+        params = {"mem_fraction_static": 0.5 + index / 1000}
         lines.append(
             json.dumps(
                 {
                     "id": cid,
-                    "params": {},
-                    "cmd": f"python -m sglang.launch_server --model-path ${{MODEL_PATH}} # {cid}",
+                    "params": params,
+                    "cmd": (
+                        "python -m sglang.launch_server --model-path ${MODEL_PATH} "
+                        f"--mem-fraction-static {params['mem_fraction_static']}"
+                    ),
                     "reasons": [],
                 }
             )
@@ -291,7 +302,7 @@ def workloads_output_len(monkeypatch):
 def test_two_round_dryrun_ranks_by_true_goodput(tmp_path, workloads_output_len):
     # Four candidates with distinct true C* -> distinct goodput = C* * 100.
     cstar = {"cand-a": 4, "cand-b": 16, "cand-c": 2, "cand-d": 8}
-    job_path = _write_job(tmp_path)
+    job_path = _write_job(tmp_path, max_candidates=len(cstar))
     configs_path = _write_configs(tmp_path, list(cstar))
     results_dir = tmp_path / "results"
 
@@ -375,7 +386,7 @@ def test_baseline_plus_32_candidates_all_enter_round2_and_keep_one_row(
         for candidate_id in candidate_ids
     }
     config = ExecutorConfig(
-        job_path=_write_job(tmp_path),
+        job_path=_write_job(tmp_path, max_candidates=32, baseline=True),
         configs_path=_write_configs_with_params(tmp_path, params),
         results_dir=tmp_path / "results",
         ssh_target="fake@host",
@@ -471,13 +482,22 @@ def _write_configs_with_params(tmp_path: Path, params_by_id: dict[str, dict]) ->
     """Like _write_configs but每个候选带自定义 params(满载测试要 tp_size)。"""
     path = tmp_path / "configs.jsonl"
     lines = []
-    for cid, params in params_by_id.items():
+    for index, (cid, supplied_params) in enumerate(params_by_id.items()):
+        params = {"mem_fraction_static": 0.5 + index / 1000, **supplied_params}
+        tuning_flags = " ".join(
+            f"--{key.replace('_', '-')} {value}"
+            for key, value in params.items()
+            if key not in {"is_baseline", "disable_radix_cache"}
+        )
         lines.append(
             json.dumps(
                 {
                     "id": cid,
                     "params": params,
-                    "cmd": f"python -m sglang.launch_server --model-path ${{MODEL_PATH}} # {cid}",
+                    "cmd": (
+                        "python -m sglang.launch_server --model-path ${MODEL_PATH} "
+                        f"{tuning_flags}"
+                    ).rstrip(),
                     "reasons": [],
                 }
             )
@@ -574,12 +594,13 @@ def test_every_launch_forces_exactly_one_disable_radix(tmp_path, workloads_outpu
     用户没写时补上,用户写了任意值时覆盖成唯一的裸 flag。Mamba 请求值原样留作审计。"""
     path = tmp_path / "configs.jsonl"
     lines = [
-        # (a) cmd 整串,带 extra_buffer,没写 disable-radix —— 你手写 config 渲染后的样子
+        # (a) cmd 整串,带重复 disable-radix —— loader 规范化为一个裸 flag。
         json.dumps({
             "id": "cand-cmd",
+            "params": {"tp_size": 1, "attention_backend": "triton"},
             "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} "
-                   "--tp-size 1 --mamba-radix-cache-strategy extra_buffer "
-                   "--disable-radix-cache=0",
+                   "--tp-size 1 --attention-backend triton "
+                   "--disable-radix-cache --disable-radix-cache",
             "reasons": [],
         }),
         # (b) params 字典,没写 disable_radix_cache 字段 —— 回落 SGLang 默认(radix 开)
@@ -598,7 +619,7 @@ def test_every_launch_forces_exactly_one_disable_radix(tmp_path, workloads_outpu
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     config = ExecutorConfig(
-        job_path=_write_job(tmp_path),
+        job_path=_write_job(tmp_path, max_candidates=3),
         configs_path=path,
         results_dir=tmp_path / "results",
         ssh_target="fake@host",
@@ -648,7 +669,7 @@ def test_launch_overrides_any_port_spelling_with_assigned_port(
                 "params": {"tp_size": 1},
                 "cmd": (
                     "python -m sglang.launch_server --model-path ${MODEL_PATH} "
-                    f"{port_arg}"
+                    f"--tp-size 1 {port_arg}"
                 ),
                 "reasons": [],
             }
@@ -687,7 +708,9 @@ def test_launch_overrides_any_port_spelling_with_assigned_port(
 
 def test_threshold_marks_but_never_removes_candidates(tmp_path, workloads_output_len):
     cstar = {"baseline": 10, "fast": 16, "slow": 4}
-    job_path = _write_job(tmp_path, baseline_threshold_pct=20)
+    job_path = _write_job(
+        tmp_path, baseline_threshold_pct=20, max_candidates=2, baseline=True
+    )
     configs_path = _write_configs_with_params(
         tmp_path,
         {

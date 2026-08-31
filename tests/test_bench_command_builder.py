@@ -32,7 +32,7 @@ def _job(**overrides: object) -> JobSpec:
             "max_avg_tpot_ms": 80,
             "min_success_rate": 0.99,
         },
-        "search": {"max_candidates": 32},
+        "search": {"max_candidates": 1},
     }
     data.update(overrides)
     return JobSpec.model_validate(data)
