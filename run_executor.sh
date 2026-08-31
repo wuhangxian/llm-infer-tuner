@@ -325,16 +325,42 @@ echo "    configs=$CONFIGS  results=$RESULTS" >&2
 echo >&2
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 可选:整机满载(round2)。用环境变量开,默认关,不影响原有单参数用法。
-#   FILL_HOST=1 ./run_executor.sh <configs.json>   # round2 把 top-K 各复制成
-#     按 NUMA topology 复制实际可放置实例,整机满载、多端口并发实测求和。
+# Round-2 measurement mode defaults to measured full-host throughput.
+# MEASUREMENT_MODE=estimated is the explicit single-instance extrapolation mode.
+# Legacy FILL_HOST remains accepted: 1/true => full_host, 0/false => estimated.
 #   MAX_PARALLEL=N  批内候选并发上限(满载下每候选独占整机,通常不用改)。
 # ─────────────────────────────────────────────────────────────────────────
 EXTRA_ARGS=()
-if [ "${FILL_HOST:-0}" = "1" ] || [ "${FILL_HOST:-}" = "true" ]; then
-  EXTRA_ARGS+=(--fill-host)
-  echo "    ⚡ fill_host=ON:round2 整机满载实测(topology-aware 实例并发求和)" >&2
+RESOLVED_MEASUREMENT_MODE="full_host"
+EXPLICIT_MEASUREMENT_MODE=""
+LEGACY_MEASUREMENT_MODE=""
+if [ "${MEASUREMENT_MODE+x}" = "x" ]; then
+  case "$MEASUREMENT_MODE" in
+    full_host|estimated) EXPLICIT_MEASUREMENT_MODE="$MEASUREMENT_MODE" ;;
+    *)
+      echo "❌ MEASUREMENT_MODE 必须是 full_host 或 estimated" >&2
+      exit 2
+      ;;
+  esac
 fi
+if [ "${FILL_HOST+x}" = "x" ]; then
+  case "$FILL_HOST" in
+    1|true) LEGACY_MEASUREMENT_MODE="full_host" ;;
+    0|false) LEGACY_MEASUREMENT_MODE="estimated" ;;
+    *)
+      echo "❌ FILL_HOST 必须是 1/true 或 0/false" >&2
+      exit 2
+      ;;
+  esac
+fi
+if [ -n "$EXPLICIT_MEASUREMENT_MODE" ] && [ -n "$LEGACY_MEASUREMENT_MODE" ] \
+   && [ "$EXPLICIT_MEASUREMENT_MODE" != "$LEGACY_MEASUREMENT_MODE" ]; then
+  echo "❌ MEASUREMENT_MODE 与 legacy FILL_HOST 冲突" >&2
+  exit 2
+fi
+RESOLVED_MEASUREMENT_MODE="${EXPLICIT_MEASUREMENT_MODE:-${LEGACY_MEASUREMENT_MODE:-full_host}}"
+EXTRA_ARGS+=(--measurement-mode "$RESOLVED_MEASUREMENT_MODE")
+echo "    measurement_mode=$RESOLVED_MEASUREMENT_MODE" >&2
 if [ -n "${MAX_PARALLEL:-}" ]; then
   EXTRA_ARGS+=(--max-parallel "$MAX_PARALLEL")
   echo "    max_parallel=$MAX_PARALLEL" >&2

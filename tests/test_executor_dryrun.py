@@ -430,6 +430,36 @@ class _Round1BurstContainer(_FakeContainer):
         return result
 
 
+class _MeasuredRepeatVariationContainer(_FakeContainer):
+    """Inject repeat variance while preserving replica-first host aggregation."""
+
+    _repeat_factors = {
+        "a": (1.0, 2.0, 0.99),
+        "b": (1.10, 1.11, 1.09),
+    }
+
+    def _run_bench(self, command: str) -> _FakeResult:
+        result = super()._run_bench(command)
+        out_path = _flag_str(command.split(), "--output-file")
+        name = Path(out_path).name
+        candidate_id = Path(out_path).parent.name
+        if "_warmup" in name:
+            return result
+        record = json.loads(result.stdout)
+        repeat_match = re.search(r"_repeat(\d+)_", name)
+        if name.startswith("r1_") and candidate_id == "a":
+            factor = 9999.0
+        elif name.startswith("r2_") and repeat_match is not None:
+            factor = self._repeat_factors[candidate_id][int(repeat_match.group(1))]
+        else:
+            return result
+        record["output_throughput"] *= factor
+        record["total_throughput"] *= factor
+        result.stdout = json.dumps(record)
+        self._result_files[out_path] = result.stdout
+        return result
+
+
 class _StrictLaunchContainer(_FakeContainer):
     """Reject malformed executables so a failed launch cannot look healthy."""
 
@@ -1321,6 +1351,7 @@ def test_two_round_dryrun_ranks_by_true_goodput(tmp_path, workloads_output_len):
         max_candidates=16,
         top_k=2,
         max_cap=256,
+        fill_host=False,
     )
 
     remote = _FakeRemote()
@@ -1355,6 +1386,9 @@ def test_two_round_dryrun_ranks_by_true_goodput(tmp_path, workloads_output_len):
         # gpu_count=8, tp_size=1
         assert by_id[cid]["goodput_per_host"] == expected_cstar * 100.0 * 8
         assert by_id[cid]["best_concurrency"] == expected_cstar
+        assert by_id[cid]["measurement_mode"] == "estimated"
+        assert by_id[cid]["sample_count"] == 3
+        assert by_id[cid]["actual_instances"] == 1
 
     # -- every candidate enters precise round 2; --top-k is compatibility-only --
     assert "top_k" not in summary
@@ -1363,6 +1397,7 @@ def test_two_round_dryrun_ranks_by_true_goodput(tmp_path, workloads_output_len):
         assert "round2" in summary["candidates"][_index_of(summary, cid)]
 
     assert summary["task_status"] == "COMPLETED"
+    assert summary["measurement_mode"] == "estimated"
     assert summary["ranking_status"] == "FINAL"
     rows = [json.loads(line) for line in (
         results_dir / "candidate_results.jsonl"
@@ -1390,6 +1425,7 @@ def test_hit_cap_candidate_is_incomplete_and_has_no_final_rank(
         model_host_dir="/data/models/qwen",
         model_container_path="/models/qwen",
         project_root=Path.cwd(),
+        fill_host=False,
         max_cap=4,
     )
     container = _FakeContainer({"uncertain": 1_000})
@@ -1419,6 +1455,7 @@ def test_executor_consumes_preflight_plan_for_both_rounds(
         model_host_dir="/data/models/qwen",
         model_container_path="/models/qwen",
         project_root=Path.cwd(),
+        fill_host=False,
     )
     placement = CandidatePlacement("solo", (0,), 30000)
     plan = PreflightPlan(
@@ -1453,6 +1490,39 @@ def test_executor_consumes_preflight_plan_for_both_rounds(
     assert {
         port for _candidate, _concurrency, port in container.bench_ports
     } == {30000}
+
+
+def test_full_host_missing_preflight_replica_plan_fails_closed(
+    tmp_path, workloads_output_len, monkeypatch
+):
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path),
+        configs_path=_write_configs(tmp_path, ["solo"]),
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+    )
+    plan = PreflightPlan(
+        candidate_ids=("solo",),
+        numa_groups=((0, 1, 2, 3), (4, 5, 6, 7)),
+        round1_batches=((CandidatePlacement("solo", (0,), 30000),),),
+        round2_batches=(
+            (CandidatePlacement("solo", tuple(range(8)), 30000),),
+        ),
+        fill_host_placements=(),
+        required_ports=(30000,),
+    )
+    container = _FakeContainer({"solo": 2})
+    monkeypatch.setattr(ex, "prepare_remote_host", lambda _remote, _request: plan)
+    monkeypatch.setattr(ex, "Container", lambda _remote, _config: container)
+
+    with pytest.raises(ValueError, match="fill-host preflight placement is missing"):
+        run_executor(config, remote=_FakeRemote())
+
+    assert not (config.results_dir / "ranking.json").exists()
 
 
 def test_baseline_plus_32_candidates_all_enter_round2_and_keep_one_row(
@@ -1513,6 +1583,7 @@ def test_round2_seeds_only_hint_fresh_three_sample_endpoints(
         max_candidates=1,
         top_k=1,
         max_cap=256,
+        fill_host=False,
     )
 
     remote = _FakeRemote()
@@ -1568,7 +1639,7 @@ def test_round2_seeds_only_hint_fresh_three_sample_endpoints(
 def test_round1_burst_seed_never_enters_round2_results_or_final_rank(
     tmp_path, workloads_output_len
 ):
-    config = _lifecycle_test_config(tmp_path, "bursty")
+    config = _lifecycle_test_config(tmp_path, "bursty", fill_host=True)
     config.max_cap = 8
     container = _Round1BurstContainer({"bursty": 4})
     original_container = ex.Container
@@ -1579,8 +1650,17 @@ def test_round1_burst_seed_never_enters_round2_results_or_final_rank(
         ex.Container = original_container
 
     assert summary["task_status"] == "COMPLETED"
+    assert summary["measurement_mode"] == "full_host"
     assert summary["ranking"][0]["best_concurrency"] == 4
     assert summary["ranking"][0]["goodput_per_host"] == 4 * 100.0 * 8
+    assert summary["ranking"][0]["measurement_mode"] == "full_host"
+    assert summary["ranking"][0]["sample_count"] == 3
+    assert summary["ranking"][0]["actual_instances"] == 8
+    assert summary["ranking"][0]["goodput_per_host_min"] == 4 * 100.0 * 8
+    assert summary["ranking"][0]["goodput_per_host_median"] == 4 * 100.0 * 8
+    assert summary["ranking"][0]["goodput_per_host_max"] == 4 * 100.0 * 8
+    assert summary["candidate_results"][0]["ranking_eligible"] is True
+    assert summary["candidate_results"][0]["ranking_eligibility_reason"] is None
     round2_results = json.loads(
         (config.results_dir / "bursty" / "run_result.r2.json").read_text(
             encoding="utf-8"
@@ -1597,6 +1677,40 @@ def test_round1_burst_seed_never_enters_round2_results_or_final_rank(
         for group in evidence["complete_groups"]
         for sample in group["samples"]
     )
+
+
+def test_full_host_ranking_sums_each_repeat_then_uses_three_repeat_median(
+    tmp_path, workloads_output_len
+):
+    candidate_ids = ["a", "b"]
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path, max_candidates=2),
+        configs_path=_write_configs(tmp_path, candidate_ids),
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=2,
+        max_cap=8,
+    )
+    container = _MeasuredRepeatVariationContainer({"a": 4, "b": 4})
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    assert [row["candidate_id"] for row in summary["ranking"]] == ["b", "a"]
+    by_id = {row["candidate_id"]: row for row in summary["ranking"]}
+    assert by_id["a"]["goodput_per_host_min"] == pytest.approx(3168.0)
+    assert by_id["a"]["goodput_per_host_median"] == pytest.approx(3200.0)
+    assert by_id["a"]["goodput_per_host_max"] == pytest.approx(6400.0)
+    assert by_id["b"]["goodput_per_host_median"] == pytest.approx(3520.0)
+    assert all(row["sample_count"] == 3 for row in summary["ranking"])
+    assert all(row["actual_instances"] == 8 for row in summary["ranking"])
 
 
 def _write_configs_with_params(tmp_path: Path, params_by_id: dict[str, dict]) -> Path:
@@ -2100,6 +2214,7 @@ def test_params_only_candidate_launches_the_structured_command(
         model_container_path="/models/qwen",
         project_root=Path.cwd(),
         max_candidates=1,
+        fill_host=False,
     )
     container = _StrictLaunchContainer({"params-only": 2})
     original_container = ex.Container
@@ -2151,6 +2266,7 @@ def test_params_only_quoted_disable_text_round_trips_as_one_argument(
         model_container_path="/models/qwen",
         project_root=Path.cwd(),
         max_candidates=1,
+        fill_host=False,
     )
     container = _StrictLaunchContainer({"quoted-disable-text": 2})
     original_container = ex.Container
@@ -2206,6 +2322,7 @@ def test_launch_overrides_any_port_spelling_with_assigned_port(
         project_root=Path.cwd(),
         max_candidates=1,
         port=30005,
+        fill_host=False,
     )
     container = _FakeContainer({"equals-port": 2})
     original_container = ex.Container
@@ -2308,6 +2425,7 @@ def test_threshold_marks_but_never_removes_candidates(tmp_path, workloads_output
         project_root=Path.cwd(),
         max_candidates=16,
         top_k=1,
+        fill_host=False,
     )
     remote, container = _FakeRemote(), _FakeContainer(cstar)
     original_container = ex.Container
@@ -2513,7 +2631,9 @@ def test_exhausted_container_ssh_retries_keep_transport_terminal_status(
     ) >= 3
 
 
-def _lifecycle_test_config(tmp_path: Path, candidate_id: str) -> ExecutorConfig:
+def _lifecycle_test_config(
+    tmp_path: Path, candidate_id: str, *, fill_host: bool = False
+) -> ExecutorConfig:
     return ExecutorConfig(
         job_path=_write_job(tmp_path),
         configs_path=_write_configs(tmp_path, [candidate_id]),
@@ -2525,6 +2645,7 @@ def _lifecycle_test_config(tmp_path: Path, candidate_id: str) -> ExecutorConfig:
         project_root=Path.cwd(),
         max_candidates=1,
         startup_max_attempts=3,
+        fill_host=fill_host,
     )
 
 

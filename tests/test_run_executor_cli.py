@@ -238,6 +238,59 @@ def test_split_mode_accepts_exactly_two_to_four_arguments(
     assert project.runner_called
 
 
+@pytest.mark.parametrize(
+    ("environment", "expected_mode"),
+    [
+        ({}, "full_host"),
+        ({"MEASUREMENT_MODE": "estimated"}, "estimated"),
+        ({"FILL_HOST": "1"}, "full_host"),
+        ({"FILL_HOST": "true"}, "full_host"),
+        ({"FILL_HOST": "0"}, "estimated"),
+        ({"FILL_HOST": "false"}, "estimated"),
+    ],
+)
+def test_shell_resolves_default_explicit_and_legacy_measurement_modes(
+    executor_script_project: ExecutorScriptProject,
+    environment: dict[str, str],
+    expected_mode: str,
+) -> None:
+    project = executor_script_project
+
+    completed = project.invoke(
+        str(project.job),
+        str(project.target),
+        env_overrides=environment,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    argv = project.argv_file.read_text(encoding="utf-8").splitlines()
+    mode_index = argv.index("--measurement-mode")
+    assert argv[mode_index + 1] == expected_mode
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {"MEASUREMENT_MODE": "estimated", "FILL_HOST": "true"},
+        {"MEASUREMENT_MODE": "full_host", "FILL_HOST": "false"},
+        {"MEASUREMENT_MODE": "invalid"},
+        {"FILL_HOST": "invalid"},
+    ],
+)
+def test_shell_rejects_invalid_or_conflicting_measurement_modes_before_runner(
+    executor_script_project: ExecutorScriptProject,
+    environment: dict[str, str],
+) -> None:
+    completed = executor_script_project.invoke(
+        str(executor_script_project.job),
+        str(executor_script_project.target),
+        env_overrides=environment,
+    )
+
+    assert completed.returncode != 0
+    assert executor_script_project.runner_called is False
+
+
 def test_jsonl_bundle_infers_baseline_count_and_never_exposes_plaintext_secret(
     executor_script_project: ExecutorScriptProject,
 ) -> None:
@@ -787,7 +840,84 @@ def test_python_executor_cli_loads_target_and_resolves_password_environment(
     assert config.ssh_password == password
     assert config.port == 30000
     assert config.allow_cross_numa is True
+    assert config.measurement_mode == "full_host"
+    assert config.fill_host is True
     assert password not in repr(config)
+
+
+def test_python_executor_cli_accepts_explicit_estimated_mode_and_rejects_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = tmp_path / "job.json"
+    configs = tmp_path / "configs.jsonl"
+    target = tmp_path / "target.json"
+    results = tmp_path / "results"
+    job.write_text(json.dumps(_job_payload()), encoding="utf-8")
+    configs.write_text(json.dumps(_candidate("c001")) + "\n", encoding="utf-8")
+    target.write_text(json.dumps(_target_payload()), encoding="utf-8")
+    captured: list[object] = []
+
+    def fake_run(config, *, lifecycle=None):
+        captured.append(config)
+        return {"task_status": "COMPLETED"}
+
+    monkeypatch.setattr(executor_module, "run_executor", fake_run)
+    base_args = [
+        "--job",
+        str(job),
+        "--target",
+        str(target),
+        "--configs",
+        str(configs),
+        "--results",
+        str(results),
+    ]
+
+    assert executor_module.main([*base_args, "--measurement-mode", "estimated"]) == 0
+    config = captured.pop()
+    assert isinstance(config, executor_module.ExecutorConfig)
+    assert config.measurement_mode == "estimated"
+    assert config.fill_host is False
+    with pytest.raises(SystemExit) as exc_info:
+        executor_module.main(
+            [*base_args, "--measurement-mode", "estimated", "--fill-host"]
+        )
+    assert exc_info.value.code == 2
+    assert captured == []
+
+
+def test_executor_config_defaults_to_full_host_and_rejects_legacy_conflicts(
+    tmp_path: Path,
+) -> None:
+    required = {
+        "job_path": tmp_path / "job.json",
+        "configs_path": tmp_path / "configs.jsonl",
+        "results_dir": tmp_path / "results",
+        "ssh_target": "runner@example.test",
+        "image_ref": "registry.example/sglang:test",
+        "model_host_dir": "/models/example",
+        "model_container_path": "/container/models/example",
+        "project_root": REPO_ROOT,
+    }
+
+    default = executor_module.ExecutorConfig(**required)
+    explicit_estimated = executor_module.ExecutorConfig(
+        **required, measurement_mode="estimated"
+    )
+    legacy_estimated = executor_module.ExecutorConfig(**required, fill_host=False)
+
+    assert default.measurement_mode == "full_host"
+    assert default.fill_host is True
+    assert explicit_estimated.measurement_mode == "estimated"
+    assert explicit_estimated.fill_host is False
+    assert legacy_estimated.measurement_mode == "estimated"
+    assert legacy_estimated.fill_host is False
+    with pytest.raises(ValueError, match="conflict"):
+        executor_module.ExecutorConfig(
+            **required,
+            measurement_mode="estimated",
+            fill_host=True,
+        )
 
 
 def test_python_cli_early_signal_invalidates_stale_final_status(

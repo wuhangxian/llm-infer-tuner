@@ -178,3 +178,36 @@ def test_only_exact_round2_can_be_reported_completed() -> None:
         output_len=1024,
     )
     assert rows[0]["status"] == "completed"
+
+
+@pytest.mark.parametrize(
+    ("measurement_valid", "expected_status"),
+    [(True, "completed"), (False, "incomplete")],
+)
+def test_strict_report_separates_measurement_validity_from_rank_eligibility(
+    measurement_valid: bool, expected_status: str
+) -> None:
+    rows = build_candidate_rows(
+        [{"id": "saturated", "params": {}}],
+        {
+            "saturated": {
+                "attempts": 1,
+                "measurement_mode": "full_host",
+                "measurement_valid": measurement_valid,
+                "ranking_eligible": False,
+                "ranking_eligibility_reason": "no qualifying SLA point",
+                "round2": {"complete": True, "certainty": "exact"},
+            }
+        },
+        {},
+        [],
+        output_len=1024,
+    )
+
+    assert rows[0]["status"] == expected_status
+    assert rows[0]["measurement_mode"] == "full_host"
+    assert rows[0]["ranking_eligible"] is False
+    assert rows[0]["ranking_eligibility_reason"] == "no qualifying SLA point"
+    assert rows[0]["rank_group"] is None
+    assert rows[0]["baseline_threshold_status"] == "unknown"
+    assert rows[0]["beats_baseline_threshold"] is False

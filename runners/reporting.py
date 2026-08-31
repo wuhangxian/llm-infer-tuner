@@ -19,35 +19,128 @@ def annotate_baseline_threshold(
 ) -> list[dict[str, Any]]:
     """Annotate every row relative to baseline; never remove a candidate."""
     rows = deepcopy(ranking)
-    baseline = next(
-        (
-            _finite_float(row.get("goodput_per_host"))
-            for row in rows
-            if row["candidate_id"] == "baseline"
-        ),
-        None,
+    baseline_row = next(
+        (row for row in rows if row["candidate_id"] == "baseline"), None
     )
-    threshold = _finite_product(
-        baseline,
-        _finite_sum(1.0, _finite_quotient(_finite_float(threshold_pct), 100.0)),
+    strict_intervals = bool(
+        any(
+            key in row
+            for row in rows
+            for key in (
+                "goodput_per_host_min",
+                "goodput_per_host_median",
+                "goodput_per_host_max",
+            )
+        )
+    )
+
+    def strict_interval(row: dict[str, Any] | None) -> tuple[float, float, float] | None:
+        if row is None:
+            return None
+        interval = (
+            _finite_float(row.get("goodput_per_host_min")),
+            _finite_float(row.get("goodput_per_host_median")),
+            _finite_float(row.get("goodput_per_host_max")),
+        )
+        if any(value is None for value in interval):
+            return None
+        lower, center, upper = interval
+        assert lower is not None and center is not None and upper is not None
+        if lower < 0 or not lower <= center <= upper:
+            return None
+        return lower, center, upper
+
+    baseline_interval = strict_interval(baseline_row) if strict_intervals else None
+    baseline = (
+        baseline_interval[1]
+        if baseline_interval is not None
+        else (
+            _finite_float(baseline_row.get("goodput_per_host"))
+            if baseline_row is not None and not strict_intervals
+            else None
+        )
+    )
+    baseline_mode = baseline_row.get("measurement_mode") if baseline_row else None
+    modes_match = bool(
+        not strict_intervals
+        or (
+            baseline_mode in {"full_host", "estimated"}
+            and all(row.get("measurement_mode") == baseline_mode for row in rows)
+        )
+    )
+    baseline_valid = bool(
+        baseline is not None
+        and baseline > 0
+        and (
+            not strict_intervals
+            or (
+                baseline_row is not None
+                and baseline_row.get("ranking_eligible") is True
+                and baseline_interval is not None
+                and modes_match
+            )
+        )
+    )
+    threshold = (
+        _finite_product(
+            baseline,
+            _finite_sum(
+                1.0,
+                _finite_quotient(_finite_float(threshold_pct), 100.0),
+            ),
+        )
+        if baseline_valid
+        else None
     )
     for rank, row in enumerate(rows, 1):
-        value = _finite_float(row.get("goodput_per_host"))
+        interval = strict_interval(row) if strict_intervals else None
+        value = (
+            interval[1]
+            if interval is not None
+            else (
+                _finite_float(row.get("goodput_per_host"))
+                if not strict_intervals
+                else None
+            )
+        )
+        interval_min = interval[0] if interval is not None else value
+        interval_max = interval[2] if interval is not None else value
         delta = _finite_difference(value, baseline)
         relative = _finite_difference(_finite_quotient(value, baseline), 1.0)
         delta_pct = _finite_product(relative, 100.0)
+        row_valid = bool(
+            interval_min is not None
+            and interval_max is not None
+            and interval_min <= interval_max
+            and (
+                not strict_intervals
+                or (
+                    row.get("ranking_eligible") is True
+                    and interval is not None
+                    and modes_match
+                )
+            )
+        )
+        if (
+            row["candidate_id"] == "baseline"
+            or not baseline_valid
+            or not row_valid
+            or threshold is None
+        ):
+            threshold_status = "unknown"
+        elif interval_min is not None and interval_min >= threshold:
+            threshold_status = "yes"
+        elif interval_max is not None and interval_max < threshold:
+            threshold_status = "no"
+        else:
+            threshold_status = "unknown"
         row["rank"] = rank
         row["baseline_goodput_per_host"] = baseline
         row["threshold_goodput_per_host"] = threshold
         row["goodput_delta"] = delta
         row["goodput_delta_pct"] = round(delta_pct, 6) if delta_pct is not None else None
-        row["beats_baseline_threshold"] = (
-            value >= threshold
-            if value is not None
-            and threshold is not None
-            and row["candidate_id"] != "baseline"
-            else False
-        )
+        row["baseline_threshold_status"] = threshold_status
+        row["beats_baseline_threshold"] = threshold_status == "yes"
     return rows
 
 
@@ -162,11 +255,21 @@ def build_candidate_rows(
         candidate_id = str(candidate.get("id", "unknown"))
         summary = candidate_summaries.get(candidate_id, {})
         round2 = summary.get("round2")
+        measurement_mode = summary.get("measurement_mode")
+        strict_measurement = measurement_mode in {"full_host", "estimated"}
         completed = bool(
             round2
             and round2.get("complete") is True
             and round2.get("certainty") == "exact"
+            and (
+                not strict_measurement
+                or summary.get("measurement_valid") is True
+            )
         )
+        ranking_eligible = bool(summary.get("ranking_eligible", False))
+        eligibility_reason = summary.get("ranking_eligibility_reason")
+        if not ranking_eligible and not eligibility_reason:
+            eligibility_reason = "fresh round-2 measurement unavailable"
         failures = list(summary.get("failures", []))
         last_failure = failures[-1] if failures else {}
         points = [
@@ -179,6 +282,12 @@ def build_candidate_rows(
                 "report_schema_version": REPORT_SCHEMA_VERSION,
                 "candidate_id": candidate_id,
                 "status": "completed" if completed else "incomplete",
+                "measurement_mode": measurement_mode,
+                "ranking_eligible": ranking_eligible,
+                "ranking_eligibility_reason": eligibility_reason,
+                "rank_group": None,
+                "baseline_threshold_status": "unknown",
+                "beats_baseline_threshold": False,
                 "requested_params": deepcopy(
                     candidate.get("requested_params", candidate.get("params", {}))
                 ),

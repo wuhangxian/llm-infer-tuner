@@ -55,7 +55,15 @@ from runners.preflight import (
     prepare_remote_host,
     validate_local_preflight,
 )
-from runners.ranker import data_health_check, passes_sla, rank_candidates
+from runners.ranker import (
+    CandidateMeasurement,
+    MeasurementMode,
+    data_health_check,
+    measurement_ranking_eligibility_reason,
+    measurement_validation_error,
+    passes_sla,
+    rank_candidates,
+)
 from runners.readiness import (
     ReadinessTransportError,
     make_health_probe,
@@ -134,12 +142,44 @@ class ExecutorConfig:
     max_cap: int = DEFAULT_MAX_CAP  # upper bound on concurrency the search will probe
     ssh_password: str = field(default="", repr=False)  # empty = key-based SSH
     max_parallel: int = 8  # 批内并发跑多少个候选(每个独占容器+GPU+端口);1 = 退回串行
-    fill_host: bool = False  # round2 是否按 topology 复制实际可放置实例做整机满载实测
+    measurement_mode: MeasurementMode | str | None = None
+    # Deprecated compatibility alias.  None means unspecified; False is the
+    # legacy explicit opt-in to estimated single-instance extrapolation.
+    fill_host: bool | None = None
     allow_cross_numa: bool = False  # 显式 opt-in；默认每个 TP/副本必须保持 NUMA-local
     exclusive_host: bool = False  # 只有显式授权时才允许整机清理
     startup_stall_timeout_s: int = 300
     startup_hard_timeout_s: int = 900
     startup_max_attempts: int = 3
+
+    def __post_init__(self) -> None:
+        explicit_mode = self.measurement_mode is not None
+        try:
+            requested_mode = (
+                MeasurementMode(self.measurement_mode)
+                if explicit_mode
+                else None
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "measurement_mode must be 'full_host' or 'estimated'"
+            ) from exc
+        if self.fill_host is not None and type(self.fill_host) is not bool:
+            raise ValueError("fill_host compatibility value must be a boolean")
+        legacy_mode = (
+            MeasurementMode.FULL_HOST
+            if self.fill_host is True
+            else MeasurementMode.ESTIMATED
+            if self.fill_host is False
+            else None
+        )
+        if requested_mode is not None and legacy_mode not in {None, requested_mode}:
+            raise ValueError(
+                "measurement_mode conflicts with legacy fill_host selection"
+            )
+        resolved = requested_mode or legacy_mode or MeasurementMode.FULL_HOST
+        self.measurement_mode = resolved
+        self.fill_host = resolved == MeasurementMode.FULL_HOST
 
 
 class CleanupError(RuntimeError):
@@ -2888,6 +2928,10 @@ def _run_executor_impl(
     stop/remove the container and rank the candidates.
     """
     job = _load_job(config.job_path)
+    if config.measurement_mode is None or config.fill_host is None:
+        raise RuntimeError("executor measurement mode was not resolved")
+    measurement_mode = MeasurementMode(config.measurement_mode)
+    fill_host = config.fill_host
     output_len = _load_output_len(job.workload)
     multiplier = _load_num_prompts_multiplier(
         job.benchmark_method, project_root=config.project_root
@@ -2912,7 +2956,7 @@ def _run_executor_impl(
         container_name=config.container_name,
         remote_outputs_dir=config.remote_outputs_dir,
         job_id=job.job_id,
-        fill_host=config.fill_host,
+        fill_host=fill_host,
         allow_cross_numa=config.allow_cross_numa,
         exclusive_host=config.exclusive_host,
     )
@@ -2947,6 +2991,7 @@ def _run_executor_impl(
     round_results: dict[str, dict[int, list[RunResult]]] = {}
     candidate_summaries: dict[str, dict[str, Any]] = {}
     search_diagnostics: dict[str, dict[str, Any]] = {}
+    round2_measurements: dict[str, CandidateMeasurement] = {}
 
     # Template context (container is None here; each batch creates its own)
     ctx_template = _CandidateContext(
@@ -2989,6 +3034,7 @@ def _run_executor_impl(
             search_diagnostics[candidate_id] = _outcome_diag(outcome)
             candidate_summaries[candidate_id] = {
                 "candidate_id": candidate_id,
+                "measurement_mode": str(measurement_mode),
                 "round1": _outcome_diag(outcome),
                 "round1_batch": f"{batch_idx + 1}/{len(batches)}",
                 "round1_attempts": outcome.startup_attempts,
@@ -3039,7 +3085,7 @@ def _run_executor_impl(
             confirm=ROUND2_CONFIRM,
             refine=True,
             seeds_by_id=seeds,
-            fill_host=config.fill_host,
+            fill_host=fill_host,
             numa_groups=numa_groups,
             allow_cross_numa=config.allow_cross_numa,
             fill_host_placements=planned_fill_host,
@@ -3061,20 +3107,52 @@ def _run_executor_impl(
                 {**failure, "batch": f"{batch_idx + 1}/{len(top_batches)}"}
                 for failure in outcome.failures
             )
+            expected_instances = (
+                len(planned_fill_host[candidate_id].gpu_slices)
+                if fill_host and candidate_id in planned_fill_host
+                else 0
+                if fill_host
+                else 1
+            )
+            measurement = CandidateMeasurement(
+                results=list(outcome.results),
+                sample_groups=dict(outcome.sample_groups),
+                round_number=2,
+                complete=outcome.complete,
+                certainty=outcome.certainty,
+                measurement_mode=measurement_mode,
+                expected_instances=expected_instances,
+            )
+            round2_measurements[candidate_id] = measurement
+            validation_error = measurement_validation_error(
+                candidate_id,
+                measurement,
+                output_len=output_len,
+                gpu_count=job.gpu_count,
+                required_measurement_mode=measurement_mode,
+            )
+            eligibility_reason = measurement_ranking_eligibility_reason(
+                candidate_id,
+                measurement,
+                job.sla,
+                output_len=output_len,
+                gpu_count=job.gpu_count,
+                required_measurement_mode=measurement_mode,
+            )
+            candidate_summaries[candidate_id]["measurement_valid"] = (
+                validation_error is None
+            )
+            candidate_summaries[candidate_id]["ranking_eligible"] = (
+                eligibility_reason is None
+            )
+            candidate_summaries[candidate_id]["ranking_eligibility_reason"] = (
+                eligibility_reason
+            )
 
-    exact_results_by_candidate = {
-        candidate_id: results
-        for candidate_id, results in results_by_candidate.items()
-        if candidate_summaries.get(candidate_id, {}).get("round2", {}).get("complete")
-        is True
-        and candidate_summaries.get(candidate_id, {})
-        .get("round2", {})
-        .get("certainty")
-        == "exact"
-    }
     ranking = rank_candidates(
-        exact_results_by_candidate, job.sla, output_len=output_len,
+        round2_measurements, job.sla, output_len=output_len,
         gpu_count=job.gpu_count,
+        required_measurement_mode=measurement_mode,
     )
 
     threshold_pct = job.search.baseline_threshold_pct
@@ -3093,6 +3171,7 @@ def _run_executor_impl(
         "job_id": job.job_id,
         "task_status": "COMPLETED" if all_completed else "INCOMPLETE",
         "ranking_status": "FINAL" if all_completed else "PROVISIONAL",
+        "measurement_mode": str(measurement_mode),
         "interrupted": False,
         "total_candidates": len(candidate_rows),
         "completed_candidates": completed_count,
@@ -3184,7 +3263,16 @@ def main(argv: list[str] | None = None) -> int:
                         help="upper bound on concurrency the search will probe")
     parser.add_argument("--container-name", default=None)
     parser.add_argument(
-        "--fill-host", action="store_true",
+        "--measurement-mode",
+        choices=[mode.value for mode in MeasurementMode],
+        default=None,
+        help="round2 ranking measurement: full_host (default) or explicit estimated",
+    )
+    parser.add_argument(
+        "--fill-host",
+        action="store_const",
+        const=True,
+        default=None,
         help="round2 按 NUMA topology 把每个候选复制成实际可放置的实例整机满载、"
              "多端口并发压测求和,得到实测整机 goodput(而非单实例 × 实例数 纸面外推)。"
              "round1 仍单实例粗筛。",
@@ -3197,6 +3285,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--startup-hard-timeout", type=int, default=900)
     parser.add_argument("--startup-max-attempts", type=int, default=3)
     args = parser.parse_args(argv)
+    if args.fill_host is True and args.measurement_mode == MeasurementMode.ESTIMATED:
+        parser.error("--fill-host conflicts with --measurement-mode estimated")
 
     _prepare_local_results_dir(args.results)
     lifecycle = ExecutorLifecycle(args.results, job_id=args.job.stem)
@@ -3229,6 +3319,7 @@ def main(argv: list[str] | None = None) -> int:
                 target_gpu_model=target.gpu_model,
                 target_gpu_count=target.gpu_count,
                 target_gpu_memory_gb=target.gpu_memory_gb,
+                measurement_mode=args.measurement_mode,
                 fill_host=args.fill_host,
                 allow_cross_numa=target.allow_cross_numa,
                 exclusive_host=target.exclusive_host,

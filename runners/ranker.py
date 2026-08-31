@@ -9,9 +9,32 @@ TP8 ×1 instance on the same 8-GPU machine).
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
+from dataclasses import dataclass
+from enum import StrEnum
+from statistics import median
 
+from runners.concurrency_search import SampleGroup
 from runners.metrics import SEARCH_VERDICT_STATUSES, ProbeStatus, RunResult
 from schemas.job_spec import SLA
+
+
+class MeasurementMode(StrEnum):
+    FULL_HOST = "full_host"
+    ESTIMATED = "estimated"
+
+
+@dataclass(frozen=True)
+class CandidateMeasurement:
+    """The authoritative fresh Round-2 evidence for one candidate."""
+
+    results: list[RunResult]
+    sample_groups: Mapping[int, SampleGroup]
+    round_number: int
+    complete: bool
+    certainty: str
+    measurement_mode: MeasurementMode | str
+    expected_instances: int
 
 
 def _metric_sanity_error(
@@ -212,7 +235,7 @@ def candidate_goodput(
     return per_host
 
 
-def rank_candidates(
+def _rank_legacy_candidates(
     results_by_candidate: dict[str, list[RunResult]],
     sla: SLA,
     *,
@@ -268,6 +291,326 @@ def rank_candidates(
             }
         )
     ranking.sort(key=lambda row: row["goodput_per_host"], reverse=True)
+    return ranking
+
+
+def measurement_validation_error(
+    candidate_id: str,
+    measurement: CandidateMeasurement,
+    *,
+    output_len: int,
+    gpu_count: int,
+    required_measurement_mode: MeasurementMode | str,
+) -> str | None:
+    required_mode = MeasurementMode(required_measurement_mode)
+    try:
+        mode = MeasurementMode(measurement.measurement_mode)
+    except (TypeError, ValueError):
+        return "invalid measurement mode"
+    if measurement.round_number != 2:
+        return "ranking requires round 2 evidence"
+    if measurement.complete is not True or measurement.certainty != "exact":
+        return "ranking requires exact complete evidence"
+    if mode != required_mode:
+        return "measurement mode mismatch"
+    if not _is_representable_positive_int(gpu_count):
+        return "invalid host GPU count"
+    if not _is_representable_positive_int(measurement.expected_instances):
+        return "invalid expected instance count"
+    if not measurement.sample_groups:
+        return "missing fresh sample groups"
+    results_by_c = {result.concurrency: result for result in measurement.results}
+    if len(results_by_c) != len(measurement.results):
+        return "duplicate representative concurrency"
+    if set(results_by_c) != set(measurement.sample_groups):
+        return "representatives and sample groups do not match"
+
+    expected_tp: int | None = None
+    expected_instances: int | None = None
+    median_fields = (
+        "num_prompts",
+        "completed",
+        "success_rate",
+        "request_throughput",
+        "output_throughput",
+        "total_throughput",
+        "mean_ttft_ms",
+        "p99_ttft_ms",
+        "mean_tpot_ms",
+        "p99_tpot_ms",
+        "total_output_tokens",
+        "avg_output_tokens",
+        "duration",
+    )
+    for concurrency, group in measurement.sample_groups.items():
+        representative = results_by_c[concurrency]
+        if concurrency != group.concurrency or len(group.samples) != 3:
+            return "each concurrency requires exactly three fresh samples"
+        if representative != group.representative:
+            return "sample-group representative mismatch"
+        all_records = (*group.samples, representative)
+        if any(record.candidate_id != candidate_id for record in all_records):
+            return "candidate identity mismatch"
+        if any(record.concurrency != concurrency for record in all_records):
+            return "sample concurrency mismatch"
+        if any(
+            record.status not in SEARCH_VERDICT_STATUSES
+            or _metric_sanity_error(record, output_len=output_len) is not None
+            for record in all_records
+        ):
+            return "invalid statistical sample"
+        group_tp = representative.tp_size
+        group_instances = representative.instances
+        if any(
+            sample.tp_size != group_tp or sample.instances != group_instances
+            for sample in group.samples
+        ):
+            return "sample topology mismatch"
+        if expected_tp is None:
+            expected_tp = group_tp
+            expected_instances = group_instances
+        elif group_tp != expected_tp or group_instances != expected_instances:
+            return "candidate topology changed across concurrencies"
+        physical_capacity = gpu_count // group_tp
+        if physical_capacity < 1:
+            return "candidate cannot fit on host"
+        if mode == MeasurementMode.FULL_HOST:
+            if (
+                group_instances != measurement.expected_instances
+                or measurement.expected_instances > physical_capacity
+                or any(not record.full_host_measured for record in all_records)
+            ):
+                return "invalid full-host topology evidence"
+        elif measurement.expected_instances != 1 or any(
+            record.full_host_measured or record.instances != 1 for record in all_records
+        ):
+            return "estimated mode requires single-instance evidence"
+        pass_votes = sum(sample.status == ProbeStatus.OK for sample in group.samples)
+        majority_qualifies = pass_votes >= 2
+        expected_status = (
+            ProbeStatus.OK if majority_qualifies else ProbeStatus.SLA_FAILED
+        )
+        if (
+            group.qualifies is not majority_qualifies
+            or representative.status != expected_status
+        ):
+            return "sample majority verdict mismatch"
+        for field_name in median_fields:
+            if getattr(representative, field_name) != median(
+                getattr(sample, field_name) for sample in group.samples
+            ):
+                return f"representative {field_name} is not the sample median"
+    return None
+
+
+def _measured_candidate_row(
+    candidate_id: str,
+    measurement: CandidateMeasurement,
+    sla: SLA,
+    *,
+    output_len: int,
+    gpu_count: int,
+    required_mode: MeasurementMode,
+) -> dict | None:
+    try:
+        mode = MeasurementMode(measurement.measurement_mode)
+    except (TypeError, ValueError):
+        return None
+    if measurement_validation_error(
+        candidate_id,
+        measurement,
+        output_len=output_len,
+        gpu_count=gpu_count,
+        required_measurement_mode=required_mode,
+    ) is not None:
+        return None
+    best: dict | None = None
+    for concurrency, group in measurement.sample_groups.items():
+        if not group.qualifies:
+            continue
+        representative = group.representative
+        healthy, _ = data_health_check(representative, output_len=output_len)
+        if not healthy or not passes_sla(representative, sla):
+            continue
+        sample_per_host: list[float] = []
+        sample_raw: list[float] = []
+        actual_instances: int | None = None
+        invalid_group = False
+        for sample in group.samples:
+            if (
+                sample.concurrency != concurrency
+                or sample.status not in SEARCH_VERDICT_STATUSES
+                or _metric_sanity_error(sample, output_len=output_len) is not None
+            ):
+                invalid_group = True
+                break
+            if mode == MeasurementMode.FULL_HOST:
+                if not sample.full_host_measured:
+                    invalid_group = True
+                    break
+                if actual_instances is None:
+                    actual_instances = sample.instances
+                elif sample.instances != actual_instances:
+                    invalid_group = True
+                    break
+                per_host = sample.total_throughput
+                raw = sample.total_throughput / sample.instances
+            else:
+                if sample.full_host_measured or sample.instances != 1:
+                    invalid_group = True
+                    break
+                actual_instances = 1
+                raw = sample.total_throughput
+                per_host = raw * _instances_per_host(sample.tp_size, gpu_count)
+            if not math.isfinite(raw) or not math.isfinite(per_host):
+                invalid_group = True
+                break
+            sample_raw.append(raw)
+            sample_per_host.append(per_host)
+        if invalid_group or actual_instances is None:
+            continue
+        row = {
+            "candidate_id": candidate_id,
+            "tp_size": representative.tp_size,
+            "instances_per_host": (
+                float(actual_instances)
+                if mode == MeasurementMode.FULL_HOST
+                else _instances_per_host(representative.tp_size, gpu_count)
+            ),
+            "actual_instances": actual_instances,
+            "measurement_mode": str(mode),
+            "goodput_raw": median(sample_raw),
+            "goodput_per_host_min": min(sample_per_host),
+            "goodput_per_host_median": median(sample_per_host),
+            "goodput_per_host_max": max(sample_per_host),
+            "goodput_per_host": median(sample_per_host),
+            "sample_count": len(sample_per_host),
+            "best_concurrency": concurrency,
+            "ranking_eligible": True,
+            "ranking_eligibility_reason": None,
+            **_best_point_metrics([representative], concurrency, sla, output_len),
+        }
+        if best is None or (
+            row["goodput_per_host_median"], -concurrency
+        ) > (
+            best["goodput_per_host_median"], -best["best_concurrency"]
+        ):
+            best = row
+    return best
+
+
+def measurement_ranking_eligibility_reason(
+    candidate_id: str,
+    measurement: CandidateMeasurement,
+    sla: SLA,
+    *,
+    output_len: int,
+    gpu_count: int,
+    required_measurement_mode: MeasurementMode | str,
+) -> str | None:
+    """Explain why valid Round-2 evidence cannot produce a ranking row."""
+
+    required_mode = MeasurementMode(required_measurement_mode)
+    validation_error = measurement_validation_error(
+        candidate_id,
+        measurement,
+        output_len=output_len,
+        gpu_count=gpu_count,
+        required_measurement_mode=required_mode,
+    )
+    if validation_error is not None:
+        return validation_error
+    if _measured_candidate_row(
+        candidate_id,
+        measurement,
+        sla,
+        output_len=output_len,
+        gpu_count=gpu_count,
+        required_mode=required_mode,
+    ) is None:
+        return "no qualifying SLA point"
+    return None
+
+
+def rank_candidates(
+    results_by_candidate: Mapping[
+        str, list[RunResult] | CandidateMeasurement
+    ],
+    sla: SLA,
+    *,
+    output_len: int,
+    gpu_count: int = 1,
+    required_measurement_mode: MeasurementMode | str | None = None,
+) -> list[dict]:
+    """Rank legacy result lists or strict fresh Round-2 measurements."""
+
+    if not results_by_candidate:
+        return []
+    if all(isinstance(value, list) for value in results_by_candidate.values()):
+        legacy = {
+            candidate_id: value
+            for candidate_id, value in results_by_candidate.items()
+            if isinstance(value, list)
+        }
+        return _rank_legacy_candidates(
+            legacy, sla, output_len=output_len, gpu_count=gpu_count
+        )
+    if not all(
+        isinstance(value, CandidateMeasurement)
+        for value in results_by_candidate.values()
+    ):
+        raise TypeError("ranking inputs must not mix legacy and measured candidates")
+    if required_measurement_mode is None:
+        raise ValueError("strict measured ranking requires a measurement mode")
+    required_mode = MeasurementMode(required_measurement_mode)
+    ranking = [
+        row
+        for candidate_id, value in results_by_candidate.items()
+        if isinstance(value, CandidateMeasurement)
+        for row in [
+            _measured_candidate_row(
+                candidate_id,
+                value,
+                sla,
+                output_len=output_len,
+                gpu_count=gpu_count,
+                required_mode=required_mode,
+            )
+        ]
+        if row is not None
+    ]
+    ranking.sort(
+        key=lambda row: (-row["goodput_per_host_median"], row["candidate_id"])
+    )
+    parents = list(range(len(ranking)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    for left in range(len(ranking)):
+        for right in range(left + 1, len(ranking)):
+            if (
+                ranking[left]["goodput_per_host_min"]
+                <= ranking[right]["goodput_per_host_max"]
+                and ranking[right]["goodput_per_host_min"]
+                <= ranking[left]["goodput_per_host_max"]
+            ):
+                union(left, right)
+    rank_groups: dict[int, int] = {}
+    for index, row in enumerate(ranking):
+        component = find(index)
+        if component not in rank_groups:
+            rank_groups[component] = len(rank_groups) + 1
+        row["rank_group"] = rank_groups[component]
     return ranking
 
 
