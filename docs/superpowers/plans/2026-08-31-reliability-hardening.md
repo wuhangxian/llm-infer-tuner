@@ -45,6 +45,8 @@ Add tests that reject numeric strings, booleans-as-integers, NaN/Inf, IDs longer
 unsafe ID characters, invalid ports, unsupported credential combinations, multiple baselines,
 empty candidates, duplicate IDs, duplicate effective params, and count mismatch. Assert the
 baseline contract is `max_candidates + 1` only when `search.baseline` exists.
+Also cover every cache-enabling spelling, repeated cache-disable spellings, and requested
+`mamba_radix_cache_strategy=extra_buffer` becoming audit-only/inactive under Radix-off.
 
 - [ ] **Step 2: Run tests and confirm red**
 
@@ -59,6 +61,9 @@ Define bounded `Identifier`, `TargetSpec`, `CandidateParams`, `CandidateSpec`, a
 `CandidateSet`. CandidateSet validates unique IDs/effective params, exactly one configured
 baseline, and expected non-baseline count. Legacy `cmd` parsing accepts only
 `python -m sglang.launch_server`, rejects shell operators, and checks params/flags agreement.
+Candidate normalization rejects cache enablement, removes all duplicate disable spellings,
+emits exactly one effective `--disable-radix-cache`, and records requested/effective Mamba
+strategy separately.
 
 - [ ] **Step 4: Replace permissive candidate loading**
 
@@ -159,46 +164,7 @@ Run: `uv run pytest -q`
 
 Commit: `git commit -m "fix: harden executor cli ports and credentials"`
 
-### Task 4: Local-first preflight and explicit remote ownership
-
-**Files:**
-- Create: `runners/preflight.py`
-- Modify: `runners/executor.py`
-- Modify: `runners/remote.py`
-- Create: `tests/test_preflight.py`
-- Modify: `tests/test_executor_dryrun.py`
-
-- [ ] **Step 1: Write failing no-mutation tests**
-
-Use a recording fake RemoteRunner. Assert empty/bad candidates, invalid ports, impossible TP,
-duplicate allocations, wrong model path, image failure, and actual GPU mismatch produce no
-destructive command. Assert zero candidates can never yield COMPLETED.
-
-- [ ] **Step 2: Verify red**
-
-Run: `uv run pytest tests/test_preflight.py tests/test_executor_dryrun.py -q`
-
-- [ ] **Step 3: Implement ordered preflight**
-
-Return a `PreflightPlan` after local validation/allocation. Remote read-only checks query
-`nvidia-smi`, model directory, image, ports, and job-owned containers. Only then evaluate
-`exclusive_host`; default cleanup matches the current job/container prefix, while whole-host
-cleanup requires explicit authorization.
-
-- [ ] **Step 4: Check every cleanup result**
-
-Non-zero stop/remove/kill/port-clean results stop execution and enter structured failure data.
-Never use `|| true` to convert unknown cleanup state into success.
-
-- [ ] **Step 5: Test and commit**
-
-Run: `uv run pytest tests/test_preflight.py tests/test_executor_dryrun.py -q`
-
-Run: `uv run pytest -q`
-
-Commit: `git commit -m "fix: validate before mutating remote hosts"`
-
-### Task 5: Correct NUMA allocation and property coverage
+### Task 4: Correct NUMA allocation and property coverage
 
 **Files:**
 - Modify: `runners/executor.py`
@@ -225,6 +191,46 @@ free set.
 Run: `uv run pytest tests/test_gpu_allocator.py tests/test_executor_dryrun.py -q`
 
 Commit: `git commit -m "fix: make gpu allocation disjoint and deterministic"`
+
+### Task 5: Local-first preflight and explicit remote ownership
+
+**Files:**
+- Create: `runners/preflight.py`
+- Modify: `runners/executor.py`
+- Modify: `runners/remote.py`
+- Create: `tests/test_preflight.py`
+- Modify: `tests/test_executor_dryrun.py`
+
+- [ ] **Step 1: Write failing no-mutation tests**
+
+Use a recording fake RemoteRunner. Assert empty/bad candidates, invalid ports, impossible TP,
+duplicate allocations, wrong model path, image failure, and actual GPU mismatch produce no
+destructive command. Assert zero candidates can never yield COMPLETED. Reuse the Task 4
+allocator properties when validating the complete PreflightPlan.
+
+- [ ] **Step 2: Verify red**
+
+Run: `uv run pytest tests/test_preflight.py tests/test_executor_dryrun.py -q`
+
+- [ ] **Step 3: Implement ordered preflight**
+
+Return a `PreflightPlan` after local validation/allocation. Remote read-only checks query
+`nvidia-smi`, model directory, image, ports, and job-owned containers. Only then evaluate
+`exclusive_host`; default cleanup matches the current job/container prefix, while whole-host
+cleanup requires explicit authorization.
+
+- [ ] **Step 4: Check every cleanup result**
+
+Non-zero stop/remove/kill/port-clean results stop execution and enter structured failure data.
+Never use `|| true` to convert unknown cleanup state into success.
+
+- [ ] **Step 5: Test and commit**
+
+Run: `uv run pytest tests/test_preflight.py tests/test_executor_dryrun.py -q`
+
+Run: `uv run pytest -q`
+
+Commit: `git commit -m "fix: validate before mutating remote hosts"`
 
 ### Task 6: Fail-closed metrics and typed probe outcomes
 
@@ -388,7 +394,10 @@ Commit: `git commit -m "feat: rank candidates with measured full-host intervals"
 
 Require one summary row per expected candidate, separate probe evidence, requested TP on failures,
 round-result consistency, timestamps, recovery count, boundary certainty, known issue, actual
-metrics, failure time, and FINAL only when every candidate is exact/complete.
+metrics, failure time, and FINAL only when every candidate is exact/complete. Assert every probe
+summary links to an existing evidence record/artifact and provenance contains Git SHA, SHA-256
+job/config hashes, image reference and digest/null-with-reason, actual GPU facts, engine version,
+and run start/end timestamps.
 
 - [ ] **Step 2: Verify red**
 
@@ -398,7 +407,9 @@ Run: `uv run pytest tests/test_reporting.py tests/test_report_invariants.py -q`
 
 Write `candidate_results.jsonl`, `probe_results.jsonl`, `ranking.json`, `task_status.json`, and
 `provenance.json` atomically. Retain version-1 compatibility fields while adding explicit mode,
-interval, status, and certainty.
+interval, status, and certainty. Populate provenance from the committed Git revision, canonical
+input bytes, read-only preflight facts, image inspection, server metadata, and UTC timestamps;
+use explicit `null` plus `unavailable_reason` rather than silently omitting unavailable facts.
 
 - [ ] **Step 4: Improve terminal preview**
 
