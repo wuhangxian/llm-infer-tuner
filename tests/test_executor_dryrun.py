@@ -45,6 +45,12 @@ class _FakeRemote:
     """Answers only the host-shell commands run_executor issues before docker."""
 
     def run(self, command: str, *, timeout=None) -> _FakeResult:
+        if command == "nvidia-smi topo -m":
+            rows = [
+                *(f"GPU{gpu_id} X SYS 0" for gpu_id in range(4)),
+                *(f"GPU{gpu_id} SYS X 1" for gpu_id in range(4, 8)),
+            ]
+            return _FakeResult(stdout="\n".join(rows) + "\n")
         if command.startswith("echo $HOME"):
             return _FakeResult(stdout="/home/fake\n")
         if command == "echo ok":

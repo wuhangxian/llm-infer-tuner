@@ -404,44 +404,96 @@ def _detect_numa_groups(remote: RemoteRunner, gpu_count: int) -> list[list[int]]
 
     Returns a list of NUMA groups, each containing GPU IDs.
     Example: [[0,1,2,3], [4,5,6,7]] for a dual-NUMA 8-GPU server.
-    Falls back to a single group [0,1,...,gpu_count-1] if detection fails.
+    Detection is fail-closed: inventing one flat NUMA group would silently allow
+    cross-socket TP placement and make benchmark comparisons topology-dependent.
     """
     try:
         result = remote.run("nvidia-smi topo -m", timeout=30)
-        if not result.ok:
-            return [list(range(gpu_count))]
-        lines = result.stdout.splitlines()
-        # Parse NUMA affinity column
-        groups: dict[int, list[int]] = {}
-        for line in lines:
-            # 表头行以空白缩进开头,天然被下面这条跳过;
-            # 不能用 not startswith("GPU0") 过滤,否则会误删 GPU1~GPU7(以及 16 卡机的 GPU10+)。
-            if not line.startswith("GPU"):
-                continue
-            parts = line.split()
-            if len(parts) < 2:
-                continue
+    except Exception as exc:
+        raise RuntimeError("NUMA topology detection command failed") from exc
+    if not result.ok:
+        raise RuntimeError("NUMA topology detection command failed")
+
+    # Parse NUMA affinity column.
+    groups: dict[int, list[int]] = {}
+    for line in result.stdout.splitlines():
+        # 表头行以空白缩进开头,天然被下面这条跳过;
+        # 不能用 not startswith("GPU0") 过滤,否则会误删 GPU1~GPU7(以及 16 卡机的 GPU10+)。
+        if not line.startswith("GPU"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            gpu_id = int(parts[0].removeprefix("GPU"))
+        except ValueError:
+            continue
+        if gpu_id >= gpu_count:
+            continue
+        # Find NUMA Affinity column (second to last or last numeric).
+        numa_id = None
+        for part in reversed(parts):
             try:
-                gpu_id = int(parts[0].replace("GPU", ""))
+                numa_id = int(part)
+                break
             except ValueError:
                 continue
-            if gpu_id >= gpu_count:
-                continue
-            # Find NUMA Affinity column (second to last or last numeric)
-            numa_id = None
-            for part in reversed(parts):
-                try:
-                    numa_id = int(part)
-                    break
-                except ValueError:
-                    continue
-            if numa_id is not None:
-                groups.setdefault(numa_id, []).append(gpu_id)
-        if groups:
-            return list(groups.values())
-    except Exception:
-        pass
-    return [list(range(gpu_count))]
+        if numa_id is not None:
+            groups.setdefault(numa_id, []).append(gpu_id)
+    if not groups:
+        raise ValueError("NUMA topology output did not contain any GPU affinity rows")
+    return _normalise_numa_groups(gpu_count, list(groups.values()))
+
+
+def _normalise_numa_groups(
+    gpu_count: int,
+    numa_groups: list[list[int]] | None,
+) -> list[list[int]]:
+    """Validate and copy a complete physical GPU-to-NUMA topology."""
+    if type(gpu_count) is not int or gpu_count < 1:
+        raise ValueError("GPU count must be a positive integer")
+    if numa_groups is None or not isinstance(numa_groups, list) or not numa_groups:
+        raise ValueError("NUMA topology is missing")
+
+    normalised: list[list[int]] = []
+    seen: set[int] = set()
+    for group in numa_groups:
+        if not isinstance(group, list) or not group:
+            raise ValueError("NUMA topology contains an empty or invalid group")
+        copied_group: list[int] = []
+        for gpu_id in group:
+            if type(gpu_id) is not int:
+                raise ValueError("NUMA topology GPU IDs must be integers")
+            if not 0 <= gpu_id < gpu_count:
+                raise ValueError(
+                    f"NUMA topology GPU ID {gpu_id} is outside 0..{gpu_count - 1}"
+                )
+            if gpu_id in seen:
+                raise ValueError(f"NUMA topology contains duplicate GPU ID {gpu_id}")
+            seen.add(gpu_id)
+            copied_group.append(gpu_id)
+        normalised.append(copied_group)
+
+    expected = set(range(gpu_count))
+    if seen != expected:
+        missing = sorted(expected - seen)
+        raise ValueError(f"NUMA topology is incomplete; missing GPU IDs: {missing}")
+    return normalised
+
+
+def _candidate_tp_size(candidate: dict[str, Any]) -> int:
+    """Return one candidate's strict positive TP, defaulting a missing TP to one."""
+    if not isinstance(candidate, dict):
+        raise ValueError("candidate must be an object")
+    params = candidate.get("params", {})
+    if not isinstance(params, dict):
+        raise ValueError(f"candidate {candidate.get('id', '?')}: params must be an object")
+    tp_size = params.get("tp_size", 1)
+    if type(tp_size) is not int or tp_size < 1:
+        raise ValueError(
+            f"candidate {candidate.get('id', '?')}: tp_size must be a positive integer"
+        )
+    return tp_size
 
 
 def _allocate_gpus_and_ports(
@@ -449,6 +501,8 @@ def _allocate_gpus_and_ports(
     gpu_count: int,
     base_port: int = 30000,
     numa_groups: list[list[int]] | None = None,
+    *,
+    allow_cross_numa: bool = False,
 ) -> list[tuple[dict[str, Any], str, int]]:
     """Assign GPU IDs and ports to each candidate with NUMA awareness.
 
@@ -460,29 +514,24 @@ def _allocate_gpus_and_ports(
       TP2: GPU 1,2 (NUMA 0)
       TP4: GPU 4,5,6,7 (NUMA 1)
     """
-    if numa_groups is None:
-        numa_groups = [list(range(gpu_count))]
+    topology = _normalise_numa_groups(gpu_count, numa_groups)
+    if type(allow_cross_numa) is not bool:
+        raise ValueError("allow_cross_numa must be a boolean")
+    validate_port_span(base_port, max(len(candidates), 1))
 
-    # Flatten with NUMA tracking: (gpu_id, numa_index)
-    # We allocate sequentially within each NUMA group
     result: list[tuple[dict[str, Any], str, int]] = []
     port_cursor = base_port
-
-    # Track cursor per NUMA group
-    numa_cursors = [0] * len(numa_groups)  # index into each group's GPU list
+    free_by_group = [list(group) for group in topology]
 
     for candidate in candidates:
-        tp_size = int(candidate.get("params", {}).get("tp_size", 1))
-        tp_size = max(1, tp_size)
+        tp_size = _candidate_tp_size(candidate)
 
         # Find a NUMA group that has enough remaining GPUs for this tp_size
         assigned = False
-        for ni, group in enumerate(numa_groups):
-            remaining = len(group) - numa_cursors[ni]
-            if remaining >= tp_size:
-                # Allocate from this NUMA group
-                gpu_ids = group[numa_cursors[ni]:numa_cursors[ni] + tp_size]
-                numa_cursors[ni] += tp_size
+        for free_ids in free_by_group:
+            if len(free_ids) >= tp_size:
+                gpu_ids = free_ids[:tp_size]
+                del free_ids[:tp_size]
                 gpu_ids_str = "device=" + ",".join(str(g) for g in gpu_ids)
                 result.append((candidate, gpu_ids_str, port_cursor))
                 port_cursor += 1
@@ -490,15 +539,22 @@ def _allocate_gpus_and_ports(
                 break
 
         if not assigned:
-            # No single NUMA group has enough; fall back to sequential allocation
-            all_gpus = []
-            for group in numa_groups:
-                all_gpus.extend(group[numa_cursors[numa_groups.index(group)]:])
-            if len(all_gpus) >= tp_size:
+            # Cross-NUMA placement is opt-in: the default executor policy keeps
+            # every TP replica inside one NUMA group for stable measurements.
+            all_gpus = [gpu_id for free_ids in free_by_group for gpu_id in free_ids]
+            if len(all_gpus) >= tp_size and allow_cross_numa:
                 gpu_ids = all_gpus[:tp_size]
+                selected = set(gpu_ids)
+                for free_ids in free_by_group:
+                    free_ids[:] = [gpu_id for gpu_id in free_ids if gpu_id not in selected]
                 gpu_ids_str = "device=" + ",".join(str(g) for g in gpu_ids)
                 result.append((candidate, gpu_ids_str, port_cursor))
                 port_cursor += 1
+            elif len(all_gpus) >= tp_size:
+                raise ValueError(
+                    f"candidate {candidate.get('id', '?')}: tp_size={tp_size} "
+                    "只能通过 cross-NUMA 放置；默认策略拒绝跨 NUMA。"
+                )
             else:
                 # 卡数 < tp_size:绝不静默降级成少卡启动,否则容器会以
                 # --tp {tp_size} 却只暴露 len(all_gpus) 张卡的方式崩在
@@ -506,11 +562,59 @@ def _allocate_gpus_and_ports(
                 raise ValueError(
                     f"candidate {candidate.get('id', '?')}: tp_size={tp_size} "
                     f"但只能分到 {len(all_gpus)} 张 GPU"
-                    f"(gpu_count={gpu_count},NUMA={numa_groups}),拒绝以少卡静默启动。"
+                    f"(gpu_count={gpu_count},NUMA={topology}),拒绝以少卡静默启动。"
                     f"请减小 tp_size 或提供足够的 GPU。"
                 )
 
     return result
+
+
+def _plan_candidate_batches(
+    candidates: list[dict[str, Any]],
+    gpu_count: int,
+    base_port: int = 30000,
+    numa_groups: list[list[int]] | None = None,
+) -> list[list[dict[str, Any]]]:
+    """Greedily form deterministic batches that remain NUMA-local.
+
+    A candidate that would only fit by consuming fragments from multiple NUMA
+    groups starts a fresh sequential batch. A candidate that cannot fit inside
+    any one physical NUMA group is rejected instead of being silently crossed.
+    """
+    topology = _normalise_numa_groups(gpu_count, numa_groups)
+    validate_port_span(base_port, max(len(candidates), 1))
+
+    batches: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for candidate in candidates:
+        # Validate the candidate independently so malformed/unplaceable input is
+        # never misclassified as ordinary batch fragmentation.
+        _allocate_gpus_and_ports(
+            [candidate],
+            gpu_count,
+            base_port=base_port,
+            numa_groups=topology,
+        )
+        trial = [*current, candidate]
+        try:
+            _allocate_gpus_and_ports(
+                trial,
+                gpu_count,
+                base_port=base_port,
+                numa_groups=topology,
+            )
+        except ValueError:
+            if current:
+                batches.append(current)
+                current = [candidate]
+            else:  # defensive: the independent placement above should catch this
+                raise
+        else:
+            current = trial
+
+    if current:
+        batches.append(current)
+    return batches
 
 
 def _format_alloc(alloc: list[tuple[dict[str, Any], str, int]]) -> str:
@@ -1334,28 +1438,18 @@ def run_executor(
         port=config.port,
     )
 
-    # ---- Split into batches that fit within gpu_count ----
-    # Each batch reuses GPU IDs starting from 0 (batches run sequentially).
-    batches: list[list[dict[str, Any]]] = []
-    current_batch: list[dict[str, Any]] = []
-    current_gpus_used = 0
-    for candidate in candidates:
-        tp_size = int(candidate.get("params", {}).get("tp_size", 1))
-        if current_gpus_used + tp_size > job.gpu_count and current_batch:
-            batches.append(current_batch)
-            current_batch = []
-            current_gpus_used = 0
-        current_batch.append(candidate)
-        current_gpus_used += tp_size
-    if current_batch:
-        batches.append(current_batch)
-
-    _log(f"{len(candidates)} candidates split into {len(batches)} batch(es) "
-         f"(max {job.gpu_count} GPUs per batch)")
-
-    # Detect NUMA groups for GPU allocation (avoid cross-NUMA TP)
+    # Detect and validate physical NUMA topology before planning batches. Batch
+    # boundaries account for NUMA fragmentation, not merely total GPU count.
     numa_groups = _detect_numa_groups(remote, job.gpu_count)
     _log(f"NUMA groups: {numa_groups}")
+    batches = _plan_candidate_batches(
+        candidates,
+        job.gpu_count,
+        base_port=config.port,
+        numa_groups=numa_groups,
+    )
+    _log(f"{len(candidates)} candidates split into {len(batches)} batch(es) "
+         f"(max {job.gpu_count} GPUs per batch, NUMA-local)")
 
     # ---- ROUND 1: coarse expansion over ALL candidates (batch-parallel) ----
     for batch_idx, batch in enumerate(batches):
@@ -1407,18 +1501,12 @@ def run_executor(
     if config.fill_host:
         top_batches = [[c] for c in top_candidates]
     else:
-        current_batch = []
-        current_gpus_used = 0
-        for candidate in top_candidates:
-            tp_size = int(candidate.get("params", {}).get("tp_size", 1))
-            if current_gpus_used + tp_size > job.gpu_count and current_batch:
-                top_batches.append(current_batch)
-                current_batch = []
-                current_gpus_used = 0
-            current_batch.append(candidate)
-            current_gpus_used += tp_size
-        if current_batch:
-            top_batches.append(current_batch)
+        top_batches = _plan_candidate_batches(
+            top_candidates,
+            job.gpu_count,
+            base_port=config.port,
+            numa_groups=numa_groups,
+        )
 
     for batch_idx, batch in enumerate(top_batches):
         if config.fill_host:
