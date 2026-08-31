@@ -140,6 +140,16 @@ def script_project(tmp_path: Path) -> ScriptProject:
     skill_dir = tmp_path / ".claude/skills/sglang-server-config-gen"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("# test skill\n")
+    (skill_dir / "knowledge.md").write_text("# test knowledge\n")
+    catalogs_dir = tmp_path / "catalogs"
+    catalogs_dir.mkdir()
+    for catalog_name in (
+        "gpu.yaml",
+        "models.yaml",
+        "sglang-images.yaml",
+        "workloads.yaml",
+    ):
+        (catalogs_dir / catalog_name).write_text("test: true\n")
 
     job = tmp_path / "job.json"
     job.write_text(
@@ -213,23 +223,40 @@ def script_project(tmp_path: Path) -> ScriptProject:
     fake_tclaude.write_text(
         "#!/bin/bash\n"
         'printf "%s\\n" "$@" > "$FAKE_TCLAUDE_ARGS_FILE"\n'
+        'if [ -n "${FAKE_TCLAUDE_PWD_FILE:-}" ]; then pwd -P > "$FAKE_TCLAUDE_PWD_FILE"; fi\n'
         'attempt=1\n'
         'if [ -f "$FAKE_TCLAUDE_COUNT_FILE" ]; then '
         'attempt=$(( $(cat "$FAKE_TCLAUDE_COUNT_FILE") + 1 )); fi\n'
         'printf "%s" "$attempt" > "$FAKE_TCLAUDE_COUNT_FILE"\n'
         'previous=""\n'
         'available_tools=""\n'
+        'add_dirs=()\n'
         'saw_tools=0\n'
         'dangerous_permissions=0\n'
         'for arg in "$@"; do\n'
         '  if [ "$previous" = "-p" ]; then printf "%s" "$arg" > "$FAKE_TCLAUDE_PROMPT_FILE"; fi\n'
         '  if [ "$previous" = "--tools" ]; then available_tools="$arg"; saw_tools=1; fi\n'
+        '  if [ "$previous" = "--add-dir" ]; then add_dirs+=("$arg"); fi\n'
         '  if [ "$previous" = "--model" ]; then '
         'printf "%s\\n" "$arg" >> "$FAKE_TCLAUDE_MODELS_FILE"; fi\n'
         '  if [ "$arg" = "--dangerously-skip-permissions" ]; then dangerous_permissions=1; fi\n'
         '  previous="$arg"\n'
         'done\n'
         'mode="${FAKE_TCLAUDE_MODE:-success}"\n'
+        'if [ -n "${FAKE_TCLAUDE_ADD_DIRS_FILE:-}" ]; then '
+        'printf "%s\\n" "${add_dirs[@]}" > "$FAKE_TCLAUDE_ADD_DIRS_FILE"; fi\n'
+        'if [ "$mode" = "exfiltrate-if-visible" ]; then\n'
+        '  discovered="not-visible"\n'
+        '  probe_roots=(".")\n'
+        '  probe_roots+=("${add_dirs[@]}")\n'
+        '  for probe_root in "${probe_roots[@]}"; do\n'
+        '    if [ -f "$probe_root/$FAKE_SENTINEL_NAME" ]; then '
+        'discovered="$(cat "$probe_root/$FAKE_SENTINEL_NAME")"; break; fi\n'
+        '  done\n'
+        '  response="${FAKE_TCLAUDE_RESPONSE//__PROBE__/$discovered}"\n'
+        '  printf "%s\\n" "$response"\n'
+        '  exit 0\n'
+        'fi\n'
         'if [ "$mode" = "model-policy-overwrite" ]; then\n'
         '  policy_can_write="$dangerous_permissions"\n'
         '  if [ "$saw_tools" = 0 ]; then policy_can_write=1; fi\n'
@@ -365,6 +392,38 @@ def test_agent_is_restricted_to_read_only_tools_and_cannot_overwrite_output(
     assert argv[argv.index("--setting-sources") + 1] == ""
     assert "--strict-mcp-config" in argv
     assert "--disable-slash-commands" in argv
+
+
+def test_agent_can_read_only_staged_knowledge_not_repository_files(
+    script_project: ScriptProject,
+) -> None:
+    sentinel_value = "repository-sentinel-must-not-reach-model-output"
+    sentinel = script_project.root / "sentinel-secret.txt"
+    sentinel.write_text(sentinel_value)
+    pwd_file = script_project.root / "agent.pwd"
+    add_dirs_file = script_project.root / "agent.add-dirs"
+    candidate = _candidate_payload("c001")
+    candidate["reasons"] = ["probe=__PROBE__"]
+
+    completed, argv = script_project.run(
+        output_name="isolated-generation.jsonl",
+        env_overrides={
+            "FAKE_TCLAUDE_MODE": "exfiltrate-if-visible",
+            "FAKE_TCLAUDE_RESPONSE": _agent_response([candidate]),
+            "FAKE_SENTINEL_NAME": sentinel.name,
+            "FAKE_TCLAUDE_PWD_FILE": str(pwd_file),
+            "FAKE_TCLAUDE_ADD_DIRS_FILE": str(add_dirs_file),
+        },
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    output = (script_project.root / "isolated-generation.jsonl").read_text()
+    assert sentinel_value not in output
+    agent_cwd = Path(pwd_file.read_text().strip())
+    assert agent_cwd != script_project.root
+    assert not agent_cwd.exists()
+    assert add_dirs_file.read_text().splitlines() == ["."]
+    assert "--restricted" in argv
 
 
 def test_zero_candidates_fail_validation_and_preserve_existing_output(

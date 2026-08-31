@@ -113,6 +113,7 @@ fi
 
 JOB="${POSITIONAL[0]}"
 OUT_ARG="${POSITIONAL[1]:-}"
+PROJECT_ROOT="$(pwd -P)"
 
 # 校验 --agent 只能是 tclaude / claude(挡住 codex 等尚未支持的值,免得组出无效命令)
 case "$AGENT" in
@@ -143,17 +144,26 @@ if [ -n "$MODEL" ]; then
 fi
 
 command -v jq >/dev/null || { echo "❌ 需要 jq" >&2; exit 1; }
-command -v python3 >/dev/null || { echo "❌ 需要 python3" >&2; exit 1; }
+PYTHON_BIN="$(command -v python3)" || { echo "❌ 需要 python3" >&2; exit 1; }
+command -v install >/dev/null || { echo "❌ 需要 install" >&2; exit 1; }
+case "$PYTHON_BIN" in
+  /*) ;;
+  *) echo "❌ python3 必须可解析为绝对路径: $PYTHON_BIN" >&2; exit 1 ;;
+esac
 [ -f "$JOB" ] || { echo "❌ job 文件不存在: $JOB" >&2; exit 1; }
-if ! python3 -m schemas.validate_cli job "$JOB"; then
+if ! "$PYTHON_BIN" -m schemas.validate_cli job "$JOB"; then
   echo "❌ job validation failed: $JOB" >&2
   exit 1
 fi
 
 SKILL_DIR=".claude/skills/sglang-server-config-gen"
 [ -f "$SKILL_DIR/SKILL.md" ] || { echo "❌ 找不到 skill: $SKILL_DIR/SKILL.md(请在 repo 根运行)" >&2; exit 1; }
-command -v "$AGENT" >/dev/null || { echo "❌ $AGENT 不在 PATH" >&2; exit 1; }
-TCLAUDE_GUARD="runners/tclaude_guard.py"
+AGENT_BIN="$(command -v "$AGENT")" || { echo "❌ $AGENT 不在 PATH" >&2; exit 1; }
+case "$AGENT_BIN" in
+  /*) ;;
+  *) echo "❌ $AGENT 必须可解析为绝对路径: $AGENT_BIN" >&2; exit 1 ;;
+esac
+TCLAUDE_GUARD="$PROJECT_ROOT/runners/tclaude_guard.py"
 [ -f "$TCLAUDE_GUARD" ] || { echo "❌ 找不到 guard: $TCLAUDE_GUARD" >&2; exit 1; }
 
 # 模型路径恒为占位符 —— 第一步机器无关,不绑死任何机器的物理路径。
@@ -211,6 +221,7 @@ SCHEMA='{"type":"object","required":["candidates"],"properties":{"candidates":{"
 # model unable to execute commands or mutate the workspace, and ignore project/user settings,
 # hooks, slash commands, browser integration, and ambient MCP servers.
 AGENT_POLICY_ARGS=(
+  --restricted
   --tools "Read,Grep,Glob"
   --disallowedTools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch"
   --permission-mode dontAsk
@@ -282,8 +293,7 @@ PROMPT="${PROMPT_PREFIX}"$'\n'"${JOB_JSON}"$'\n'"${PROMPT_SUFFIX}"
 # 第 4 步:调 tclaude(AI 决策,约 2 分钟)
 # ─────────────────────────────────────────────────────────────────────────
 # 用 tclaude -p "$PROMPT" 非交互模式调用 AI。关键参数:
-#   --add-dir .           让 tclaude 能读项目根下的 catalogs/ 等
-#   --add-dir $SKILL_DIR  让 tclaude 能读 SKILL.md/knowledge.md
+#   --add-dir .           仅允许读取临时 staging 里的 allowlist 知识文件
 #   --json-schema         约束 tclaude 返回 {candidates:[...]} 结构
 #   --output-format json  让 tclaude 输出 JSON(而非纯文本)
 # AI 读知识库 → 查表(gpu/model/workload/image)→ 推导 TP/attention/mem-fraction
@@ -316,18 +326,24 @@ validate_decimal_range GEN_TIMEOUT_GRACE_SECONDS "$GEN_TIMEOUT_GRACE_SECONDS" 1 
 validate_decimal_range GEN_MAX_RETRIES "$GEN_MAX_RETRIES" 0 10 || exit $?
 MAX_ATTEMPTS=$((10#$GEN_MAX_RETRIES + 1))
 
-RAW_DIR="claude-raw-outputs"
+RAW_DIR="$PROJECT_ROOT/claude-raw-outputs"
 mkdir -p "$RAW_DIR"
 
-SUCCESS_PATH_FILE="$(mktemp "$RAW_DIR/.${JOB_ID}.success.XXXXXX")"
-rm -f -- "$SUCCESS_PATH_FILE"
+SUCCESS_PATH_FILE=""
 OUT_TMP=""
+STAGING_DIR=""
 INTERRUPTED=0
 
 cleanup_temporary_files() {
   local rc=$?
   [ -z "$SUCCESS_PATH_FILE" ] || rm -f -- "$SUCCESS_PATH_FILE"
   [ -z "$OUT_TMP" ] || rm -f -- "$OUT_TMP"
+  if [ -n "$STAGING_DIR" ]; then
+    case "$STAGING_DIR" in
+      /tmp/llm-infer-tuner-gen.*) rm -rf -- "$STAGING_DIR" ;;
+      *) echo "❌ 拒绝清理非预期 staging 路径: $STAGING_DIR" >&2 ;;
+    esac
+  fi
   return "$rc"
 }
 
@@ -337,6 +353,50 @@ record_interrupt() {
 
 trap cleanup_temporary_files EXIT
 trap record_interrupt INT
+trap 'exit 143' TERM
+
+STAGING_DIR="$(mktemp -d /tmp/llm-infer-tuner-gen.XXXXXX)"
+install -d -m 700 \
+  "$STAGING_DIR/$SKILL_DIR" \
+  "$STAGING_DIR/catalogs"
+
+stage_regular_file() {
+  local source="$1" destination="$2"
+  if [ ! -f "$source" ] || [ -L "$source" ]; then
+    echo "❌ staging 源文件必须是普通文件且不能是符号链接: $source" >&2
+    return 1
+  fi
+  install -m 600 -- "$source" "$destination"
+  if [ ! -f "$destination" ] || [ -L "$destination" ]; then
+    echo "❌ staging 目标文件无效: $destination" >&2
+    return 1
+  fi
+}
+
+# Agent 的可见工作区只含这 6 个审核过的知识文件。JobSpec 已嵌入 prompt，
+# 不复制 .env、input/、outputs/、raw logs、.git 或项目中的其他文件。
+stage_regular_file \
+  "$PROJECT_ROOT/$SKILL_DIR/SKILL.md" \
+  "$STAGING_DIR/$SKILL_DIR/SKILL.md"
+stage_regular_file \
+  "$PROJECT_ROOT/$SKILL_DIR/knowledge.md" \
+  "$STAGING_DIR/$SKILL_DIR/knowledge.md"
+for catalog_name in gpu.yaml models.yaml sglang-images.yaml workloads.yaml; do
+  stage_regular_file \
+    "$PROJECT_ROOT/catalogs/$catalog_name" \
+    "$STAGING_DIR/catalogs/$catalog_name"
+done
+
+SUCCESS_PATH_FILE="$(mktemp "$RAW_DIR/.${JOB_ID}.success.XXXXXX")"
+rm -f -- "$SUCCESS_PATH_FILE"
+
+run_guard_from_staging() {
+  (
+    cd "$STAGING_DIR"
+    unset OLDPWD PYTHONPATH CDPATH BASH_ENV ENV GIT_DIR GIT_WORK_TREE
+    "${GUARD_ARGS[@]}" "$@"
+  )
+}
 
 echo "ℹ️  模型路径在命令里保留占位符 \${MODEL_PATH}(机器无关);第二步由 targets.json 填入实际路径。" >&2
 echo "ℹ️  $AGENT 模型 → ${MODEL:-<$AGENT 自身默认>} ($MODEL_SOURCE)" >&2
@@ -344,7 +404,7 @@ echo "ℹ️  防护 → 单次软超时 ${GEN_TIMEOUT_SECONDS}s, TERM→KILL �
 echo "ℹ️  输出 → $OUT" >&2
 
 GUARD_ARGS=(
-  python3 "$TCLAUDE_GUARD"
+  "$PYTHON_BIN" "$TCLAUDE_GUARD"
   --timeout-seconds "$GEN_TIMEOUT_SECONDS"
   --grace-seconds "$GEN_TIMEOUT_GRACE_SECONDS"
   --max-retries "$GEN_MAX_RETRIES"
@@ -359,20 +419,19 @@ if [ "$GEN_STREAM" != "0" ]; then
   echo "────────────────────────────────────────────────────────────" >&2
 
   TCLAUDE_COMMAND=(
-    "$AGENT" -p "$PROMPT" "${AGENT_MODEL_ARGS[@]}"
+    "$AGENT_BIN" -p "$PROMPT" "${AGENT_MODEL_ARGS[@]}"
     --output-format stream-json
     --verbose
     --include-partial-messages
     --json-schema "$SCHEMA"
     --add-dir .
-    --add-dir "$SKILL_DIR"
     "${AGENT_POLICY_ARGS[@]}"
   )
 
   # set -euo pipefail 下临时关 -e；必须第一时间完整保存 PIPESTATUS，
   # 否则后续任何命令都会覆盖 guard/renderer 的真实退出码。
   set +e
-  "${GUARD_ARGS[@]}" --stdout-suffix jsonl --forward-stdout -- "${TCLAUDE_COMMAND[@]}" \
+  run_guard_from_staging --stdout-suffix jsonl --forward-stdout -- "${TCLAUDE_COMMAND[@]}" \
   | jq -R --unbuffered -rj '
       # 每行一个事件 → 只渲染「进度骨架」到 stderr:一个动作一行,不刷屏。
       # -R:把每行当原始字符串读,再 fromjson —— tclaude 每行是完整 JSON,
@@ -424,15 +483,14 @@ else
   # ── 回退:旧的单 JSON 对象行为(GEN_STREAM=0)────────────────────────
   echo "▶ 调 $AGENT 生成配置(非流式,读 skill+knowledge+catalogs,几分钟)…" >&2
   TCLAUDE_COMMAND=(
-    "$AGENT" -p "$PROMPT" "${AGENT_MODEL_ARGS[@]}"
+    "$AGENT_BIN" -p "$PROMPT" "${AGENT_MODEL_ARGS[@]}"
     --output-format json
     --json-schema "$SCHEMA"
     --add-dir .
-    --add-dir "$SKILL_DIR"
     "${AGENT_POLICY_ARGS[@]}"
   )
   set +e
-  "${GUARD_ARGS[@]}" --stdout-suffix json -- "${TCLAUDE_COMMAND[@]}"
+  run_guard_from_staging --stdout-suffix json -- "${TCLAUDE_COMMAND[@]}"
   GUARD_RC=$?
   set -e
   if [ "$INTERRUPTED" -ne 0 ] || [ "$GUARD_RC" -eq 130 ]; then
@@ -524,7 +582,7 @@ else
   fi
 fi
 
-if ! python3 -m schemas.validate_cli candidates "$JOB" "$OUT_TMP"; then
+if ! "$PYTHON_BIN" -m schemas.validate_cli candidates "$JOB" "$OUT_TMP"; then
   echo "❌ candidate validation failed: $OUT_TMP；已有输出未修改" >&2
   exit 1
 fi
