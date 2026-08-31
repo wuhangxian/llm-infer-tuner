@@ -17,13 +17,27 @@ on throughput(C*) exactly as in production.
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
 from runners import executor as ex
 from runners.executor import ExecutorConfig, run_executor
+from runners.preflight import (
+    CONTAINERS_QUERY_COMMAND,
+    GPU_PIDS_QUERY_COMMAND,
+    GPU_QUERY_COMMAND,
+    HOME_QUERY_COMMAND,
+    LISTENERS_QUERY_COMMAND,
+    NUMA_QUERY_COMMAND,
+    SSH_PROBE_COMMAND,
+    CandidatePlacement,
+    PreflightPlan,
+)
 
 # --- fakes --------------------------------------------------------------------
 
@@ -44,24 +58,41 @@ class _FakeResult:
 class _FakeRemote:
     """Answers only the host-shell commands run_executor issues before docker."""
 
+    def __init__(self, gpu_count: int = 8) -> None:
+        self.gpu_count = gpu_count
+
     def run(self, command: str, *, timeout=None) -> _FakeResult:
-        if command == "nvidia-smi topo -m":
+        del timeout
+        if command == SSH_PROBE_COMMAND:
+            return _FakeResult(stdout="llm-infer-tuner-preflight-ok\n")
+        if command == GPU_QUERY_COMMAND:
             rows = [
-                *(f"GPU{gpu_id} X SYS 0" for gpu_id in range(4)),
-                *(f"GPU{gpu_id} SYS X 1" for gpu_id in range(4, 8)),
+                f"{gpu_id}, NVIDIA PRO 5000, 72832"
+                for gpu_id in range(self.gpu_count)
             ]
             return _FakeResult(stdout="\n".join(rows) + "\n")
-        if command.startswith("echo $HOME"):
+        if command == NUMA_QUERY_COMMAND:
+            boundary = max(1, self.gpu_count // 2)
+            rows = [
+                f"GPU{gpu_id} X SYS {0 if gpu_id < boundary else 1}"
+                for gpu_id in range(self.gpu_count)
+            ]
+            return _FakeResult(stdout="\n".join(rows) + "\n")
+        if command == HOME_QUERY_COMMAND:
             return _FakeResult(stdout="/home/fake\n")
-        if command == "echo ok":
-            return _FakeResult(stdout="ok\n")
         if command.startswith("test -d"):
-            return _FakeResult(stdout="config.json\nsafetensors\n")
+            return _FakeResult()
         if command.startswith("docker image inspect"):
             return _FakeResult(stdout="sha256:abcdef\n")
         if command.startswith("docker pull"):
             return _FakeResult(stdout="\n")
-        return _FakeResult(stdout="")
+        if command == CONTAINERS_QUERY_COMMAND:
+            return _FakeResult(stdout="[]\n")
+        if command in {GPU_PIDS_QUERY_COMMAND, LISTENERS_QUERY_COMMAND}:
+            return _FakeResult()
+        if command.startswith("mkdir -p"):
+            return _FakeResult()
+        return _FakeResult(returncode=127, stderr=f"unexpected fake command: {command}")
 
 
 class _FakeContainer:
@@ -87,9 +118,11 @@ class _FakeContainer:
         self.last_bench_jsonl = ""
         self._result_files: dict[str, str] = {}   # container path -> jsonl text
         self.launched_cmds: list[str] = []        # 每次 exec_detached 收到的 server 启动命令
+        self.container_exists = False
 
     # -- lifecycle no-ops the executor calls on the container object ------------
     def start(self, *, timeout=None) -> _FakeResult:
+        self.container_exists = True
         return _FakeResult()
 
     def is_running(self, *, timeout=None) -> bool:
@@ -99,7 +132,13 @@ class _FakeContainer:
         return _FakeResult()
 
     def remove(self, *, force: bool = True, timeout=None) -> _FakeResult:
+        self.container_exists = False
         return _FakeResult()
+
+    def inspect(self, *, timeout=None) -> _FakeResult:
+        if self.container_exists:
+            return _FakeResult()
+        return _FakeResult(returncode=1, stderr="No such object")
 
     def exec_detached(self, command: str, log_container_path: str, *, timeout=None):
         # launching a candidate's server: infer which candidate from the -v mount
@@ -120,9 +159,12 @@ class _FakeContainer:
 
     # -- the workhorse ---------------------------------------------------------
     def exec(self, command: str, *, timeout=None) -> _FakeResult:
-        if "pgrep -f sglang.launch_server" in command:
+        if command == f"pgrep -f {shlex.quote(ex.SERVER_PROCESS_PATTERN)}":
             return _FakeResult(0 if self.alive else 1)
-        if "pkill -f sglang.launch_server" in command:
+        if command in {
+            f"pkill -TERM -f {shlex.quote(ex.SERVER_PROCESS_PATTERN)}",
+            f"pkill -KILL -f {shlex.quote(ex.SERVER_PROCESS_PATTERN)}",
+        }:
             self.alive = False
             self.current = None
             return _FakeResult()
@@ -223,6 +265,7 @@ class _FlakyContainerStart(_FakeContainer):
         self.container_running = False
 
     def start(self, *, timeout=None) -> _FakeResult:
+        self.container_exists = True
         if self.failures_remaining > 0:
             self.failures_remaining -= 1
             self.container_running = False
@@ -235,7 +278,147 @@ class _FlakyContainerStart(_FakeContainer):
 
     def remove(self, *, force: bool = True, timeout=None) -> _FakeResult:
         self.container_running = False
+        self.container_exists = False
         return _FakeResult()
+
+
+class _BatchStopFailureContainer(_FakeContainer):
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate)
+        self.remove_calls = 0
+
+    def stop(self, *, timeout=None) -> _FakeResult:
+        return _FakeResult(returncode=1, stderr="synthetic stop failure")
+
+    def remove(self, *, force: bool = True, timeout=None) -> _FakeResult:
+        self.remove_calls += 1
+        self.container_exists = False
+        return _FakeResult()
+
+
+class _StartupRemoveFailureContainer(_FlakyContainerStart):
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate, failures_before_ready=99)
+        self.start_calls = 0
+        self.remove_calls = 0
+
+    def start(self, *, timeout=None) -> _FakeResult:
+        self.start_calls += 1
+        return super().start(timeout=timeout)
+
+    def remove(self, *, force: bool = True, timeout=None) -> _FakeResult:
+        self.remove_calls += 1
+        return _FakeResult(returncode=1, stderr="synthetic remove failure")
+
+
+class _ServerCleanupFailureContainer(_FakeContainer):
+    def exec(self, command: str, *, timeout=None) -> _FakeResult:
+        if command == f"pkill -TERM -f {shlex.quote(ex.SERVER_PROCESS_PATTERN)}":
+            return _FakeResult(returncode=2, stderr="synthetic pkill failure")
+        return super().exec(command, timeout=timeout)
+
+
+class _MissingOnFailedStartContainer(_FakeContainer):
+    """The first docker run fails before creating a container."""
+
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate)
+        self.start_calls = 0
+        self.remove_calls = 0
+        self.events: list[str] = []
+        self.container_running = False
+
+    def start(self, *, timeout=None) -> _FakeResult:
+        self.start_calls += 1
+        if self.start_calls == 1:
+            self.container_exists = False
+            self.container_running = False
+            self.events.append("start-failed-before-create")
+            return _FakeResult(returncode=125, stderr="synthetic docker run failure")
+        self.container_exists = True
+        self.container_running = True
+        self.events.append("start-created")
+        return _FakeResult()
+
+    def is_running(self, *, timeout=None) -> bool:
+        return self.container_running
+
+    def inspect(self, *, timeout=None) -> _FakeResult:
+        self.events.append("inspect-present" if self.container_exists else "inspect-absent")
+        return super().inspect(timeout=timeout)
+
+    def remove(self, *, force: bool = True, timeout=None) -> _FakeResult:
+        self.remove_calls += 1
+        self.events.append("remove")
+        self.container_running = False
+        return super().remove(force=force, timeout=timeout)
+
+
+class _AmbiguousFailedStartContainer(_FakeContainer):
+    """A failed docker run followed by an untrustworthy inspect response."""
+
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate)
+        self.start_calls = 0
+
+    def start(self, *, timeout=None) -> _FakeResult:
+        self.start_calls += 1
+        return _FakeResult(returncode=125, stderr="synthetic docker run failure")
+
+    def is_running(self, *, timeout=None) -> bool:
+        return False
+
+    def inspect(self, *, timeout=None) -> _FakeResult:
+        return _FakeResult(returncode=1, stderr="permission denied by docker daemon")
+
+
+class _DelayedTermExitContainer(_FakeContainer):
+    """A server needs two post-TERM polls before exiting normally."""
+
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate)
+        self.cleanup_active = False
+        self.cleanup_polls = 0
+        self.term_calls = 0
+        self.kill_calls = 0
+
+    @property
+    def _pattern(self) -> str:
+        return shlex.quote(ex.SERVER_PROCESS_PATTERN)
+
+    def exec_detached(self, command: str, log_container_path: str, *, timeout=None):
+        self.cleanup_active = False
+        self.cleanup_polls = 0
+        return super().exec_detached(command, log_container_path, timeout=timeout)
+
+    def exec(self, command: str, *, timeout=None) -> _FakeResult:
+        if command == f"pkill -TERM -f {self._pattern}":
+            self.term_calls += 1
+            self.cleanup_active = True
+            self.cleanup_polls = 0
+            return _FakeResult()
+        if command == f"pkill -KILL -f {self._pattern}":
+            self.kill_calls += 1
+            self.alive = False
+            return _FakeResult()
+        if command == f"pgrep -f {self._pattern}" and self.cleanup_active:
+            self.cleanup_polls += 1
+            if self.cleanup_polls >= 2:
+                self.alive = False
+                return _FakeResult(returncode=1)
+            return _FakeResult()
+        if command.startswith("pkill "):
+            return _FakeResult(returncode=127, stderr=f"unexpected kill command: {command}")
+        return super().exec(command, timeout=timeout)
+
+
+class _RequiresKillServerContainer(_DelayedTermExitContainer):
+    """A server ignores TERM and disappears only after KILL."""
+
+    def exec(self, command: str, *, timeout=None) -> _FakeResult:
+        if command == f"pgrep -f {self._pattern}" and self.cleanup_active:
+            return _FakeResult(0 if self.alive else 1)
+        return super().exec(command, timeout=timeout)
 
 
 def _flag_int(parts: list[str], flag: str) -> int:
@@ -395,6 +578,54 @@ def test_two_round_dryrun_ranks_by_true_goodput(tmp_path, workloads_output_len):
     assert (results_dir / "ranking.json").exists()
     for cid in cstar:
         assert (results_dir / cid / "run_result.r1.json").exists()
+
+
+def test_executor_consumes_preflight_plan_for_both_rounds(
+    tmp_path, workloads_output_len, monkeypatch
+):
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path),
+        configs_path=_write_configs(tmp_path, ["solo"]),
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+    )
+    placement = CandidatePlacement("solo", (0,), 30000)
+    plan = PreflightPlan(
+        candidate_ids=("solo",),
+        numa_groups=((0, 1, 2, 3), (4, 5, 6, 7)),
+        round1_batches=((placement,),),
+        round2_batches=((placement,),),
+        fill_host_placements=(),
+        required_ports=(30000,),
+    )
+    prepared: list[object] = []
+
+    def fake_prepare(remote, request):
+        prepared.append((remote, request))
+        return plan
+
+    def stale_path(*args, **kwargs):
+        raise AssertionError("executor must consume PreflightPlan, not re-plan")
+
+    monkeypatch.setattr(ex, "prepare_remote_host", fake_prepare, raising=False)
+    monkeypatch.setattr(ex, "_preflight_checks", stale_path, raising=False)
+    monkeypatch.setattr(ex, "_detect_numa_groups", stale_path)
+    monkeypatch.setattr(ex, "_plan_candidate_batches", stale_path)
+    monkeypatch.setattr(ex, "_allocate_gpus_and_ports", stale_path)
+    container = _FakeContainer({"solo": 2})
+    monkeypatch.setattr(ex, "Container", lambda _remote, _config: container)
+
+    summary = run_executor(config, remote=_FakeRemote())
+
+    assert len(prepared) == 1
+    assert summary["task_status"] == "COMPLETED"
+    assert {
+        port for _candidate, _concurrency, port in container.bench_ports
+    } == {30000}
 
 
 def test_baseline_plus_32_candidates_all_enter_round2_and_keep_one_row(
@@ -695,7 +926,7 @@ def test_executor_reuses_high_ports_after_topology_aware_batch_split(
     original_container = ex.Container
     ex.Container = lambda _remote, _cfg: container
     try:
-        summary = run_executor(config, remote=_FakeRemote())
+        summary = run_executor(config, remote=_FakeRemote(gpu_count=2))
     finally:
         ex.Container = original_container
 
@@ -1133,3 +1364,294 @@ def test_exhausted_startup_retries_keeps_failed_candidate_row(
     assert row["failed_at"]
     assert row["failed_round"] == 2
     assert row["failure_reason"]
+
+
+def _lifecycle_test_config(tmp_path: Path, candidate_id: str) -> ExecutorConfig:
+    return ExecutorConfig(
+        job_path=_write_job(tmp_path),
+        configs_path=_write_configs(tmp_path, [candidate_id]),
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=1,
+        startup_max_attempts=3,
+    )
+
+
+def test_batch_stop_failure_still_attempts_remove_and_aborts_final_ranking(
+    tmp_path, workloads_output_len
+):
+    container = _BatchStopFailureContainer({"cleanup-stop": 2})
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        with pytest.raises(RuntimeError, match="cleanup"):
+            run_executor(
+                _lifecycle_test_config(tmp_path, "cleanup-stop"),
+                remote=_FakeRemote(),
+            )
+    finally:
+        ex.Container = original_container
+
+    assert container.remove_calls >= 1
+    assert not (tmp_path / "results" / "ranking.json").exists()
+
+
+def test_startup_remove_failure_stops_retry_and_aborts_final_ranking(
+    tmp_path, workloads_output_len
+):
+    container = _StartupRemoveFailureContainer({"cleanup-startup": 2})
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        with pytest.raises(RuntimeError, match="cleanup"):
+            run_executor(
+                _lifecycle_test_config(tmp_path, "cleanup-startup"),
+                remote=_FakeRemote(),
+            )
+    finally:
+        ex.Container = original_container
+
+    assert container.start_calls == 1
+    assert not (tmp_path / "results" / "ranking.json").exists()
+
+
+def test_server_pkill_failure_aborts_final_ranking(
+    tmp_path, workloads_output_len, monkeypatch
+):
+    monkeypatch.setattr(ex, "SERVER_CLEANUP_TERM_POLL_ATTEMPTS", 2)
+    monkeypatch.setattr(ex, "SERVER_CLEANUP_TERM_POLL_INTERVAL_S", 0)
+    container = _ServerCleanupFailureContainer({"cleanup-server": 2})
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        with pytest.raises(RuntimeError, match="cleanup"):
+            run_executor(
+                _lifecycle_test_config(tmp_path, "cleanup-server"),
+                remote=_FakeRemote(),
+            )
+    finally:
+        ex.Container = original_container
+
+    assert not (tmp_path / "results" / "ranking.json").exists()
+
+
+def test_start_failure_before_container_creation_retries_without_remove(
+    tmp_path, workloads_output_len
+):
+    container = _MissingOnFailedStartContainer({"missing-first": 2})
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(
+            _lifecycle_test_config(tmp_path, "missing-first"),
+            remote=_FakeRemote(),
+        )
+    finally:
+        ex.Container = original_container
+
+    assert summary["task_status"] == "COMPLETED"
+    assert container.events[:3] == [
+        "start-failed-before-create",
+        "inspect-absent",
+        "start-created",
+    ]
+    # There is no remove between the failed run and its safe retry. Later
+    # successful round cleanup still removes the containers it created.
+    assert container.start_calls == container.remove_calls + 1
+
+
+def test_ambiguous_inspect_after_failed_start_blocks_retry_and_final_ranking(
+    tmp_path, workloads_output_len
+):
+    container = _AmbiguousFailedStartContainer({"ambiguous": 2})
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        with pytest.raises(RuntimeError, match="permission denied"):
+            run_executor(
+                _lifecycle_test_config(tmp_path, "ambiguous"),
+                remote=_FakeRemote(),
+            )
+    finally:
+        ex.Container = original_container
+
+    assert container.start_calls == 1
+    assert not (tmp_path / "results" / "ranking.json").exists()
+
+
+def test_startup_cleanup_failure_prevents_starting_later_batch_candidates(
+    tmp_path, workloads_output_len
+):
+    first = _StartupRemoveFailureContainer({"first": 2})
+    second = _MissingOnFailedStartContainer({"second": 2})
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path, max_candidates=2),
+        configs_path=_write_configs(tmp_path, ["first", "second"]),
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=2,
+        startup_max_attempts=3,
+    )
+
+    def _container_factory(_remote, container_config):
+        if container_config.name.endswith("-first"):
+            return first
+        if container_config.name.endswith("-second"):
+            return second
+        raise AssertionError(container_config.name)
+
+    original_container = ex.Container
+    ex.Container = _container_factory
+    try:
+        with pytest.raises(RuntimeError, match="cleanup"):
+            run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    assert first.start_calls == 1
+    assert first.remove_calls >= 2  # initial cleanup plus best-effort batch cleanup
+    assert second.start_calls == 0
+    assert not (tmp_path / "results" / "ranking.json").exists()
+
+
+def test_server_process_pattern_avoids_self_match_and_finds_real_target():
+    pattern = ex.SERVER_PROCESS_PATTERN
+    no_target = subprocess.run(
+        ["bash", "-lc", f"pgrep -f {shlex.quote(pattern)}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert no_target.returncode == 1, no_target.stdout
+
+    target = subprocess.Popen(
+        ["bash", "-c", "exec -a sglang.launch_server sleep 30"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(50):
+            matched = subprocess.run(
+                ["bash", "-lc", f"pgrep -f {shlex.quote(pattern)}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if str(target.pid) in matched.stdout.split():
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail(f"pattern did not find target pid {target.pid}: {matched!r}")
+    finally:
+        target.terminate()
+        target.wait(timeout=5)
+
+
+def test_server_cleanup_waits_for_real_delayed_term_exit(monkeypatch):
+    name = f"llm-infer-cleanup-{os.getpid()}"
+    pattern = f"[l]{name[1:]}"
+    script = (
+        "import signal,sys,time; "
+        "signal.signal(signal.SIGTERM, lambda *_: (time.sleep(0.2), sys.exit(0))); "
+        "time.sleep(30)"
+    )
+    target = subprocess.Popen(
+        ["bash", "-c", f"exec -a {shlex.quote(name)} python3 -c {shlex.quote(script)}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    class _LocalProcessContainer:
+        def __init__(self) -> None:
+            self.commands: list[str] = []
+
+        def exec(self, command: str, *, timeout=None) -> _FakeResult:
+            self.commands.append(command)
+            result = subprocess.run(
+                ["bash", "-lc", command],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            return _FakeResult(result.returncode, result.stdout, result.stderr)
+
+    container = _LocalProcessContainer()
+    monkeypatch.setattr(ex, "SERVER_PROCESS_PATTERN", pattern)
+    monkeypatch.setattr(ex, "SERVER_CLEANUP_TERM_POLL_ATTEMPTS", 20)
+    monkeypatch.setattr(ex, "SERVER_CLEANUP_TERM_POLL_INTERVAL_S", 0.025)
+    try:
+        for _ in range(100):
+            ready = subprocess.run(
+                ["bash", "-lc", f"pgrep -f {shlex.quote(pattern)}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if str(target.pid) in ready.stdout.split():
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("delayed-exit target did not start")
+
+        started = time.monotonic()
+        ex._cleanup_servers_checked(container, candidate_id="real-delayed-exit")
+        elapsed = time.monotonic() - started
+
+        assert elapsed >= 0.15
+        assert not any("pkill -KILL" in command for command in container.commands)
+        target.wait(timeout=5)
+    finally:
+        if target.poll() is None:
+            target.kill()
+            target.wait(timeout=5)
+
+
+def test_server_cleanup_allows_bounded_delayed_exit_after_term(
+    tmp_path, workloads_output_len, monkeypatch
+):
+    monkeypatch.setattr(ex, "SERVER_CLEANUP_TERM_POLL_ATTEMPTS", 3)
+    monkeypatch.setattr(ex, "SERVER_CLEANUP_TERM_POLL_INTERVAL_S", 0)
+    container = _DelayedTermExitContainer({"delayed-exit": 2})
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(
+            _lifecycle_test_config(tmp_path, "delayed-exit"),
+            remote=_FakeRemote(),
+        )
+    finally:
+        ex.Container = original_container
+
+    assert summary["task_status"] == "COMPLETED"
+    assert container.term_calls >= 2
+    assert container.kill_calls == 0
+
+
+def test_server_cleanup_escalates_to_kill_then_proves_absence(
+    tmp_path, workloads_output_len, monkeypatch
+):
+    monkeypatch.setattr(ex, "SERVER_CLEANUP_TERM_POLL_ATTEMPTS", 3)
+    monkeypatch.setattr(ex, "SERVER_CLEANUP_TERM_POLL_INTERVAL_S", 0)
+    container = _RequiresKillServerContainer({"requires-kill": 2})
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(
+            _lifecycle_test_config(tmp_path, "requires-kill"),
+            remote=_FakeRemote(),
+        )
+    finally:
+        ex.Container = original_container
+
+    assert summary["task_status"] == "COMPLETED"
+    assert container.term_calls >= 2
+    assert container.kill_calls >= 2

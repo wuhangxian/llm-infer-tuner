@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
@@ -26,6 +27,13 @@ from runners.bench_runner import (
 from runners.concurrency_search import SearchOutcome, search_saturation
 from runners.container import Container, ContainerConfig
 from runners.metrics import RunResult, parse_bench_text
+from runners.preflight import (
+    CandidatePlacement,
+    FillHostPlacement,
+    PreflightRequest,
+    prepare_remote_host,
+    validate_local_preflight,
+)
 from runners.ranker import data_health_check, passes_sla, rank_candidates
 from runners.readiness import make_health_probe, wait_until_ready
 from runners.remote import RemoteRunner
@@ -51,6 +59,13 @@ ROUND2_CONFIRM = 2      # precise: re-probe boundary passes AND fails (see searc
 DEFAULT_TOP_K = 5
 DEFAULT_MAX_CAP = 256
 WARMUP_CONCURRENCY = 2  # server ready 后、正式搜索前的预热并发档(结果丢弃,只热 kernel)
+# The bracketed spelling matches the real module name while keeping the literal
+# ``sglang.launch_server`` out of pgrep/pkill's own shell command line.
+SERVER_PROCESS_PATTERN = "[s]glang[.]launch_server"
+SERVER_CLEANUP_TERM_POLL_ATTEMPTS = 21
+SERVER_CLEANUP_TERM_POLL_INTERVAL_S = 0.5
+SERVER_CLEANUP_KILL_POLL_ATTEMPTS = 5
+SERVER_CLEANUP_KILL_POLL_INTERVAL_S = 0.1
 
 DEFAULT_WORKLOADS_PATH = Path(__file__).resolve().parents[1] / "catalogs" / "workloads.yaml"
 
@@ -89,9 +104,14 @@ class ExecutorConfig:
     max_parallel: int = 8  # 批内并发跑多少个候选(每个独占容器+GPU+端口);1 = 退回串行
     fill_host: bool = False  # round2 是否按 topology 复制实际可放置实例做整机满载实测
     allow_cross_numa: bool = False  # 显式 opt-in；默认每个 TP/副本必须保持 NUMA-local
+    exclusive_host: bool = False  # 只有显式授权时才允许整机清理
     startup_stall_timeout_s: int = 300
     startup_hard_timeout_s: int = 900
     startup_max_attempts: int = 3
+
+
+class CleanupError(RuntimeError):
+    """A checked lifecycle cleanup failed, so resources cannot be safely reused."""
 
 
 def validate_port_span(base_port: int, span: int) -> tuple[int, int]:
@@ -106,6 +126,21 @@ def validate_port_span(base_port: int, span: int) -> tuple[int, int]:
             f"port span {base_port}-{end_port} exceeds 65535 (span={span})"
         )
     return base_port, end_port
+
+
+def _prepare_local_results_dir(path: Path) -> None:
+    """Create and write-probe the local result directory before any SSH work."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            dir=path,
+            prefix=".llm-infer-tuner-write-check-",
+        ):
+            pass
+    except OSError as exc:
+        raise RuntimeError(
+            f"local results directory is not writable: {path}"
+        ) from exc
 
 
 def _load_job(job_path: Path) -> JobSpec:
@@ -192,6 +227,7 @@ class _CandidateContext:
     replica_ports: list[int] | None = None
     replica_gpus: list[str] | None = None  # 每个副本的 CUDA_VISIBLE_DEVICES 值(如 "0,1")
     container_ready: bool = False
+    container_present: bool = False
     container_start_failures: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -680,6 +716,155 @@ def _format_alloc(alloc: list[tuple[dict[str, Any], str, int]]) -> str:
     return "  ".join(parts)
 
 
+def _alloc_from_preflight_batch(
+    batch: tuple[CandidatePlacement, ...],
+    candidates_by_id: dict[str, dict[str, Any]],
+) -> list[tuple[dict[str, Any], str, int]]:
+    """Translate one validated plan batch into the legacy execution tuple shape."""
+    allocations: list[tuple[dict[str, Any], str, int]] = []
+    for placement in batch:
+        try:
+            candidate = candidates_by_id[placement.candidate_id]
+        except KeyError as exc:
+            raise ValueError(
+                f"preflight plan references unknown candidate {placement.candidate_id!r}"
+            ) from exc
+        gpu_spec = "device=" + ",".join(str(gpu_id) for gpu_id in placement.gpu_ids)
+        allocations.append((candidate, gpu_spec, placement.port))
+    return allocations
+
+
+def _result_failure(label: str, result) -> str | None:
+    if result.ok:
+        return None
+    detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic"
+    return f"{label} rc={result.returncode}: {detail}"
+
+
+def _container_inspection_state(container: Container, *, timeout: int) -> tuple[str, str]:
+    """Return present/absent/unknown; only explicit Docker no-such proves absence."""
+    try:
+        inspection = container.inspect(timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 - unknown state is unsafe
+        return "unknown", f"inspect raised {exc!r}"
+    if inspection.ok:
+        return "present", ""
+    detail = inspection.stderr.strip() or inspection.stdout.strip() or "no diagnostic"
+    if inspection.returncode == 1 and re.search(
+        r"\bno such (?:object|container)\b",
+        detail,
+        flags=re.IGNORECASE,
+    ):
+        return "absent", ""
+    return "unknown", f"inspect rc={inspection.returncode}: {detail}"
+
+
+def _cleanup_container_checked(
+    container: Container,
+    *,
+    candidate_id: str,
+    stop_first: bool,
+    timeout: int,
+) -> list[str]:
+    """Try every container cleanup step and return all failures, including residue."""
+    failures: list[str] = []
+    if stop_first:
+        try:
+            failure = _result_failure(
+                "stop",
+                container.stop(timeout=timeout),
+            )
+            if failure:
+                failures.append(failure)
+        except Exception as exc:  # noqa: BLE001 - still attempt remove/postcheck
+            failures.append(f"stop raised {exc!r}")
+    try:
+        failure = _result_failure(
+            "remove",
+            container.remove(force=True, timeout=timeout),
+        )
+        if failure:
+            failures.append(failure)
+    except Exception as exc:  # noqa: BLE001 - still perform postcheck
+        failures.append(f"remove raised {exc!r}")
+    state, detail = _container_inspection_state(container, timeout=timeout)
+    if state == "present":
+        failures.append("postcheck found container still present")
+    elif state == "unknown":
+        failures.append(f"postcheck {detail}")
+    return [f"candidate {candidate_id}: {failure}" for failure in failures]
+
+
+def _cleanup_servers_checked(container: Container, *, candidate_id: str) -> None:
+    """Bound TERM/KILL cleanup and prove no launch_server process remains."""
+    failures: list[str] = []
+    pattern = shlex.quote(SERVER_PROCESS_PATTERN)
+
+    def _poll_absent(
+        *,
+        label: str,
+        attempts: int,
+        interval_s: float,
+    ) -> bool | None:
+        """Return True/False for absent/still-present, None for unknown state."""
+        for attempt in range(attempts):
+            try:
+                residual = container.exec(f"pgrep -f {pattern}")
+            except Exception as exc:  # noqa: BLE001 - unsafe unknown state
+                failures.append(f"{label} pgrep raised {exc!r}")
+                return None
+            if residual.returncode == 1:
+                return True
+            if not residual.ok:
+                failures.append(
+                    _result_failure(f"{label} pgrep", residual)
+                    or f"{label} pgrep failed"
+                )
+                return None
+            if attempt + 1 < attempts:
+                time.sleep(interval_s)
+        return False
+
+    try:
+        terminated = container.exec(f"pkill -TERM -f {pattern}")
+        if terminated.returncode not in (0, 1):
+            failures.append(
+                _result_failure("TERM pkill", terminated) or "TERM pkill failed"
+            )
+    except Exception as exc:  # noqa: BLE001 - still attempt proof/escalation
+        failures.append(f"TERM pkill raised {exc!r}")
+
+    absent = _poll_absent(
+        label="post-TERM",
+        attempts=SERVER_CLEANUP_TERM_POLL_ATTEMPTS,
+        interval_s=SERVER_CLEANUP_TERM_POLL_INTERVAL_S,
+    )
+    if absent is False:
+        try:
+            killed = container.exec(f"pkill -KILL -f {pattern}")
+            if killed.returncode not in (0, 1):
+                failures.append(
+                    _result_failure("KILL pkill", killed) or "KILL pkill failed"
+                )
+        except Exception as exc:  # noqa: BLE001 - still perform final proof
+            failures.append(f"KILL pkill raised {exc!r}")
+        absent = _poll_absent(
+            label="post-KILL",
+            attempts=SERVER_CLEANUP_KILL_POLL_ATTEMPTS,
+            interval_s=SERVER_CLEANUP_KILL_POLL_INTERVAL_S,
+        )
+
+    if absent is False:
+        failures.append("postcheck found launch_server process still running")
+    elif absent is None and not failures:
+        # Defensive fallback: _poll_absent records the diagnostic itself.
+        failures.append("postcheck could not determine launch_server process state")
+    if failures:
+        raise CleanupError(
+            f"server cleanup failed for candidate {candidate_id}: " + "; ".join(failures)
+        )
+
+
 def _run_batch_parallel(
     ctx_template: _CandidateContext,
     batch: list[tuple[dict[str, Any], str, int]],
@@ -696,6 +881,7 @@ def _run_batch_parallel(
     fill_host: bool = False,
     numa_groups: list[list[int]] | None = None,
     allow_cross_numa: bool = False,
+    fill_host_placements: dict[str, FillHostPlacement] | None = None,
 ) -> dict[str, SearchOutcome]:
     """Run a batch of candidates in parallel, each in its own container.
 
@@ -713,6 +899,7 @@ def _run_batch_parallel(
     job = ctx_template.job
     bench_template = ctx_template.bench_template
     multiplier = ctx_template.multiplier
+    lifecycle_cleanup_failures: list[str] = []
 
     containers: list[tuple[str, Container, _CandidateContext, dict[str, Any], str, int]] = []
 
@@ -729,19 +916,22 @@ def _run_batch_parallel(
         replica_ports: list[int] | None = None
         replica_gpus: list[str] | None = None
         if fill_host:
-            # 整机满载:按真实 NUMA topology 切副本；碎片不会被默认拼成跨 NUMA TP。
-            replica_slices = _plan_fill_host_replica_slices(
-                _devices,
-                _tp_size,
-                numa_groups,
-                allow_cross_numa=allow_cross_numa,
-            )
+            planned = (fill_host_placements or {}).get(candidate_id)
+            if planned is None:
+                raise ValueError(
+                    f"candidate {candidate_id}: fill-host preflight placement is missing"
+                )
+            replica_slices = [list(replica) for replica in planned.gpu_slices]
             n_replicas = len(replica_slices)
             if n_replicas < 1:
                 raise ValueError(
                     f"candidate {candidate_id}: 整机 {_n_devices} 卡放不下一个 tp_size={_tp_size} 实例。"
                 )
-            replica_ports = [port + i for i in range(n_replicas)]
+            replica_ports = list(planned.ports)
+            if len(replica_ports) != n_replicas or replica_ports[0] != port:
+                raise ValueError(
+                    f"candidate {candidate_id}: fill-host preflight ports disagree with batch"
+                )
             replica_gpus = [
                 ",".join(str(gpu_id) for gpu_id in replica_slice)
                 for replica_slice in replica_slices
@@ -767,6 +957,10 @@ def _run_batch_parallel(
             outputs_container_path=outputs_container_path,
             port=port,
             gpus=gpu_ids_str,
+            extra_run_args=(
+                "--label",
+                f"llm-infer-tuner.owner={config.container_name}",
+            ),
         )
         container = Container(remote, container_config)
         ctx = _CandidateContext(
@@ -782,9 +976,28 @@ def _run_batch_parallel(
         )
         containers.append((candidate_id, container, ctx, candidate, gpu_ids_str, port))
 
+    def _cleanup_created_containers() -> list[str]:
+        failures: list[str] = []
+        for candidate_id, container, ctx, _candidate, _gpu_ids, _port in containers:
+            if not ctx.container_present:
+                continue
+            cleanup_failures = _cleanup_container_checked(
+                container,
+                candidate_id=candidate_id,
+                stop_first=True,
+                timeout=config.startup_hard_timeout_s,
+            )
+            failures.extend(cleanup_failures)
+            if not cleanup_failures:
+                ctx.container_present = False
+        return failures
+
     # Start all containers in this batch. Container creation (including a
     # transient SSH 255) is part of bounded service startup recovery.
+    abort_startup = False
     for candidate_id, container, ctx, candidate, gpu_ids_str, port in containers:
+        if abort_startup:
+            break
         try:
             failed_round = int(round_label.removeprefix("r"))
         except ValueError:
@@ -795,11 +1008,23 @@ def _run_batch_parallel(
                 f"(GPUs={gpu_ids_str}, port={port}, "
                 f"attempt {attempt}/{config.startup_max_attempts}) ..."
             )
-            started = container.start(timeout=config.startup_hard_timeout_s)
-            if started.ok and container.is_running(timeout=config.startup_hard_timeout_s):
+            try:
+                started = container.start(timeout=config.startup_hard_timeout_s)
+                running = started.ok and container.is_running(
+                    timeout=config.startup_hard_timeout_s
+                )
+                reason = (
+                    started.stderr.strip()
+                    or started.stdout.strip()
+                    or "container not running"
+                )
+            except Exception as exc:  # noqa: BLE001 - inspect decides safe retry
+                running = False
+                reason = f"container start raised: {exc!r}"
+            if running:
                 ctx.container_ready = True
+                ctx.container_present = True
                 break
-            reason = started.stderr.strip() or started.stdout.strip() or "container not running"
             ctx.container_start_failures.append(
                 {
                     "failed_at": datetime.now(UTC).astimezone().isoformat(),
@@ -811,7 +1036,39 @@ def _run_batch_parallel(
                 }
             )
             _log(f"[{round_label}] {candidate_id}: container start failed: {reason}")
-            container.remove(force=True, timeout=config.startup_hard_timeout_s)
+            state, inspect_detail = _container_inspection_state(
+                container,
+                timeout=config.startup_hard_timeout_s,
+            )
+            if state == "absent":
+                ctx.container_present = False
+                continue
+            if state == "unknown":
+                ctx.container_present = True
+                lifecycle_cleanup_failures.append(
+                    f"candidate {candidate_id}: startup {inspect_detail}"
+                )
+                abort_startup = True
+                break
+            ctx.container_present = True
+            cleanup_failures = _cleanup_container_checked(
+                container,
+                candidate_id=candidate_id,
+                stop_first=False,
+                timeout=config.startup_hard_timeout_s,
+            )
+            if cleanup_failures:
+                lifecycle_cleanup_failures.extend(cleanup_failures)
+                abort_startup = True
+                break
+            ctx.container_present = False
+
+    if abort_startup:
+        lifecycle_cleanup_failures.extend(_cleanup_created_containers())
+        raise CleanupError(
+            "executor cleanup failed during startup; refusing new resource starts: "
+            + "; ".join(lifecycle_cleanup_failures)
+        )
 
     # Run each candidate (server lifecycle + search) CONCURRENTLY within the batch.
     # 每个候选独占容器+GPU+端口,底层 subprocess.run 线程安全,故用线程池并发跑。
@@ -850,6 +1107,8 @@ def _run_batch_parallel(
             )
         except Exception as exc:  # noqa: BLE001 - 单候选崩溃不拖垮同批其他候选
             _log(f"[{round_label}] {candidate_id}: 运行异常,记为失败: {exc!r}")
+            if isinstance(exc, CleanupError):
+                lifecycle_cleanup_failures.append(str(exc))
             try:
                 failed_round = int(round_label.removeprefix("r"))
             except ValueError:
@@ -886,14 +1145,15 @@ def _run_batch_parallel(
                 for cid, outcome in pool.map(_run_one, containers):
                     outcomes[cid] = outcome
     finally:
-        # Stop and remove all containers in this batch.
-        # 逐个吞掉单容器的清理错误,避免一个 remove 失败跳过其余容器的清理。
-        for candidate_id, container, ctx, candidate, gpu_ids_str, port in containers:
-            try:
-                container.stop()
-                container.remove()
-            except Exception as exc:  # noqa: BLE001 - 清理尽力而为,不因单个失败中断
-                _log(f"[{round_label}] {candidate_id}: 容器清理出错(已忽略): {exc}")
+        # Stop/remove/postcheck every still-present container. Never let one
+        # failure skip cleanup of the remaining owned resources.
+        lifecycle_cleanup_failures.extend(_cleanup_created_containers())
+
+        if lifecycle_cleanup_failures:
+            raise CleanupError(
+                "executor cleanup failed; refusing further resource reuse: "
+                + "; ".join(lifecycle_cleanup_failures)
+            )
 
     return outcomes
 
@@ -1137,7 +1397,9 @@ def _run_candidate(
     server_log = f"{candidate_out}/server.log"  # 首副本日志,崩溃诊断沿用它
 
     def _server_alive() -> bool:
-        return container.exec("pgrep -f sglang.launch_server").ok
+        return container.exec(
+            f"pgrep -f {shlex.quote(SERVER_PROCESS_PATTERN)}"
+        ).ok
 
     def _startup_progress() -> str:
         result = container.exec(f"stat -c '%s:%Y' {shlex.quote(server_log)}")
@@ -1200,7 +1462,7 @@ def _run_candidate(
         _log(
             f"[{round_label}] {candidate_id}: startup attempt {startup_attempt} failed: {reason}"
         )
-        container.exec("pkill -f sglang.launch_server || true")
+        _cleanup_servers_checked(container, candidate_id=candidate_id)
 
     try:
         if not ready:
@@ -1257,7 +1519,7 @@ def _run_candidate(
             outcome.startup_attempts = startup_attempt + len(ctx.container_start_failures)
             outcome.failures = startup_failures
     finally:
-        container.exec("pkill -f sglang.launch_server || true")
+        _cleanup_servers_checked(container, candidate_id=candidate_id)
 
     return outcome
 
@@ -1273,110 +1535,6 @@ def _outcome_diag(outcome: SearchOutcome) -> dict[str, Any]:
         "num_results": len(outcome.results),
         "startup_attempts": outcome.startup_attempts,
     }
-
-
-
-def _reclaim_host(
-    config: ExecutorConfig, remote: RemoteRunner, *, port_span: int
-) -> None:
-    """开跑前强制清场,独占整机。
-
-    目标机默认视为本 job 独占使用。开跑前把机器上一切可能占用 GPU / 端口的东西
-    全部清掉,原因有二:
-      (a) 别人或上一轮跑的压测若还在,会和本次候选抢显存/算力,测出的吞吐/延迟
-          全是脏数据;
-      (b) 更关键的——可能是**死进程**(僵死的 sglang/python 崩了但没退干净)
-          还占着显存不释放,只做"检测到负载就报错退出"会让你永远卡在那台机器上,
-          所以这里直接强杀,而不是退出。
-
-    清三样,每步都 `|| true` 兜底,任何一步失败都不阻塞后续:
-      1. **所有 docker 容器**(不限本 job 前缀)—— docker rm -f 全删。
-      2. **所有还占着显存的 GPU 计算进程** —— 按 nvidia-smi 查出的 PID kill -9,
-         死进程/僵尸一并强杀。
-      3. **将要用的端口段**(port .. port+gpu_count-1)上的 LISTEN 进程 —— fuser -k。
-    """
-    _log("⚠️  强制清场(独占整机):即将清掉目标机上所有容器 + 占显存的 GPU 进程 + 占端口进程")
-
-    # 1. 删所有容器(不限前缀:独占整机,别人的容器也一并清)
-    rm = remote.run(
-        "before=$(docker ps -aq 2>/dev/null | wc -l); "
-        "docker ps -aq 2>/dev/null | xargs -r docker rm -f >/dev/null 2>&1; "
-        "after=$(docker ps -aq 2>/dev/null | wc -l); "
-        'echo "removed=$((before-after)) remaining=$after"',
-        timeout=180,
-    )
-    _log(f"  容器清理: {rm.stdout.strip() or rm.stderr.strip() or '(无输出)'}")
-
-    # 2. 强杀所有占显存的 GPU 计算进程(死进程/僵尸一并 kill -9)
-    kill_gpu = remote.run(
-        "pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null "
-        "| tr -cd '0-9\\n' | grep -E '^[0-9]+$' | sort -u); "
-        'if [ -n "$pids" ]; then '
-        'echo "$pids" | xargs -r kill -9 2>/dev/null; '
-        'echo "killed_gpu_pids=$(echo $pids | tr \'\\n\' \' \')"; '
-        'else echo "killed_gpu_pids=(none)"; fi',
-        timeout=60,
-    )
-    _log(f"  GPU 进程清理: {kill_gpu.stdout.strip() or kill_gpu.stderr.strip() or '(无输出)'}")
-
-    # 3. 清将要用的端口段上的 LISTEN 进程(容器删完后一般已释放,这里兜底)
-    start_port, end_port = validate_port_span(config.port, port_span)
-    clear_ports = remote.run(
-        f"for p in $(seq {start_port} {end_port}); do fuser -k ${{p}}/tcp 2>/dev/null || true; done; "
-        f'echo "cleared_ports={start_port}-{end_port}"',
-        timeout=60,
-    )
-    _log(f"  端口清理: {clear_ports.stdout.strip() or '(无输出)'}")
-
-    # 给 GPU 驱动一点时间回收被杀进程的显存,避免紧接着起容器时显存还没释放
-    time.sleep(3)
-
-
-def _preflight_checks(
-    config: ExecutorConfig, remote: RemoteRunner, *, port_span: int
-) -> None:
-    """Verify remote connectivity, forcibly reclaim the host, then check model dir and image."""
-    # 1. SSH(先确认能连上,再动手清场)
-    probe = remote.run("echo ok")
-    if not probe.ok or probe.stdout.strip() != "ok":
-        detail = probe.stderr.strip()
-        raise SystemExit(
-            f"SSH connection failed: {config.ssh_target}\n{detail}"
-        )
-    _log(f"✅ SSH OK: {config.ssh_target}")
-
-    # 1.5 强制清场,独占整机(取代原来只清本 job 前缀容器的做法)
-    _reclaim_host(config, remote, port_span=port_span)
-
-    # 2. Model dir
-    q = shlex.quote(config.model_host_dir)
-    check_dir = remote.run(f"test -d {q} && ls {q} | head -5")
-    if not check_dir.ok:
-        detail = check_dir.stderr.strip()
-        raise SystemExit(
-            f"Model dir not found: {config.model_host_dir}\n{detail}"
-        )
-    n = len(check_dir.stdout.strip().splitlines())
-    _log(f"✅ Model dir OK: {config.model_host_dir} ({n} files)")
-
-    # 3. Image
-    iq = shlex.quote(config.image_ref)
-    image_check = remote.run(
-        f"docker image inspect {iq} --format {{{{.Id}}}} 2>/dev/null || echo NOT_LOCAL"
-    )
-    if image_check.stdout.strip() == "NOT_LOCAL":
-        _log(f"Image not cached, pulling: {config.image_ref}")
-        pull = remote.run(f"docker pull {iq}", timeout=600)
-        if not pull.ok:
-            detail = pull.stderr.strip()
-            raise SystemExit(
-                f"Image pull failed: {config.image_ref}\n{detail}"
-            )
-        _log(f"✅ Image OK (已拉取到目标机): {config.image_ref}")
-    else:
-        _log(f"✅ Image OK (目标机本地已缓存): {config.image_ref}")
-
-
 def _norm_gpu(name: str) -> str:
     """归一化 GPU 型号名以便比较。
 
@@ -1439,20 +1597,34 @@ def run_executor(
         job.benchmark_method, project_root=config.project_root
     )
     candidates = _load_candidates(config.configs_path, search=job.search)
-    # Every batch uses a contiguous slice starting at config.port. The widest
-    # simultaneous launch/cleanup span is bounded by the larger declared GPU
-    # count (TP1 candidates and fill-host replicas each consume at most one
-    # port per GPU). Validate this before constructing or calling RemoteRunner.
-    port_span = max(job.gpu_count, config.target_gpu_count, 1)
-    validate_port_span(config.port, port_span)
     _check_hardware_match(job, config)
 
     # Everything needed to construct the benchmark is local and deterministic.
     # Validate it before SSH preflight, which may clear containers/GPU processes.
     bench_template = _resolve_bench_template(job, config=config)
 
+    target_gpu_count = config.target_gpu_count or job.gpu_count
+    local_preflight = PreflightRequest(
+        candidates=tuple(candidates),
+        gpu_model=config.target_gpu_model or job.gpu_model,
+        gpu_count=target_gpu_count,
+        allocation_gpu_count=job.gpu_count,
+        gpu_memory_gb=config.target_gpu_memory_gb or job.gpu_memory_gb,
+        model_host_dir=config.model_host_dir,
+        image_ref=config.image_ref,
+        base_port=config.port,
+        container_name=config.container_name,
+        remote_outputs_dir=config.remote_outputs_dir,
+        job_id=job.job_id,
+        fill_host=config.fill_host,
+        allow_cross_numa=config.allow_cross_numa,
+        exclusive_host=config.exclusive_host,
+    )
+    validate_local_preflight(local_preflight)
+    _prepare_local_results_dir(config.results_dir)
+
     remote = remote or RemoteRunner(config.ssh_target, ssh_password=config.ssh_password)
-    _preflight_checks(config, remote, port_span=port_span)
+    preflight_plan = prepare_remote_host(remote, local_preflight)
 
     # The boundary predicate for the adaptive search: a run "qualifies" iff it is
     # both data-healthy (not truncated) and within SLA. Injected so the search
@@ -1465,19 +1637,10 @@ def run_executor(
     # must be an absolute path that exists on the remote host — a local relative
     # path like "outputs/<job>/results" is rejected by docker as a volume name.
     # Results are still read back to the local results_dir via `docker exec cat`.
-    outputs_host_dir = config.remote_outputs_dir
-    if not outputs_host_dir:
-        home = remote.run("echo $HOME").stdout.strip() or "/root"
-        outputs_host_dir = f"{home}/llm-infer-tuner-outputs/{job.job_id}"
-    mkdir = remote.run(f"mkdir -p {shlex.quote(outputs_host_dir)}")
-    if not mkdir.ok:
-        raise RuntimeError(
-            f"failed to create remote outputs dir {outputs_host_dir!r}: {mkdir.stderr.strip()}"
-        )
+    outputs_host_dir = preflight_plan.outputs_host_dir
 
     outputs_container_path = "/workspace/outputs"
 
-    config.results_dir.mkdir(parents=True, exist_ok=True)
     _log(
         f"job={job.job_id} candidates={len(candidates)} output_len={output_len} "
         f"multiplier={multiplier} precise_candidates=all gpu_count={job.gpu_count}"
@@ -1499,31 +1662,17 @@ def run_executor(
         port=config.port,
     )
 
-    # Detect and validate physical NUMA topology before planning batches. Batch
-    # boundaries account for NUMA fragmentation, not merely total GPU count.
-    numa_groups = _detect_numa_groups(remote, job.gpu_count)
+    candidate_by_id = {str(candidate["id"]): candidate for candidate in candidates}
+    numa_groups = [list(group) for group in preflight_plan.numa_groups]
     _log(f"NUMA groups: {numa_groups}")
-    batches = _plan_candidate_batches(
-        candidates,
-        job.gpu_count,
-        base_port=config.port,
-        numa_groups=numa_groups,
-        allow_cross_numa=config.allow_cross_numa,
-    )
+    batches = preflight_plan.round1_batches
     numa_policy = "cross-NUMA allowed" if config.allow_cross_numa else "NUMA-local"
     _log(f"{len(candidates)} candidates split into {len(batches)} batch(es) "
          f"(max {job.gpu_count} GPUs per batch, {numa_policy})")
 
     # ---- ROUND 1: coarse expansion over ALL candidates (batch-parallel) ----
     for batch_idx, batch in enumerate(batches):
-        # Allocate GPUs within this batch (NUMA-aware, reset cursor per batch)
-        alloc = _allocate_gpus_and_ports(
-            batch,
-            job.gpu_count,
-            base_port=config.port,
-            numa_groups=numa_groups,
-            allow_cross_numa=config.allow_cross_numa,
-        )
+        alloc = _alloc_from_preflight_batch(batch, candidate_by_id)
         _log(f"round-1 batch {batch_idx + 1}/{len(batches)}: "
              + _format_alloc(alloc))
         outcomes = _run_batch_parallel(
@@ -1561,37 +1710,14 @@ def run_executor(
     _log(f"round-2 refining ALL {len(refine_ids)} candidates: {refine_ids}")
 
     # ---- ROUND 2: precise bisection on ALL candidates (batch-parallel) ----
-    candidate_by_id = {str(c.get("id", "unknown")): c for c in candidates}
-    top_candidates = [candidate_by_id[cid] for cid in refine_ids if cid in candidate_by_id]
-
-    # Split all precise candidates into batches.
-    # · fill_host:每个候选独占整机、各自成批,批间串行(N 副本满载实测)。
-    # · 否则:沿用「按 tp_size 把多个候选拼满 gpu_count」的粗筛式并行分批。
-    top_batches: list[list[dict[str, Any]]] = []
-    if config.fill_host:
-        top_batches = [[c] for c in top_candidates]
-    else:
-        top_batches = _plan_candidate_batches(
-            top_candidates,
-            job.gpu_count,
-            base_port=config.port,
-            numa_groups=numa_groups,
-            allow_cross_numa=config.allow_cross_numa,
-        )
+    top_batches = preflight_plan.round2_batches
+    planned_fill_host = {
+        placement.candidate_id: placement
+        for placement in preflight_plan.fill_host_placements
+    }
 
     for batch_idx, batch in enumerate(top_batches):
-        if config.fill_host:
-            # 满载:把整机全部 GPU 交给这一个候选(容器内再切成 N 副本)。
-            all_devices = "device=" + ",".join(str(g) for g in range(job.gpu_count))
-            alloc = [(batch[0], all_devices, config.port)]
-        else:
-            alloc = _allocate_gpus_and_ports(
-                batch,
-                job.gpu_count,
-                base_port=config.port,
-                numa_groups=numa_groups,
-                allow_cross_numa=config.allow_cross_numa,
-            )
+        alloc = _alloc_from_preflight_batch(batch, candidate_by_id)
         _log(f"round-2 batch {batch_idx + 1}/{len(top_batches)}: "
              + _format_alloc(alloc))
         # 满载 round2 的结果是 instances=N 的实测求和;round1 种子是 instances=1 的
@@ -1609,6 +1735,7 @@ def run_executor(
             fill_host=config.fill_host,
             numa_groups=numa_groups,
             allow_cross_numa=config.allow_cross_numa,
+            fill_host_placements=planned_fill_host,
         )
         for candidate_id, outcome in outcomes.items():
             results_by_candidate[candidate_id] = outcome.results
@@ -1778,6 +1905,7 @@ def main(argv: list[str] | None = None) -> int:
         target_gpu_memory_gb=target.gpu_memory_gb,
         fill_host=args.fill_host,
         allow_cross_numa=target.allow_cross_numa,
+        exclusive_host=target.exclusive_host,
         max_parallel=args.max_parallel,
         startup_stall_timeout_s=args.startup_stall_timeout,
         startup_hard_timeout_s=args.startup_hard_timeout,

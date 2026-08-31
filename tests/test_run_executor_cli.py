@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from runners import executor as executor_module
+from runners.preflight import build_preflight_plan
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -556,13 +557,79 @@ def test_port_span_rejects_overflow_and_accepts_last_single_port() -> None:
     assert executor_module.validate_port_span(65535, 1) == (65535, 65535)
 
 
-def test_executor_rejects_port_overflow_before_constructing_remote_runner(
+def test_executor_rejects_exact_fill_host_port_overflow_before_output_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = tmp_path / "job.json"
+    configs = tmp_path / "configs.jsonl"
+    job.write_text(json.dumps(_job_payload(max_candidates=2)), encoding="utf-8")
+    first = _candidate("c001")
+    second = _candidate("c002")
+    second["params"]["mem_fraction_static"] = 0.82  # type: ignore[index]
+    configs.write_text(
+        json.dumps(first) + "\n" + json.dumps(second) + "\n",
+        encoding="utf-8",
+    )
+    constructed = False
+
+    class RecordingRemote:
+        def __init__(self, *args, **kwargs) -> None:
+            nonlocal constructed
+            constructed = True
+
+    monkeypatch.setattr(executor_module, "RemoteRunner", RecordingRemote)
+    monkeypatch.setattr(
+        executor_module,
+        "prepare_remote_host",
+        lambda _remote, request: build_preflight_plan(
+            request,
+            numa_groups=((0, 1),),
+        ),
+    )
+    monkeypatch.setattr(executor_module, "_load_output_len", lambda _workload: 1)
+    monkeypatch.setattr(
+        executor_module,
+        "_load_num_prompts_multiplier",
+        lambda _method, *, project_root: 1,
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_resolve_bench_template",
+        lambda _job, *, config: "python -m sglang.bench_serving",
+    )
+    config = executor_module.ExecutorConfig(
+        job_path=job,
+        configs_path=configs,
+        results_dir=tmp_path / "results",
+        ssh_target="runner@example.test",
+        image_ref="registry.example/sglang:test",
+        model_host_dir="/models/example",
+        model_container_path="/container/models/example",
+        project_root=REPO_ROOT,
+        port=65535,
+        target_gpu_model="gpu-test",
+        target_gpu_count=2,
+        target_gpu_memory_gb=16.0,
+        fill_host=True,
+    )
+
+    with pytest.raises(ValueError, match="exceeds 65535"):
+        executor_module.run_executor(config)
+
+    assert constructed is True
+    assert config.results_dir.is_dir()
+    assert list(config.results_dir.iterdir()) == []
+
+
+def test_executor_rejects_impossible_tp_before_constructing_remote_runner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     job = tmp_path / "job.json"
     configs = tmp_path / "configs.jsonl"
     job.write_text(json.dumps(_job_payload()), encoding="utf-8")
-    configs.write_text(json.dumps(_candidate("c001")) + "\n", encoding="utf-8")
+    candidate = _candidate("c001")
+    candidate["params"]["tp_size"] = 3  # type: ignore[index]
+    configs.write_text(json.dumps(candidate) + "\n", encoding="utf-8")
     constructed = False
 
     class MustNotConstructRemote:
@@ -592,13 +659,61 @@ def test_executor_rejects_port_overflow_before_constructing_remote_runner(
         model_host_dir="/models/example",
         model_container_path="/container/models/example",
         project_root=REPO_ROOT,
-        port=65535,
         target_gpu_model="gpu-test",
         target_gpu_count=2,
         target_gpu_memory_gb=16.0,
     )
 
-    with pytest.raises(ValueError, match="exceeds 65535"):
+    with pytest.raises(ValueError, match="tp_size"):
+        executor_module.run_executor(config)
+
+    assert constructed is False
+
+
+def test_executor_prepares_local_results_before_constructing_remote_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = tmp_path / "job.json"
+    configs = tmp_path / "configs.jsonl"
+    blocked_results = tmp_path / "results"
+    job.write_text(json.dumps(_job_payload()), encoding="utf-8")
+    configs.write_text(json.dumps(_candidate("c001")) + "\n", encoding="utf-8")
+    blocked_results.write_text("not a directory", encoding="utf-8")
+    constructed = False
+
+    class MustNotConstructRemote:
+        def __init__(self, *args, **kwargs) -> None:
+            nonlocal constructed
+            constructed = True
+            raise AssertionError("RemoteRunner must not be constructed")
+
+    monkeypatch.setattr(executor_module, "RemoteRunner", MustNotConstructRemote)
+    monkeypatch.setattr(executor_module, "_load_output_len", lambda _workload: 1)
+    monkeypatch.setattr(
+        executor_module,
+        "_load_num_prompts_multiplier",
+        lambda _method, *, project_root: 1,
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_resolve_bench_template",
+        lambda _job, *, config: "python -m sglang.bench_serving",
+    )
+    config = executor_module.ExecutorConfig(
+        job_path=job,
+        configs_path=configs,
+        results_dir=blocked_results,
+        ssh_target="runner@example.test",
+        image_ref="registry.example/sglang:test",
+        model_host_dir="/models/example",
+        model_container_path="/container/models/example",
+        project_root=REPO_ROOT,
+        target_gpu_model="gpu-test",
+        target_gpu_count=2,
+        target_gpu_memory_gb=16.0,
+    )
+
+    with pytest.raises(RuntimeError, match="local results directory"):
         executor_module.run_executor(config)
 
     assert constructed is False

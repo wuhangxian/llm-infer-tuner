@@ -101,6 +101,11 @@ class Container:
         result = self.remote.run(command, timeout=timeout)
         return result.ok and result.stdout.strip() == "true"
 
+    def inspect(self, *, timeout: int | None = None) -> CommandResult:
+        """Return raw ``docker inspect`` status for strict removal postchecks."""
+        command = f"docker inspect {shlex.quote(self.config.name)}"
+        return self.remote.run(command, timeout=timeout)
+
     def stop(self, *, timeout: int | None = None) -> CommandResult:
         command = f"docker stop {shlex.quote(self.config.name)}"
         return self.remote.run(command, timeout=timeout)
