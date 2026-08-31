@@ -16,16 +16,17 @@ C that pass the SLA is a prefix [start, C*]. A fixed grid only finds a lower
 bound on C* (and the bias differs per candidate, so it can flip the ranking).
 Expansion breaks past any preset ceiling; bisection pins C* in log2 probes.
 
-Boundary noise is handled symmetrically: near C* the same C can flip pass/fail
-run-to-run. A lone FAIL is re-probed before it truncates the search, and a lone
-boundary-advancing PASS is re-probed before it inflates C* — leaving passes
-unconfirmed while confirming fails would let one lucky probe over-report goodput
-and flip the ranking (the exact failure this search exists to prevent).
+Boundary noise is handled symmetrically: every precise concurrency is measured
+three fresh times, the SLA verdict is the majority, and the representative is
+the field-wise median. Round-1 seeds may choose which coordinates are tried
+first, but their verdicts and metrics never enter the authoritative result set.
 """
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from math import ceil, log2
+from statistics import median
 
 from runners.metrics import (
     SEARCH_VERDICT_STATUSES,
@@ -38,12 +39,22 @@ Qualifies = Callable[[RunResult], bool]  # health_check(...) AND passes_sla(...)
 OnEvaluateException = Callable[[int, Exception], RunResult]
 
 
+@dataclass(frozen=True)
+class SampleGroup:
+    """All fresh statistical samples and their field-wise median result."""
+
+    concurrency: int
+    samples: tuple[RunResult, ...]
+    representative: RunResult
+    qualifies: bool
+
+
 @dataclass
 class SearchOutcome:
-    results: list[RunResult]      # every DISTINCT probed C, deduped, in record order
-                                  #   (seeds ascending first, then probe order);
-                                  #   len(results) == number of distinct C probed.
-    c_star: int | None         # largest qualifying C; None iff smallest known C fails
+    results: list[RunResult]      # one median representative per complete fresh group,
+                                  # plus a terminal infrastructure result when present
+    c_star: int | None         # largest qualifying C; None when fresh C=1 fails
+                               # or when no complete statistical verdict exists
     stop_reason: str              # found_boundary | hit_cap | c1_failed | max_probes
     last_pass: int | None      # == c_star (kept explicit for diagnostics/logging)
     first_fail: int | None     # smallest failing C above last_pass; None if none seen
@@ -56,6 +67,8 @@ class SearchOutcome:
     failures: list[dict] = field(default_factory=list)
     complete: bool = False
     certainty: str = "unknown"
+    sample_groups: dict[int, SampleGroup] = field(default_factory=dict)
+    incomplete_samples: dict[int, tuple[RunResult, ...]] = field(default_factory=dict)
 
 
 class _BudgetExhausted(Exception):
@@ -71,6 +84,43 @@ class _ProbeIncomplete(Exception):
         self.result = result
 
 
+class _MonotonicityConflict(Exception):
+    """Fresh majority groups contradict the required pass-prefix model."""
+
+
+def required_sample_budget(
+    max_cap: int,
+    *,
+    start: int = 1,
+    factor: int = 2,
+    samples_per_concurrency: int = 3,
+    seed_hint_endpoints: int = 2,
+) -> int:
+    """Conservative valid-sample budget for expansion plus exact bisection.
+
+    The seed allowance covers fresh revalidation of up to two hinted endpoints;
+    if those hints are false, the ordinary C=1 expansion still fits.  For the
+    production domain 1..256 this is 48 samples without seeds and 54 with both
+    endpoint hints.
+    """
+
+    start = max(1, int(start))
+    max_cap = max(start, int(max_cap))
+    factor = max(2, int(factor))
+    samples_per_concurrency = max(1, int(samples_per_concurrency))
+    seed_hint_endpoints = max(0, int(seed_hint_endpoints))
+    expansion_points = [start]
+    while expansion_points[-1] < max_cap:
+        expansion_points.append(min(expansion_points[-1] * factor, max_cap))
+    widest_bracket = max(
+        (right - left for left, right in zip(expansion_points, expansion_points[1:])),
+        default=1,
+    )
+    bisection_points = ceil(log2(widest_bracket)) if widest_bracket > 1 else 0
+    group_budget = len(expansion_points) + bisection_points + seed_hint_endpoints
+    return group_budget * samples_per_concurrency
+
+
 def search_saturation(
     evaluate: Evaluate,
     qualifies: Qualifies,
@@ -78,24 +128,32 @@ def search_saturation(
     start: int = 1,
     factor: int = 2,
     max_cap: int = 256,
-    max_probes: int = 12,
+    max_probes: int | None = None,
     refine: bool = True,
-    confirm: int = 2,        # probes to BELIEVE a boundary-crossing verdict. 1 == naive
-                             # (trust the first result; exact naive probe counts). 2 ==
-                             # re-probe a boundary-MOVING fail OR a boundary-ADVANCING
-                             # pass once; any disagreeing re-probe overturns it. Applied
-                             # symmetrically to fails and passes (see module docstring).
-    seeds: list[RunResult] | None = None,  # round-1 grid RunResults ingested free
+    confirm: int = 3,
+    seeds: list[RunResult] | None = None,  # round-1 coordinates used only as hints
     on_evaluate_exception: OnEvaluateException | None = None,
 ) -> SearchOutcome:
     start = max(1, int(start))
     factor = max(2, int(factor))
     max_cap = max(start, int(max_cap))
-    max_probes = int(max_probes)
     confirm = max(1, int(confirm))
+    max_probes = (
+        required_sample_budget(
+            max_cap,
+            start=start,
+            factor=factor,
+            samples_per_concurrency=confirm,
+            seed_hint_endpoints=2 if seeds else 0,
+        )
+        if max_probes is None
+        else int(max_probes)
+    )
 
-    cache: dict = {}       # C -> representative RunResult (overturned verdict's result if flipped)
-    verdict: dict = {}     # C -> bool (qualifies)
+    cache: dict[int, RunResult] = {}       # C -> fresh median representative
+    verdict: dict[int, bool] = {}          # C -> fresh majority verdict
+    sample_groups: dict[int, SampleGroup] = {}
+    incomplete_samples: dict[int, tuple[RunResult, ...]] = {}
     order: list[int] = []  # record order of distinct C (seeds asc, then probe order)
     newly: list[int] = []  # distinct C evaluated this call (excludes seeds)
     log: list[str] = []
@@ -137,28 +195,22 @@ def search_saturation(
             return False
         return True
 
-    # ---- ingest seeds for free (no budget): reuse the round-1 grid as a bracket --
+    # Seeds are navigation hints only.  Their metrics and verdicts never enter
+    # the authoritative Round-2 cache; hinted endpoints are always remeasured.
+    seed_hints: list[tuple[int, bool]] = []
     for r in sorted(seeds or [], key=lambda s: int(s.concurrency)):
         c = int(r.concurrency)
-        if start <= c <= max_cap and c not in verdict:
+        if start <= c <= max_cap:
             try:
                 seed_verdict = _search_verdict(r)
             except _ProbeIncomplete:
-                # Prior-round infrastructure evidence is not authoritative in a
-                # fresh search.  Do not cache it: the same C remains probeable.
                 continue
-            cache[c] = r
-            order.append(c)
-            verdict[c] = seed_verdict
+            seed_hints.append((c, seed_verdict))
 
     def _raw_probe(c: int) -> RunResult:
-        # Budget check FIRST, before the try, so a real _BudgetExhausted is never
-        # masked by the exception adapter below.  Executor-owned failures become
-        # typed incomplete evidence and stop this candidate without inventing an
-        # SLA boundary; unexpected programming errors still propagate.
-        if state["evals"] >= max_probes:
-            raise _BudgetExhausted()
-        state["evals"] += 1
+        # Budget is charged only after this returns typed statistical evidence.
+        # Executor-owned infrastructure retries and terminal failures are not
+        # search samples and must not consume this counter.
         try:
             return evaluate(c)
         except Exception as exc:
@@ -166,51 +218,91 @@ def search_saturation(
                 raise
             return on_evaluate_exception(c, exc)
 
+    def _median_representative(
+        samples: list[RunResult], *, majority_qualifies: bool
+    ) -> RunResult:
+        numeric_fields = (
+            "num_prompts",
+            "completed",
+            "success_rate",
+            "request_throughput",
+            "output_throughput",
+            "total_throughput",
+            "mean_ttft_ms",
+            "p99_ttft_ms",
+            "mean_tpot_ms",
+            "p99_tpot_ms",
+            "total_output_tokens",
+            "avg_output_tokens",
+            "duration",
+        )
+        medians = {
+            name: median(getattr(sample, name) for sample in samples)
+            for name in numeric_fields
+        }
+        for name in ("num_prompts", "completed", "total_output_tokens"):
+            medians[name] = int(medians[name])
+        failing_reason = next(
+            (sample.failure_reason for sample in samples if sample.failure_reason),
+            None,
+        )
+        return replace(
+            samples[0],
+            **medians,
+            status=(ProbeStatus.OK if majority_qualifies else ProbeStatus.SLA_FAILED),
+            failure_reason=(None if majority_qualifies else failing_reason),
+            raw=dict(samples[0].raw),
+        )
+
     def probe(c: int):
-        """Evaluate C (memoized). Returns (C, qualifies). Confirm-the-boundary:
-        the first verdict is re-probed up to ``confirm`` attempts; a single
-        disagreeing re-probe overturns it. Applied SYMMETRICALLY — a fresh fail
-        is re-probed (a flaky fail must not truncate the search) and a fresh pass
-        is re-probed (a flaky pass must not inflate C* / goodput). Raises
-        _BudgetExhausted only when there is NO budget for the first attempt (the
-        caller stops cleanly)."""
+        """Evaluate one complete fresh sample group and memoize its majority."""
         c = max(start, min(int(c), max_cap))
-        if c in verdict:                      # DEDUPE: never evaluate the same C twice
+        if c in verdict:
             return c, verdict[c]
-        r = _raw_probe(c)                      # first attempt (propagates _BudgetExhausted)
-        try:
-            ok = _search_verdict(r)
-        except _ProbeIncomplete:
-            cache[c] = r
-            order.append(c)
-            newly.append(c)
-            raise
-        attempts = 1
-        # Re-probe until we either exhaust ``confirm`` attempts or see a
-        # disagreeing result that overturns the initial verdict. One loop handles
-        # both directions: the overturn condition is "re-probe disagrees".
-        while attempts < confirm:
+        # Never start a group that the remaining statistical budget cannot
+        # finish. This keeps every committed C at exactly ``confirm`` samples.
+        if max_probes - state["evals"] < confirm:
+            raise _BudgetExhausted()
+        samples: list[RunResult] = []
+        votes: list[bool] = []
+        for _ in range(confirm):
+            result = _raw_probe(c)
             try:
-                r2 = _raw_probe(c)
-            except _BudgetExhausted:
-                break                          # keep the verdict we have; caller stops soon
-            attempts += 1
-            try:
-                ok2 = _search_verdict(r2)
+                sample_verdict = _search_verdict(result)
             except _ProbeIncomplete:
-                cache[c] = r2
+                incomplete_samples[c] = tuple([*samples, result])
+                cache[c] = result
                 order.append(c)
                 newly.append(c)
                 raise
-            if ok2 != ok:
-                verb = "pass" if ok else "fail"
-                log.append(f"C={c}: {verb} overturned by re-probe (attempt {attempts})")
-                r, ok = r2, ok2                # store the overturning representative
-                break
+            samples.append(result)
+            votes.append(sample_verdict)
+            state["evals"] += 1
+        pass_votes = sum(votes)
+        ok = pass_votes > len(votes) / 2
+        if pass_votes * 2 == len(votes):
+            # Deterministic compatibility for callers that request an even
+            # legacy confirmation count. Production Round 2 always requests 3.
+            ok = votes[-1]
+        representative = _median_representative(samples, majority_qualifies=ok)
         verdict[c] = ok
-        cache[c] = r
+        cache[c] = representative
+        sample_groups[c] = SampleGroup(
+            concurrency=c,
+            samples=tuple(samples),
+            representative=representative,
+            qualifies=ok,
+        )
         order.append(c)
         newly.append(c)
+        if any(
+            fail_c < pass_c
+            for fail_c, fail_ok in verdict.items()
+            if not fail_ok
+            for pass_c, pass_ok in verdict.items()
+            if pass_ok
+        ):
+            raise _MonotonicityConflict()
         return c, ok
 
     def last_pass() -> int | None:
@@ -223,9 +315,25 @@ def search_saturation(
 
     capped = False
     exhausted = False
+    monotonicity_conflict = False
     try:
         if infrastructure_failure is not None:
             raise _ProbeIncomplete(infrastructure_failure)
+        seed_passes = [c for c, ok in seed_hints if ok]
+        hinted_pass = max(seed_passes) if seed_passes else None
+        seed_fails = [
+            c
+            for c, ok in seed_hints
+            if not ok and (hinted_pass is None or c > hinted_pass)
+        ]
+        hinted_fail = min(seed_fails) if seed_fails else None
+        for hinted_c in (hinted_pass, hinted_fail):
+            if hinted_c is not None:
+                probe(hinted_c)
+        if last_pass() is None and start not in verdict:
+            # A fresh failure at a high hinted endpoint does not prove C=1
+            # failed. Establish the lower endpoint before declaring c1_failed.
+            probe(start)
         # ---- Phase 1: exponential expansion to first fail / cap / budget --------
         while True:
             lp = last_pass()
@@ -256,19 +364,24 @@ def search_saturation(
         exhausted = True                       # last_pass() below is a valid lower bound
     except _ProbeIncomplete as exc:
         infrastructure_failure = exc.result
+    except _MonotonicityConflict:
+        monotonicity_conflict = True
+        log.append("fresh sample-group majorities violate the pass-prefix model")
 
     lp = last_pass()
     ff = first_fail_above(lp)
     if infrastructure_failure is not None:
         c_star, stop = None, str(infrastructure_failure.status)
-    elif lp is None:
-        # No qualifying C. Distinguish "learned nothing" from "smallest C fails".
-        if not verdict:
-            c_star, stop = None, "max_probes"  # degenerate: never probed anything
-        else:
-            c_star, stop = None, "c1_failed"   # smallest known C fails
+    elif monotonicity_conflict:
+        c_star, stop = None, "monotonicity_conflict"
+    elif verdict.get(start) is False:
+        c_star, stop = None, "c1_failed"       # fresh smallest C fails
     elif exhausted:
         c_star, stop = lp, "max_probes"        # ran out of budget; lp is a lower bound
+    elif lp is None:
+        # A high seed hint may have been freshly rejected without enough budget
+        # left to establish C=1. That is unknown, never an invented C1 boundary.
+        c_star, stop = None, "max_probes"
     elif capped:
         c_star, stop = lp, "hit_cap"           # cap passed; true C* >= cap
     else:
@@ -276,13 +389,23 @@ def search_saturation(
 
     log.insert(0, f"c_star={c_star} stop={stop} evals={state['evals']} "
                   f"distinct={len(order)} last_pass={lp} first_fail={ff}")
-    exact_completion = refine and infrastructure_failure is None and stop in {
+    exact_completion = (
+        refine
+        and infrastructure_failure is None
+        and not monotonicity_conflict
+        and stop
+        in {
         "found_boundary",
         "c1_failed",
-    }
+        }
+    )
     if exact_completion:
         certainty = "exact"
-    elif infrastructure_failure is None and lp is not None:
+    elif (
+        infrastructure_failure is None
+        and not monotonicity_conflict
+        and lp is not None
+    ):
         certainty = "lower_bound"
     else:
         certainty = "unknown"
@@ -297,4 +420,6 @@ def search_saturation(
         log=log,
         complete=exact_completion,
         certainty=certainty,
+        sample_groups=sample_groups,
+        incomplete_samples=incomplete_samples,
     )

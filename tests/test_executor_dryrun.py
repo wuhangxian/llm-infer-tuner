@@ -5,8 +5,8 @@ Asserts the wiring that the unit tests can't reach:
 
   * every candidate/probe reuses one deterministic benchmark template with only
     --max-concurrency / --num-prompts rewritten (byte-identical workload otherwise);
-  * round 1 expands over ALL candidates, round 2 precisely refines ALL candidates
-    and REUSES round-1 probes as seeds (seeded C are never re-benched);
+  * round 1 expands over ALL candidates, while round-1 coordinates only guide
+    the order of fresh three-sample Round-2 measurements;
   * the final ranking is goodput-descending and matches each candidate's true C*.
 
 The fake "server" is a monotone SLA boundary per candidate: bench at C qualifies
@@ -24,6 +24,7 @@ import signal
 import subprocess
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -412,6 +413,21 @@ class _FakeContainer:
         if out_path:
             self._result_files[out_path] = jsonl
         return _FakeResult(0, stdout=jsonl)
+
+
+class _Round1BurstContainer(_FakeContainer):
+    """Reports absurd Round-1 throughput to prove seeds never reach final rank."""
+
+    def _run_bench(self, command: str) -> _FakeResult:
+        result = super()._run_bench(command)
+        out_path = _flag_str(command.split(), "--output-file")
+        if len(self.launched_cmds) == 1 and "_warmup" not in Path(out_path).name:
+            record = json.loads(result.stdout)
+            record["output_throughput"] = 999_999.0
+            record["total_throughput"] = 999_999.0
+            result.stdout = json.dumps(record)
+            self._result_files[out_path] = result.stdout
+        return result
 
 
 class _StrictLaunchContainer(_FakeContainer):
@@ -1100,6 +1116,24 @@ class _InvalidResultFailures(_FakeContainer):
         return result
 
 
+class _PartialGroupInvalidExhaustion(_FakeContainer):
+    """One valid R2 sample, then three invalid attempts exhaust the next sample."""
+
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate)
+        self.round2_probe_calls = 0
+
+    def _run_bench(self, command: str) -> _FakeResult:
+        result = super()._run_bench(command)
+        out_path = _flag_str(shlex.split(command), "--output-file")
+        name = Path(out_path).name
+        if "r2_" in name and "repeat-1" not in name:
+            self.round2_probe_calls += 1
+            if self.round2_probe_calls > 1:
+                self._result_files[out_path] = '{"max_concurrency": "wrong"}'
+        return result
+
+
 class _CandidateScopedInvalidExhaustion(_FakeContainer):
     def _run_bench(self, command: str) -> _FakeResult:
         result = super()._run_bench(command)
@@ -1458,9 +1492,10 @@ def test_baseline_plus_32_candidates_all_enter_round2_and_keep_one_row(
     assert all(row["status"] == "completed" for row in summary["candidate_results"])
 
 
-def test_round2_reuses_round1_seeds_no_rebench(tmp_path, workloads_output_len):
-    """The single top-K candidate's round-1 probes must be reused as round-2 seeds:
-    a C benched in round 1 is never benched again in round 2."""
+def test_round2_seeds_only_hint_fresh_three_sample_endpoints(
+    tmp_path, workloads_output_len
+):
+    """Round-1 bracket coordinates guide Round 2 but never supply its evidence."""
     cstar = {"solo": 10}
     job_path = _write_job(tmp_path)
     configs_path = _write_configs(tmp_path, ["solo"])
@@ -1514,15 +1549,54 @@ def test_round2_reuses_round1_seeds_no_rebench(tmp_path, workloads_output_len):
     )
 
     assert round1_cs == [1, 2, 4, 8, 16]  # coarse expansion, no bisection
-    # Round 2 must NOT re-bench any C already probed in round 1.
-    assert not (set(round2_cs) & set(round1_cs)), (
-        f"round-2 re-benched seeded C: {sorted(set(round2_cs) & set(round1_cs))}"
-    )
+    round2_counts = Counter(round2_cs)
+    assert round2_counts[8] == 3
+    assert round2_counts[16] == 3
+    assert all(count == 3 for count in round2_counts.values())
     # And it must find the exact boundary C*=10.
     ranking = summary["ranking"]
     assert ranking[0]["candidate_id"] == "solo"
     assert ranking[0]["best_concurrency"] == 10
     assert ranking[0]["goodput_per_host"] == 1000.0 * 8  # gpu_count=8, tp_size=1
+    evidence = json.loads(
+        (results_dir / "solo" / "search_samples.r2.json").read_text(encoding="utf-8")
+    )
+    assert evidence["incomplete_groups"] == []
+    assert all(len(group["samples"]) == 3 for group in evidence["complete_groups"])
+
+
+def test_round1_burst_seed_never_enters_round2_results_or_final_rank(
+    tmp_path, workloads_output_len
+):
+    config = _lifecycle_test_config(tmp_path, "bursty")
+    config.max_cap = 8
+    container = _Round1BurstContainer({"bursty": 4})
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    assert summary["task_status"] == "COMPLETED"
+    assert summary["ranking"][0]["best_concurrency"] == 4
+    assert summary["ranking"][0]["goodput_per_host"] == 4 * 100.0 * 8
+    round2_results = json.loads(
+        (config.results_dir / "bursty" / "run_result.r2.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert all(result["total_throughput"] < 999_999.0 for result in round2_results)
+    evidence = json.loads(
+        (config.results_dir / "bursty" / "search_samples.r2.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert all(
+        sample["total_throughput"] < 999_999.0
+        for group in evidence["complete_groups"]
+        for sample in group["samples"]
+    )
 
 
 def _write_configs_with_params(tmp_path: Path, params_by_id: dict[str, dict]) -> Path:
@@ -1592,17 +1666,16 @@ def test_round2_fill_host_benches_n_replicas_no_double_count(tmp_path, workloads
     finally:
         exmod.Container = original_container
 
-    # Task 8 will revise the precise-search budget.  With today's fixed 14
-    # probes this confirmed fill-host search stops at max_probes before proving
-    # the exact boundary, so Task 6 must fail closed instead of publishing the
-    # tempting C=8 / 3200 tok/s lower bound as an official rank.
-    assert summary["ranking"] == []
-    assert summary["task_status"] == "INCOMPLETE"
-    assert summary["ranking_status"] == "PROVISIONAL"
+    assert summary["ranking"][0]["candidate_id"] == "full"
+    assert summary["ranking"][0]["best_concurrency"] == 8
+    assert summary["ranking"][0]["goodput_per_host"] == 3200.0
+    assert summary["task_status"] == "COMPLETED"
+    assert summary["ranking_status"] == "FINAL"
     row = summary["candidate_results"][0]
-    assert row["status"] == "incomplete"
-    assert row["round2"]["stop_reason"] == "max_probes"
-    assert row["round2"]["complete"] is False
+    assert row["status"] == "completed"
+    assert row["round2"]["stop_reason"] == "found_boundary"
+    assert row["round2"]["complete"] is True
+    assert row["round2"]["certainty"] == "exact"
 
     # round2 满载:c*=8 这一档必须打满 4 个不同副本端口 30000..30003
     #(round1 单实例也在 30000 压过 8,取并集仍是这 4 个)。
@@ -1617,6 +1690,15 @@ def test_round2_fill_host_benches_n_replicas_no_double_count(tmp_path, workloads
     passing = [row for row in r2 if row.get("status") == "ok"]
     assert passing, "round2 应有健康的满载结果"
     assert all(row["instances"] == 4 for row in passing)
+    samples = json.loads(
+        (results_dir / "full" / "search_samples.r2.json").read_text(encoding="utf-8")
+    )
+    groups_by_c = {
+        group["concurrency"]: group for group in samples["complete_groups"]
+    }
+    assert len(groups_by_c[8]["samples"]) == 3
+    assert len(groups_by_c[16]["samples"]) == 3
+    assert all(sample["instances"] == 4 for sample in groups_by_c[8]["samples"])
 
     # 回归:满载副本的启动命令必须用 `env CUDA_VISIBLE_DEVICES=N` 而非裸前缀,
     # 否则 exec_detached 拼 `nohup {cmd}` 时 nohup 会把 "CUDA_VISIBLE_DEVICES=N" 当程序名而崩
@@ -1794,7 +1876,7 @@ def test_fill_host_secondary_runtime_death_restarts_and_rewarms_every_replica(
     assert [
         port
         for candidate, concurrency, port in container.bench_ports
-        if candidate == "secondary-runtime" and concurrency == 1 and port == 30001
+        if candidate == "secondary-runtime" and concurrency == 4 and port == 30001
     ].count(30001) >= 2
     assert all(
         point["status"] in {"ok", "sla_failed"}
@@ -2717,9 +2799,9 @@ def test_runtime_death_restarts_fresh_server_and_retries_same_concurrency(
     row = summary["candidate_results"][0]
     assert summary["task_status"] == "COMPLETED"
     assert container.server_launches >= 3  # r1, r2, and fresh recovery group
-    # one failed infrastructure attempt + two valid confirmation samples;
-    # round2 num_evals counts only the two statistical samples.
-    assert [c for _candidate, c, _n in container.bench_calls].count(48) == 3
+    # One failed infrastructure attempt plus a complete three-sample group;
+    # num_evals counts only typed-valid statistical samples.
+    assert [c for _candidate, c, _n in container.bench_calls].count(48) == 4
     assert any(
         failure["status"] == "runtime_failed"
         and failure["concurrency"] == 48
@@ -2730,7 +2812,7 @@ def test_runtime_death_restarts_fresh_server_and_retries_same_concurrency(
         for point in row["concurrency_points"]
     )
     assert row["round2"]["c_star"] == 40
-    assert row["round2"]["num_evals"] == 10
+    assert row["round2"]["num_evals"] == 21
 
 
 @pytest.mark.parametrize(
@@ -2759,6 +2841,38 @@ def test_probe_infrastructure_failure_recovers_without_search_budget_charge(
         point["status"] in {"ok", "sla_failed"}
         for point in row["concurrency_points"]
     )
+
+
+def test_partial_valid_group_then_infra_exhaustion_preserves_budget_and_evidence(
+    tmp_path, workloads_output_len
+):
+    container = _PartialGroupInvalidExhaustion({"partial": 4})
+    config = _lifecycle_test_config(tmp_path, "partial")
+    config.max_cap = 8
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        summary = run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    row = summary["candidate_results"][0]
+    assert summary["task_status"] == "INCOMPLETE"
+    assert summary["ranking"] == []
+    assert row["round2"]["num_evals"] == 1
+    assert row["round2"]["complete"] is False
+    assert row["round2"]["certainty"] == "unknown"
+    evidence = json.loads(
+        (config.results_dir / "partial" / "search_samples.r2.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert evidence["complete_groups"] == []
+    assert len(evidence["incomplete_groups"]) == 1
+    statuses = [
+        sample["status"] for sample in evidence["incomplete_groups"][0]["samples"]
+    ]
+    assert statuses == ["ok", "invalid_result"]
 
 
 def test_per_status_recovery_budget_allows_transport_benchmark_invalid_then_ok(

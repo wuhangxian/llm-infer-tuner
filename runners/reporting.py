@@ -162,7 +162,11 @@ def build_candidate_rows(
         candidate_id = str(candidate.get("id", "unknown"))
         summary = candidate_summaries.get(candidate_id, {})
         round2 = summary.get("round2")
-        completed = bool(round2 and round2.get("complete") is True)
+        completed = bool(
+            round2
+            and round2.get("complete") is True
+            and round2.get("certainty") == "exact"
+        )
         failures = list(summary.get("failures", []))
         last_failure = failures[-1] if failures else {}
         points = [

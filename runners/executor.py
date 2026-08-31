@@ -29,7 +29,11 @@ from runners.bench_runner import (
     run_benchmark_monitored,
     substitute_placeholders,
 )
-from runners.concurrency_search import SearchOutcome, search_saturation
+from runners.concurrency_search import (
+    SearchOutcome,
+    required_sample_budget,
+    search_saturation,
+)
 from runners.container import Container, ContainerConfig
 from runners.lifecycle import (
     ExecutorLifecycle,
@@ -70,13 +74,11 @@ from schemas.parameter_contract import MAMBA_STRATEGY_PARAMETERS, normalise_para
 from schemas.target_spec import TargetSpec
 
 # Round-1 = coarse adaptive expansion over ALL candidates (no bisection); round-2
-# = precise bisection over ALL candidates, reusing round-1 probes as seeds. The two
-# rounds are cheap because expansion is log-scale and round-2 only re-probes new
-# midpoints (seeds are served from cache, never re-benched).
+# = precise bisection over ALL candidates. Round-1 coordinates only guide probe
+# order; every authoritative Round-2 concurrency is freshly sampled three times.
 ROUND1_MAX_PROBES = 7   # reaches ~C=64 via 1,2,4,8,16,32,64 in one candidate
 ROUND1_CONFIRM = 1      # coarse: precise round 2 will confirm the boundary
-ROUND2_MAX_PROBES = 14
-ROUND2_CONFIRM = 2      # precise: re-probe boundary passes AND fails (see search module)
+ROUND2_CONFIRM = 3      # precise: fixed three-sample majority at every concurrency
 DEFAULT_TOP_K = 5
 DEFAULT_MAX_CAP = 256
 WARMUP_CONCURRENCY = 2  # server ready 后、正式搜索前的预热并发档(结果丢弃,只热 kernel)
@@ -220,6 +222,29 @@ def _load_candidates(configs_path: Path, *, search: SearchBudget) -> list[dict[s
 
 def _run_result_dict(result: RunResult) -> dict[str, Any]:
     return asdict(result)
+
+
+def _search_sample_evidence(outcome: SearchOutcome) -> dict[str, Any]:
+    """Serialize complete and interrupted statistical groups without flattening them."""
+
+    return {
+        "complete_groups": [
+            {
+                "concurrency": concurrency,
+                "qualifies": group.qualifies,
+                "representative": _run_result_dict(group.representative),
+                "samples": [_run_result_dict(sample) for sample in group.samples],
+            }
+            for concurrency, group in outcome.sample_groups.items()
+        ],
+        "incomplete_groups": [
+            {
+                "concurrency": concurrency,
+                "samples": [_run_result_dict(sample) for sample in samples],
+            }
+            for concurrency, samples in outcome.incomplete_samples.items()
+        ],
+    }
 
 
 def _force_output_file(command: str, output_path: str) -> str:
@@ -2231,8 +2256,8 @@ def _run_candidate(
 ) -> SearchOutcome:
     """Start the candidate's server, run one adaptive search round, tear it down.
 
-    Returns the SearchOutcome (results = deduped seeds + new probes). On a server
-    that never becomes ready, returns a one-element outcome with a
+    Returns the SearchOutcome (results = fresh median representatives only). On
+    a server that never becomes ready, returns a one-element outcome with a
     startup_failed result so reporting still sees the candidate.
     """
     container = ctx.container
@@ -2706,10 +2731,6 @@ def _run_candidate(
                     for concurrency in outcome.newly_probed
                     if concurrency not in failed_concurrencies
                 ]
-                # search_saturation invoked evaluate once for the logical C;
-                # its internal recovery attempts are infrastructure accounting,
-                # never statistical/search-budget consumption.
-                outcome.num_evals = max(0, outcome.num_evals - 1)
 
             _pull_container_file(
                 container,
@@ -2719,6 +2740,10 @@ def _run_candidate(
             _write_json(
                 candidate_dir / f"run_result.{round_label}.json",
                 [_run_result_dict(r) for r in outcome.results],
+            )
+            _write_json(
+                candidate_dir / f"search_samples.{round_label}.json",
+                _search_sample_evidence(outcome),
             )
             _log(
                 f"[{round_label}] {candidate_id}: done c_star={outcome.c_star} "
@@ -2997,16 +3022,20 @@ def _run_executor_impl(
         alloc = _alloc_from_preflight_batch(batch, candidate_by_id)
         _log(f"round-2 batch {batch_idx + 1}/{len(top_batches)}: "
              + _format_alloc(alloc))
-        # 满载 round2 的结果是 instances=N 的实测求和;round1 种子是 instances=1 的
-        # 单实例外推。二者口径不同,绝不能混进同一候选的 results 里让 ranker 选到被
-        # 高估的单实例种子 —— 满载模式下不喂种子,round2 从头实测。
-        seeds = None if config.fill_host else results_by_candidate
+        # Round-1 results only provide bracket coordinates. search_saturation
+        # always remeasures hinted endpoints, so single-instance seed metrics can
+        # safely guide full-host ordering without entering authoritative results.
+        seeds = results_by_candidate
         outcomes = _run_batch_parallel(
             ctx_template, alloc, remote, outputs_host_dir, outputs_container_path,
             qualifies=qualifies,
             output_len=output_len,
             round_label="r2",
-            max_probes=ROUND2_MAX_PROBES,
+            max_probes=required_sample_budget(
+                config.max_cap,
+                samples_per_concurrency=ROUND2_CONFIRM,
+                seed_hint_endpoints=2,
+            ),
             confirm=ROUND2_CONFIRM,
             refine=True,
             seeds_by_id=seeds,

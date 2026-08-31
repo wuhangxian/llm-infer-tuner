@@ -10,9 +10,12 @@ lands on the C* run.
 from __future__ import annotations
 
 from collections import Counter
+from itertools import permutations
+
+import pytest
 
 from runners.concurrency_search import search_saturation
-from runners.metrics import RunResult
+from runners.metrics import ProbeStatus, RunResult
 from runners.ranker import candidate_goodput
 from schemas.job_spec import SLA
 
@@ -113,14 +116,14 @@ def test_c1_failed_naive() -> None:
     assert len(oc.results) == 1  # the failing run is still recorded
 
 
-def test_c1_failed_confirmed_spends_second_eval() -> None:
+def test_c1_failed_uses_complete_three_sample_group() -> None:
     sla = _sla()
     oc = search_saturation(
-        _threshold_evaluate(0), _qualifies(sla), start=1, refine=True, confirm=2,
+        _threshold_evaluate(0), _qualifies(sla), start=1, refine=True, confirm=3,
     )
     assert oc.c_star is None
     assert oc.stop_reason == "c1_failed"
-    assert oc.num_evals == 2  # confirm the start-fail before discarding
+    assert oc.num_evals == 3
 
 
 # --- noise: the bug the adversarial review caught -----------------------------
@@ -139,7 +142,7 @@ def test_flaky_fail_during_expansion_is_overturned() -> None:
 
     oc = search_saturation(
         evaluate, _qualifies(sla),
-        start=1, factor=2, max_cap=256, max_probes=30, refine=True, confirm=2,
+        start=1, factor=2, max_cap=256, max_probes=54, refine=True, confirm=3,
     )
     assert oc.c_star == 32
     assert oc.stop_reason == "found_boundary"
@@ -162,7 +165,7 @@ def test_flaky_pass_during_expansion_is_overturned() -> None:
 
     oc = search_saturation(
         evaluate, _qualifies(sla),
-        start=1, factor=2, max_cap=256, max_probes=30, refine=True, confirm=2,
+        start=1, factor=2, max_cap=256, max_probes=54, refine=True, confirm=3,
     )
     assert oc.c_star == 4, f"flaky pass inflated C* to {oc.c_star}"
     # goodput must be throughput(4)=400, NOT the flaky 9000 burst at C=8
@@ -182,7 +185,7 @@ def test_flaky_pass_during_bisection_is_overturned() -> None:
 
     oc = search_saturation(
         evaluate, _qualifies(sla),
-        start=1, factor=2, max_cap=256, max_probes=30, refine=True, confirm=2,
+        start=1, factor=2, max_cap=256, max_probes=54, refine=True, confirm=3,
     )
     assert oc.c_star == 4
     assert candidate_goodput(oc.results, sla, output_len=1000) == 400.0
@@ -195,7 +198,7 @@ def test_hit_cap_all_pass() -> None:
     sla = _sla()
     oc = search_saturation(
         _threshold_evaluate(10_000), _qualifies(sla),
-        start=1, factor=2, max_cap=16, max_probes=30, refine=True, confirm=2,
+        start=1, factor=2, max_cap=16, max_probes=30, refine=True, confirm=3,
     )
     assert oc.c_star == 16
     assert oc.stop_reason == "hit_cap"
@@ -293,30 +296,45 @@ def test_unhealthy_but_fast_probe_treated_as_fail() -> None:
 # --- seeding: reuse round-1 grid ----------------------------------------------
 
 
-def test_seeded_bracket_skips_expansion() -> None:
-    """Round-2 reuses round-1 grid results as the initial bracket; the seeded C
-    are served from cache (never re-benched)."""
+def test_seeded_bracket_endpoints_are_fresh_three_sample_groups() -> None:
+    """Round-1 verdicts only choose probe order; neither endpoint is authoritative."""
     sla = _sla()
     counter: Counter = Counter()
-    # round-1 grid: 1,2,4,8 pass, 16 fail (true boundary 10)
-    seeds = [_mk(c, ok=True) for c in (1, 2, 4, 8)] + [_mk(16, ok=False)]
+    seeds = [
+        _mk(4, ok=True, throughput=99_999.0),
+        _mk(5, ok=False, throughput=88_888.0),
+    ]
+    throughputs = {4: [410.0, 390.0, 400.0], 5: [510.0, 490.0, 500.0]}
+
+    def evaluate(c: int) -> RunResult:
+        sample_index = counter[c]
+        counter[c] += 1
+        return _mk(c, ok=(c <= 4), throughput=throughputs[c][sample_index])
 
     oc = search_saturation(
-        _threshold_evaluate(10, counter), _qualifies(sla),
-        start=1, factor=2, max_cap=256, max_probes=20, refine=True, confirm=1,
+        evaluate, _qualifies(sla),
+        start=1, factor=2, max_cap=256, max_probes=54, refine=True, confirm=3,
         seeds=seeds,
     )
-    assert oc.c_star == 10
+    assert oc.c_star == 4
     assert oc.stop_reason == "found_boundary"
-    # none of the seeded C were re-evaluated
-    for c in (1, 2, 4, 8, 16):
-        assert counter[c] == 0, f"seed C={c} was re-benched"
-    # only fresh probes cost budget; they are the bisection midpoints
-    assert set(oc.newly_probed) == set(counter.keys())
-    assert oc.num_evals == len(oc.newly_probed)
+    assert oc.complete is True
+    assert oc.certainty == "exact"
+    assert counter == Counter({4: 3, 5: 3})
+    assert oc.num_evals == 6
+    assert oc.newly_probed == [4, 5]
+    assert [sample.total_throughput for sample in oc.sample_groups[4].samples] == [
+        410.0,
+        390.0,
+        400.0,
+    ]
+    assert oc.sample_groups[4].representative.total_throughput == 400.0
+    assert [result.total_throughput for result in oc.results] == [400.0, 500.0]
+    assert all(result.total_throughput < 10_000 for result in oc.results)
+    assert candidate_goodput(oc.results, sla, output_len=1000) == 400.0
 
 
-def test_seeded_all_pass_resumes_above_old_ceiling() -> None:
+def test_seeded_all_pass_revalidates_old_ceiling_then_resumes_above_it() -> None:
     """High-capacity config: old grid [1..32] all pass; expansion resumes at 64,
     breaking past the 32 ceiling that a fixed grid would have capped at."""
     sla = _sla()
@@ -325,12 +343,186 @@ def test_seeded_all_pass_resumes_above_old_ceiling() -> None:
 
     oc = search_saturation(
         _threshold_evaluate(50, counter), _qualifies(sla),
-        start=1, factor=2, max_cap=256, max_probes=20, refine=True, confirm=1,
+        start=1, factor=2, max_cap=256, max_probes=54, refine=True, confirm=3,
         seeds=seeds,
     )
     assert oc.c_star == 50
     assert oc.stop_reason == "found_boundary"
-    # expansion did not re-probe any seed and went above 32
-    assert min(oc.newly_probed) >= 33
-    for c in (1, 2, 4, 8, 16, 32):
-        assert counter[c] == 0
+    # The highest seed is a navigation hint, so it is fresh-revalidated once
+    # before expansion continues above the old ceiling.
+    assert oc.newly_probed[0] == 32
+    assert counter[32] == 3
+    assert all(counter[c] == 0 for c in (1, 2, 4, 8, 16))
+
+
+_THREE_SAMPLE_ORDERS = sorted(
+    set(permutations((True, True, False)))
+    | set(permutations((True, False, False)))
+)
+
+
+@pytest.mark.parametrize("sample_verdicts", _THREE_SAMPLE_ORDERS)
+def test_three_sample_group_uses_all_samples_and_majority(
+    sample_verdicts: tuple[bool, bool, bool],
+) -> None:
+    sla = _sla()
+    throughputs = (300.0, 100.0, 200.0)
+    calls = 0
+
+    def evaluate(c: int) -> RunResult:
+        nonlocal calls
+        result = _mk(
+            c,
+            ok=sample_verdicts[calls],
+            throughput=throughputs[calls],
+        )
+        calls += 1
+        return result
+
+    oc = search_saturation(
+        evaluate,
+        _qualifies(sla),
+        max_cap=1,
+        max_probes=3,
+        refine=True,
+        confirm=3,
+    )
+
+    majority_passes = sum(sample_verdicts) >= 2
+    assert calls == 3
+    assert oc.num_evals == 3
+    assert len(oc.sample_groups[1].samples) == 3
+    assert oc.sample_groups[1].qualifies is majority_passes
+    assert oc.sample_groups[1].representative.total_throughput == 200.0
+    assert oc.sample_groups[1].representative.status == (
+        ProbeStatus.OK if majority_passes else ProbeStatus.SLA_FAILED
+    )
+
+
+def test_seeded_high_fail_without_fresh_pass_falls_back_to_c1() -> None:
+    sla = _sla()
+    counter: Counter = Counter()
+
+    oc = search_saturation(
+        _threshold_evaluate(3, counter),
+        _qualifies(sla),
+        max_cap=16,
+        max_probes=54,
+        refine=True,
+        confirm=3,
+        seeds=[_mk(8, ok=False)],
+    )
+
+    assert oc.c_star == 3
+    assert oc.certainty == "exact"
+    assert counter[8] == 3
+    assert counter[1] == 3
+
+
+def test_high_seed_failure_without_budget_for_c1_is_unknown() -> None:
+    sla = _sla()
+    oc = search_saturation(
+        _threshold_evaluate(10),
+        _qualifies(sla),
+        max_cap=256,
+        max_probes=3,
+        refine=True,
+        confirm=3,
+        seeds=[_mk(32, ok=True)],
+    )
+
+    assert oc.c_star is None
+    assert oc.stop_reason == "max_probes"
+    assert oc.complete is False
+    assert oc.certainty == "unknown"
+
+
+def test_fresh_nonmonotone_groups_are_unknown_not_an_exact_boundary() -> None:
+    sla = _sla()
+
+    def evaluate(c: int) -> RunResult:
+        return _mk(c, ok=(c == 8))
+
+    oc = search_saturation(
+        evaluate,
+        _qualifies(sla),
+        max_cap=16,
+        max_probes=54,
+        refine=True,
+        confirm=3,
+        seeds=[_mk(4, ok=True), _mk(8, ok=False)],
+    )
+
+    assert set(oc.sample_groups) == {4, 8}
+    assert oc.c_star is None
+    assert oc.stop_reason == "monotonicity_conflict"
+    assert oc.complete is False
+    assert oc.certainty == "unknown"
+
+
+def test_budget_never_starts_or_commits_a_partial_sample_group() -> None:
+    sla = _sla()
+    calls: Counter = Counter()
+    oc = search_saturation(
+        _threshold_evaluate(255, calls),
+        _qualifies(sla),
+        max_cap=256,
+        max_probes=47,
+        refine=True,
+        confirm=3,
+    )
+
+    assert oc.stop_reason == "max_probes"
+    assert oc.certainty == "lower_bound"
+    assert oc.complete is False
+    assert oc.num_evals == 45
+    assert sum(calls.values()) == 45
+    assert all(len(group.samples) == 3 for group in oc.sample_groups.values())
+
+
+def test_budget_48_finds_worst_case_boundary_255_exactly() -> None:
+    sla = _sla()
+    calls: Counter = Counter()
+    oc = search_saturation(
+        _threshold_evaluate(255, calls),
+        _qualifies(sla),
+        max_cap=256,
+        max_probes=48,
+        refine=True,
+        confirm=3,
+    )
+
+    assert oc.c_star == 255
+    assert oc.first_fail == 256
+    assert oc.num_evals == 48
+    assert oc.complete is True
+    assert oc.certainty == "exact"
+
+
+def test_terminal_infrastructure_does_not_commit_partial_group_or_spend_budget() -> None:
+    sla = _sla()
+    first = _mk(1, ok=True)
+    terminal = RunResult(
+        **{
+            **first.__dict__,
+            "status": ProbeStatus.TRANSPORT_FAILED,
+            "failure_reason": "ssh lost after one valid sample",
+        }
+    )
+    responses = iter((first, terminal))
+
+    oc = search_saturation(
+        lambda _c: next(responses),
+        _qualifies(sla),
+        max_cap=1,
+        max_probes=3,
+        refine=True,
+        confirm=3,
+    )
+
+    assert oc.certainty == "unknown"
+    assert oc.complete is False
+    assert oc.stop_reason == str(ProbeStatus.TRANSPORT_FAILED)
+    assert oc.num_evals == 1
+    assert oc.sample_groups == {}
+    assert oc.incomplete_samples[1] == (first, terminal)

@@ -146,3 +146,35 @@ def test_report_uses_audit_requested_params_after_loader_strips_mamba() -> None:
     assert rows[0]["requested_params"]["mamba_radix_cache_strategy"] == "no_buffer"
     assert rows[0]["effective_params"]["mamba_cache_strategy"] == "inactive(radix_off)"
     assert "--mamba-radix-cache-strategy" in rows[0]["requested_command"]
+
+
+def test_only_exact_round2_can_be_reported_completed() -> None:
+    candidates = [{"id": "bounded", "params": {}}]
+    for certainty in ("lower_bound", "unknown"):
+        rows = build_candidate_rows(
+            candidates,
+            {
+                "bounded": {
+                    "attempts": 1,
+                    "round2": {"complete": True, "certainty": certainty},
+                }
+            },
+            {},
+            [],
+            output_len=1024,
+        )
+        assert rows[0]["status"] == "incomplete"
+
+    rows = build_candidate_rows(
+        candidates,
+        {
+            "bounded": {
+                "attempts": 1,
+                "round2": {"complete": True, "certainty": "exact"},
+            }
+        },
+        {},
+        [],
+        output_len=1024,
+    )
+    assert rows[0]["status"] == "completed"
