@@ -881,15 +881,26 @@ def _force_disable_radix_cache(cmd: str) -> str:
     用户是否写该开关都不影响最终结果:先移除已有写法,再统一追加一个裸 flag。
     Mamba radix 策略不在这里改写;Radix Cache 关闭时该策略不生效,报告显示 inactive。
     """
-    cmd = re.sub(
-        r"\s*--disable-radix-cache(?:=\S+|\s+(?!-)\S+)?",
-        "",
-        cmd,
-        flags=re.IGNORECASE,
-    )
-    body, marker, comment = cmd.partition(" #")
-    effective = body.rstrip() + " --disable-radix-cache"
-    return effective + (marker + comment if marker else "")
+    flag = "--disable-radix-cache"
+    legacy_values = {"true", "false", "0", "1"}
+    parts = shlex.split(cmd)
+    effective_parts: list[str] = []
+    index = 0
+    while index < len(parts):
+        part = parts[index]
+        normalized = part.lower()
+        if normalized == flag:
+            index += 1
+            if index < len(parts) and parts[index].lower() in legacy_values:
+                index += 1
+            continue
+        if normalized.startswith(f"{flag}="):
+            index += 1
+            continue
+        effective_parts.append(part)
+        index += 1
+    effective_parts.append(flag)
+    return shlex.join(effective_parts)
 
 
 def _set_launch_runtime(cmd: str, *, model_path: str, port: int) -> str:

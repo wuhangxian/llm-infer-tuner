@@ -17,6 +17,7 @@ on throughput(C*) exactly as in production.
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
@@ -716,6 +717,52 @@ def test_params_only_candidate_launches_the_structured_command(
     assert "--host 0.0.0.0" in command
     assert "--port 30000" in command
     assert "None" not in command.split()
+
+
+def test_params_only_quoted_disable_text_round_trips_as_one_argument(
+    tmp_path, workloads_output_len
+):
+    served_model_name = "safe --disable-radix-cache marker"
+    configs_path = tmp_path / "configs.jsonl"
+    configs_path.write_text(
+        json.dumps(
+            {
+                "id": "quoted-disable-text",
+                "params": {"served_model_name": served_model_name},
+                "reasons": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path),
+        configs_path=configs_path,
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_candidates=1,
+    )
+    container = _StrictLaunchContainer({"quoted-disable-text": 2})
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        run_executor(config, remote=_FakeRemote())
+    finally:
+        ex.Container = original_container
+
+    assert not container.rejected_launches
+    command = next(
+        item
+        for item in container.launched_cmds
+        if item.startswith("python -m sglang.launch_server")
+    )
+    argv = shlex.split(command)
+    assert argv[argv.index("--served-model-name") + 1] == served_model_name
+    assert argv.count("--disable-radix-cache") == 1
 
 
 @pytest.mark.parametrize(
