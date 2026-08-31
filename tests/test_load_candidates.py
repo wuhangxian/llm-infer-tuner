@@ -58,6 +58,30 @@ def test_load_candidates_accepts_json_object_array_and_jsonl(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize(
+    "port_args",
+    [
+        "-p 30000",
+        "-p=30000",
+        "--port 30000 --port=30001 -p 30002 -p=30003",
+    ],
+)
+def test_load_candidates_accepts_and_strips_every_runtime_port_spelling(
+    tmp_path: Path, port_args: str
+) -> None:
+    candidate = _candidate("c001", tp_size=1)
+    candidate["cmd"] = f"{candidate['cmd']} {port_args}"
+    path = _write(tmp_path / "configs.jsonl", json.dumps(candidate) + "\n")
+
+    rows = _load_candidates(path, search=_search(max_candidates=1))
+
+    assert len(rows) == 1
+    argv = shlex.split(rows[0]["cmd"])
+    assert "--port" not in argv
+    assert not any(token.startswith(("--port=", "-p=")) for token in argv)
+    assert "-p" not in argv
+
+
+@pytest.mark.parametrize(
     ("content", "match"),
     [
         ('{"candidates": [{"id": "c001"}]}', "candidate"),

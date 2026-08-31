@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -88,13 +89,13 @@ class RemoteRunner:
             return self._invoke(self.build_ssh_argv(command), timeout=timeout)
 
         read_fd, write_fd = os.pipe()
-        try:
-            encoded = self._ssh_password.encode("utf-8")
-            written = 0
-            while written < len(encoded):
-                written += os.write(write_fd, encoded[written:])
-        finally:
-            os.close(write_fd)
+        writer = threading.Thread(
+            target=_write_password,
+            args=(write_fd, self._ssh_password.encode("utf-8")),
+            name="sshpass-fd-writer",
+            daemon=True,
+        )
+        writer.start()
         try:
             return self._invoke(
                 self.build_ssh_argv(command, password_fd=read_fd),
@@ -103,6 +104,7 @@ class RemoteRunner:
             )
         finally:
             os.close(read_fd)
+            writer.join()
 
     def run_local(
         self, argv: Sequence[str], *, timeout: int | None = None
@@ -153,3 +155,17 @@ def _as_text(value: object) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return str(value)
+
+
+def _write_password(write_fd: int, encoded: bytes) -> None:
+    """Feed sshpass concurrently so a large secret cannot fill the pipe first."""
+    try:
+        written = 0
+        while written < len(encoded):
+            written += os.write(write_fd, encoded[written:])
+    except BrokenPipeError:
+        # The command can fail before sshpass consumes the credential. Closing
+        # the reader is sufficient; this must not strand the caller.
+        pass
+    finally:
+        os.close(write_fd)

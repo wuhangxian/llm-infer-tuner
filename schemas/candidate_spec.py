@@ -83,19 +83,29 @@ def _parse_legacy_command(command: str) -> dict[str, ParameterScalar]:
     index = 3
     while index < len(tokens):
         token = tokens[index]
-        if not token.startswith("--") or token == "--":
+        if token == "-p":
+            raw_name, separator, raw_value = "port", "", ""
+        elif token.startswith("-p="):
+            raw_name, separator, raw_value = "port", "=", token[3:]
+        elif token.startswith("--") and token != "--":
+            raw_name, separator, raw_value = token[2:].partition("=")
+        else:
             raise ValueError(f"legacy cmd has unsupported positional token {token!r}")
-        raw_name, separator, raw_value = token[2:].partition("=")
         name = normalise_parameter_name(raw_name)
         if not is_safe_parameter_name(name):
             raise ValueError(f"legacy cmd has unsafe flag --{raw_name}")
-        if name in flags and name != "disable_radix_cache":
+        if name in flags and name not in {"disable_radix_cache", "port"}:
             raise ValueError(f"legacy cmd repeats flag --{raw_name}")
         has_value = bool(separator)
         value: str | bool
         if separator:
             value = raw_value
-        elif index + 1 < len(tokens) and not tokens[index + 1].startswith("--"):
+        elif (
+            index + 1 < len(tokens)
+            and not tokens[index + 1].startswith("--")
+            and tokens[index + 1] != "-p"
+            and not tokens[index + 1].startswith("-p=")
+        ):
             value = tokens[index + 1]
             has_value = True
             index += 1

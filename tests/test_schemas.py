@@ -397,6 +397,51 @@ def test_legacy_command_normalizes_runtime_and_mamba_but_compares_numeric_values
     )
 
 
+@pytest.mark.parametrize(
+    "port_args",
+    [
+        "-p 30000",
+        "-p=30000",
+        "--port 30000 --port=30001 -p 30002 -p=30003",
+    ],
+    ids=["short-separated", "short-equals", "all-forms-repeated"],
+)
+def test_legacy_command_accepts_every_runtime_port_spelling(
+    port_args: str,
+) -> None:
+    parsed = CandidateSpec.model_validate(
+        {
+            "id": "c001",
+            "params": {"tp_size": 1},
+            "cmd": (
+                "python -m sglang.launch_server --tp-size 1 "
+                f"{port_args}"
+            ),
+            "reasons": [],
+        }
+    )
+
+    assert parsed.cmd == (
+        "python -m sglang.launch_server --tp-size 1 --disable-radix-cache"
+    )
+    assert parsed.requested_cmd is not None
+
+
+def test_legacy_command_validates_every_repeated_runtime_port() -> None:
+    with pytest.raises(ValidationError, match="port"):
+        CandidateSpec.model_validate(
+            {
+                "id": "c001",
+                "params": {"tp_size": 1},
+                "cmd": (
+                    "python -m sglang.launch_server --tp-size 1 "
+                    "-p 0 --port 30000"
+                ),
+                "reasons": [],
+            }
+        )
+
+
 def test_params_only_candidate_stays_structured_and_safe() -> None:
     parsed = CandidateSpec.model_validate(
         {
@@ -419,6 +464,8 @@ def test_params_only_candidate_stays_structured_and_safe() -> None:
         "python -m sglang.launch_server --model-path /untrusted/model",
         "python -m sglang.launch_server --host localhost",
         "python -m sglang.launch_server --port 65536",
+        "python -m sglang.launch_server -p 65536",
+        "python -m sglang.launch_server -p=",
         "python -m sglang.launch_server --model-path ${MODEL_PATH} # comment",
     ],
 )

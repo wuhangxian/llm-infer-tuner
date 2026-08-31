@@ -12,6 +12,7 @@
 set -euo pipefail
 
 command -v jq >/dev/null || { echo "❌ 需要 jq" >&2; exit 1; }
+command -v setsid >/dev/null || { echo "❌ 需要 setsid" >&2; exit 1; }
 
 usage() {
   echo "用法1: ./run_executor.sh <job.json> <target.json> [configs.jsonl] [results_dir]" >&2
@@ -24,14 +25,51 @@ if [ "$#" -eq 0 ] || [ "$#" -gt 4 ]; then
 fi
 
 TMP_DIR=""
+RUNNER_PID=""
+
+stop_runner() {
+  local signal_name="${1:-TERM}"
+  local runner_group=""
+  local watchdog_pid=""
+  if [ -z "$RUNNER_PID" ]; then
+    return 0
+  fi
+  runner_group="-$RUNNER_PID"
+  if kill -0 -- "$runner_group" 2>/dev/null; then
+    kill -s "$signal_name" -- "$runner_group" 2>/dev/null || true
+    (
+      sleep 3
+      kill -s KILL -- "$runner_group" 2>/dev/null || true
+    ) &
+    watchdog_pid=$!
+  fi
+  wait "$RUNNER_PID" 2>/dev/null || true
+  if [ -n "$watchdog_pid" ]; then
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+  fi
+  RUNNER_PID=""
+  return 0
+}
+
 cleanup() {
+  stop_runner TERM
   if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
     rm -rf -- "$TMP_DIR"
   fi
 }
+
+handle_signal() {
+  local signal_name="$1"
+  local exit_code="$2"
+  trap - "$signal_name"
+  stop_runner "$signal_name"
+  exit "$exit_code"
+}
+
 trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'handle_signal INT 130' INT
+trap 'handle_signal TERM 143' TERM
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 检测模式:单文件 vs 三参数
@@ -170,10 +208,18 @@ EXTRA_ARGS+=(
 )
 echo "    startup: stall=${STARTUP_STALL_TIMEOUT_SECONDS}s hard=${STARTUP_HARD_TIMEOUT_SECONDS}s attempts=${STARTUP_MAX_ATTEMPTS}; job_timeout=none" >&2
 
-uv run python -m runners.executor \
+setsid uv run python -m runners.executor \
   --job "$JOB" \
   --target "$TARGET" \
   --configs "$CONFIGS" \
   --results "$RESULTS" \
   --container-name "$CONTAINER_NAME" \
-  "${EXTRA_ARGS[@]}"
+  "${EXTRA_ARGS[@]}" &
+RUNNER_PID=$!
+if wait "$RUNNER_PID"; then
+  RUNNER_STATUS=0
+else
+  RUNNER_STATUS=$?
+fi
+RUNNER_PID=""
+exit "$RUNNER_STATUS"

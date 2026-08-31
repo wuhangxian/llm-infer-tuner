@@ -338,11 +338,19 @@ def test_bundle_temporary_files_are_removed_on_signal(
     ]
     assert all(path.exists() for path in temp_paths)
 
-    os.killpg(process.pid, signal_number)
-    stdout, stderr = process.communicate(timeout=5)
+    runner_pid = int(pid_file.read_text())
+    os.kill(process.pid, signal_number)
+    try:
+        stdout, stderr = process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate(timeout=5)
+        pytest.fail("wrapper did not forward the signal to its runner")
 
     assert process.returncode == expected_code, (stdout, stderr)
     assert all(not path.exists() for path in temp_paths)
+    with pytest.raises(ProcessLookupError):
+        os.kill(runner_pid, 0)
 
 
 def test_python_executor_cli_loads_target_and_resolves_password_environment(

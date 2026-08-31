@@ -221,6 +221,28 @@ def test_password_ssh_uses_protected_fd_and_never_places_secret_in_argv() -> Non
     assert observed["password"] == sentinel
 
 
+def test_password_fd_handles_a_secret_larger_than_pipe_capacity() -> None:
+    import os
+    import subprocess
+
+    sentinel = "密" * 70_000
+    observed: dict[str, object] = {}
+
+    def fake_runner(argv, **kwargs):
+        password_fd = kwargs["pass_fds"][0]
+        chunks: list[bytes] = []
+        while chunk := os.read(password_fd, 8192):
+            chunks.append(chunk)
+        observed["password"] = b"".join(chunks).decode()
+        return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+
+    runner = RemoteRunner("user@host", ssh_password=sentinel, runner=fake_runner)
+    result = runner.run("echo ok", timeout=1)
+
+    assert result.ok
+    assert observed["password"] == sentinel
+
+
 def test_container_start_preserves_paths_with_spaces_unicode_and_single_quotes() -> None:
     commands: list[str] = []
 
