@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
@@ -19,25 +20,86 @@ def annotate_baseline_threshold(
     """Annotate every row relative to baseline; never remove a candidate."""
     rows = deepcopy(ranking)
     baseline = next(
-        (float(row["goodput_per_host"]) for row in rows if row["candidate_id"] == "baseline"),
+        (
+            _finite_float(row.get("goodput_per_host"))
+            for row in rows
+            if row["candidate_id"] == "baseline"
+        ),
         None,
     )
-    threshold = baseline * (1 + threshold_pct / 100) if baseline is not None else None
+    threshold = _finite_product(
+        baseline,
+        _finite_sum(1.0, _finite_quotient(_finite_float(threshold_pct), 100.0)),
+    )
     for rank, row in enumerate(rows, 1):
-        value = float(row.get("goodput_per_host", 0))
+        value = _finite_float(row.get("goodput_per_host"))
+        delta = _finite_difference(value, baseline)
+        relative = _finite_difference(_finite_quotient(value, baseline), 1.0)
+        delta_pct = _finite_product(relative, 100.0)
         row["rank"] = rank
         row["baseline_goodput_per_host"] = baseline
         row["threshold_goodput_per_host"] = threshold
-        row["goodput_delta"] = value - baseline if baseline is not None else None
-        row["goodput_delta_pct"] = (
-            round((value / baseline - 1) * 100, 6) if baseline not in (None, 0) else None
-        )
+        row["goodput_delta"] = delta
+        row["goodput_delta_pct"] = round(delta_pct, 6) if delta_pct is not None else None
         row["beats_baseline_threshold"] = (
             value >= threshold
-            if threshold is not None and row["candidate_id"] != "baseline"
+            if value is not None
+            and threshold is not None
+            and row["candidate_id"] != "baseline"
             else False
         )
     return rows
+
+
+def _finite_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        converted = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    return converted if math.isfinite(converted) else None
+
+
+def _finite_binary(
+    left: float | None,
+    right: float | None,
+    operation: str,
+) -> float | None:
+    if left is None or right is None:
+        return None
+    try:
+        if operation == "add":
+            result = left + right
+        elif operation == "subtract":
+            result = left - right
+        elif operation == "multiply":
+            result = left * right
+        elif operation == "divide":
+            if right == 0:
+                return None
+            result = left / right
+        else:  # pragma: no cover - all callers use a literal operation above
+            raise ValueError(f"unknown finite operation: {operation}")
+    except OverflowError:
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _finite_sum(left: float | None, right: float | None) -> float | None:
+    return _finite_binary(left, right, "add")
+
+
+def _finite_difference(left: float | None, right: float | None) -> float | None:
+    return _finite_binary(left, right, "subtract")
+
+
+def _finite_product(left: float | None, right: float | None) -> float | None:
+    return _finite_binary(left, right, "multiply")
+
+
+def _finite_quotient(left: float | None, right: float | None) -> float | None:
+    return _finite_binary(left, right, "divide")
 
 
 def _effective_params(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -69,8 +131,18 @@ def _point(result: RunResult, round_number: int, output_len: int) -> dict[str, A
     row = asdict(result)
     row.pop("raw", None)
     row["round"] = round_number
-    row["output_healthy"] = (
-        result.completed > 0 and result.avg_output_tokens >= output_len * 0.9
+    valid_counts = (
+        type(result.completed) is int
+        and result.completed > 0
+        and type(result.total_output_tokens) is int
+        and result.total_output_tokens >= 0
+        and type(output_len) is int
+        and output_len > 0
+    )
+    row["output_healthy"] = valid_counts and (
+        9 * output_len * result.completed
+        <= 10 * result.total_output_tokens
+        <= 11 * output_len * result.completed
     )
     return row
 
@@ -90,7 +162,7 @@ def build_candidate_rows(
         candidate_id = str(candidate.get("id", "unknown"))
         summary = candidate_summaries.get(candidate_id, {})
         round2 = summary.get("round2")
-        completed = bool(round2 and round2.get("stop_reason") != "health_check_failed")
+        completed = bool(round2 and round2.get("complete") is True)
         failures = list(summary.get("failures", []))
         last_failure = failures[-1] if failures else {}
         points = [
@@ -102,7 +174,7 @@ def build_candidate_rows(
             {
                 "report_schema_version": REPORT_SCHEMA_VERSION,
                 "candidate_id": candidate_id,
-                "status": "completed" if completed else "failed",
+                "status": "completed" if completed else "incomplete",
                 "requested_params": deepcopy(
                     candidate.get("requested_params", candidate.get("params", {}))
                 ),
@@ -118,6 +190,10 @@ def build_candidate_rows(
                 "failed_round": last_failure.get("round"),
                 "failed_batch": last_failure.get("batch"),
                 "failed_concurrency": last_failure.get("concurrency"),
+                "failed_num_prompts": last_failure.get("num_prompts"),
+                "failed_tp_size": last_failure.get("tp_size"),
+                "failure_status": last_failure.get("status"),
+                "known_issue": last_failure.get("known_issue"),
                 "failure_reason": last_failure.get("reason"),
                 "concurrency_points": points,
                 **rank_by_id.get(candidate_id, {}),
@@ -140,18 +216,22 @@ def write_reports(
     candidate_rows: list[dict[str, Any]],
     task_status: dict[str, Any],
 ) -> None:
-    _atomic_write(
-        results_dir / "ranking.json",
-        json.dumps(ranking, ensure_ascii=False, indent=2) + "\n",
+    # Serialize the complete report set before replacing any file.  If one
+    # payload contains NaN/Infinity (or another JSON error), all previous files
+    # remain untouched instead of leaving a mixed-generation report directory.
+    ranking_text = json.dumps(
+        ranking, ensure_ascii=False, indent=2, allow_nan=False
+    ) + "\n"
+    candidates_text = "".join(
+        json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n"
+        for row in candidate_rows
     )
-    _atomic_write(
-        results_dir / "candidate_results.jsonl",
-        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in candidate_rows),
-    )
-    _atomic_write(
-        results_dir / "task_status.json",
-        json.dumps(task_status, ensure_ascii=False, indent=2) + "\n",
-    )
+    task_status_text = json.dumps(
+        task_status, ensure_ascii=False, indent=2, allow_nan=False
+    ) + "\n"
+    _atomic_write(results_dir / "ranking.json", ranking_text)
+    _atomic_write(results_dir / "candidate_results.jsonl", candidates_text)
+    _atomic_write(results_dir / "task_status.json", task_status_text)
 
 
 def render_candidate_preview(rows: list[dict[str, Any]]) -> list[str]:
@@ -165,7 +245,8 @@ def render_candidate_preview(rows: list[dict[str, Any]]) -> list[str]:
             row["effective_params"], ensure_ascii=False, separators=(",", ":")
         )
         points = ",".join(
-            f"r{p['round']}/C{p['concurrency']}:tput={p['total_throughput']:.1f},"
+            f"r{p['round']}/C{p['concurrency']}:status={p['status']},"
+            f"tput={p['total_throughput']:.1f},"
             f"ttft={p['mean_ttft_ms']:.1f}ms,tpot={p['mean_tpot_ms']:.1f}ms,"
             f"succ={p['success_rate']:.3f},out_ok={'yes' if p['output_healthy'] else 'no'}"
             for p in row["concurrency_points"]
@@ -178,6 +259,11 @@ def render_candidate_preview(rows: list[dict[str, Any]]) -> list[str]:
             f"goodput_host={row.get('goodput_per_host', 0):.1f} "
             f"beats_baseline_threshold={'yes' if row.get('beats_baseline_threshold') else 'no'} "
             f"points=[{points}] failed_at={row.get('failed_at')} "
+            f"failure_status={row.get('failure_status')} "
+            f"failed_tp={row.get('failed_tp_size')} "
+            f"failed_C={row.get('failed_concurrency')} "
+            f"failed_N={row.get('failed_num_prompts')} "
+            f"known_issue={row.get('known_issue')} "
             f"failure={row.get('failure_reason')}"
         )
     return rendered

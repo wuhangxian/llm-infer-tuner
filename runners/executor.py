@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shlex
@@ -26,7 +27,14 @@ from runners.bench_runner import (
 )
 from runners.concurrency_search import SearchOutcome, search_saturation
 from runners.container import Container, ContainerConfig
-from runners.metrics import RunResult, parse_bench_text
+from runners.metrics import (
+    SEARCH_VERDICT_STATUSES,
+    ProbeStatus,
+    RunResult,
+    classify_known_runtime_issue,
+    failed_probe_result,
+    parse_bench_text,
+)
 from runners.preflight import (
     CandidatePlacement,
     FillHostPlacement,
@@ -36,7 +44,7 @@ from runners.preflight import (
 )
 from runners.ranker import data_health_check, passes_sla, rank_candidates
 from runners.readiness import make_health_probe, wait_until_ready
-from runners.remote import RemoteRunner
+from runners.remote import CommandFailureKind, CommandResult, RemoteRunner
 from runners.reporting import (
     annotate_baseline_threshold,
     build_candidate_rows,
@@ -62,6 +70,9 @@ WARMUP_CONCURRENCY = 2  # server ready 后、正式搜索前的预热并发档(�
 # The bracketed spelling matches the real module name while keeping the literal
 # ``sglang.launch_server`` out of pgrep/pkill's own shell command line.
 SERVER_PROCESS_PATTERN = "[s]glang[.]launch_server"
+ENGINE_VERSION_COMMAND = (
+    "python -c \"import importlib.metadata as m; print(m.version('sglang'))\""
+)
 SERVER_CLEANUP_TERM_POLL_ATTEMPTS = 21
 SERVER_CLEANUP_TERM_POLL_INTERVAL_S = 0.5
 SERVER_CLEANUP_KILL_POLL_ATTEMPTS = 5
@@ -94,7 +105,9 @@ class ExecutorConfig:
     concurrencies: list[int] | None = None  # deprecated: adaptive search now chooses probes
     port: int = 30000
     container_name: str = "llm-infer-tuner-exec"
-    remote_outputs_dir: str = ""  # abs path on the remote host; default $HOME/llm-infer-tuner-outputs/<job>
+    # Absolute path on the remote host; default:
+    # $HOME/llm-infer-tuner-outputs/<job>.
+    remote_outputs_dir: str = ""
     target_gpu_model: str = ""
     target_gpu_count: int = 0
     target_gpu_memory_gb: float = 0.0
@@ -229,6 +242,7 @@ class _CandidateContext:
     container_ready: bool = False
     container_present: bool = False
     container_start_failures: list[dict[str, Any]] = field(default_factory=list)
+    engine_version: str = ""
 
 
 def _resolve_bench_template(
@@ -253,36 +267,93 @@ def _aggregate_replicas(replicas: list[RunResult], *, expected: int) -> RunResul
     · 只要有副本缺失(len<expected)或本身不健康,整体标记为失败,绝不拿"部分副本"
       的求和冒充满载 goodput(那会高估)。
     """
-    healthy = [r for r in replicas if r is not None and r.status == "ok"]
+    healthy = [r for r in replicas if r is not None and r.status == ProbeStatus.OK]
     concurrency = replicas[0].concurrency if replicas else 0
     candidate_id = replicas[0].candidate_id if replicas else "unknown"
     tp_size = replicas[0].tp_size if replicas else 1
     if not healthy or len(healthy) < expected:
-        agg = _health_check_failed_result(
+        failed = next(
+            (
+                result
+                for result in replicas
+                if result is not None and result.status != ProbeStatus.OK
+            ),
+            None,
+        )
+        status = (
+            ProbeStatus(failed.status)
+            if failed is not None
+            else ProbeStatus.INVALID_RESULT
+        )
+        num_prompts = sum(result.num_prompts for result in replicas if result is not None)
+        if replicas and len(replicas) < expected:
+            num_prompts += replicas[0].num_prompts * (expected - len(replicas))
+        agg = _probe_failure_result(
             candidate_id,
-            f"满载副本不齐或不健康:健康 {len(healthy)}/{expected}(C={concurrency})",
+            (
+                f"满载副本不齐或不健康:健康 {len(healthy)}/{expected}"
+                f"(C={concurrency}); {failed.failure_reason if failed else 'missing replica'}"
+            ),
+            status=status,
+            tp_size=tp_size,
+            concurrency=concurrency,
+            num_prompts=num_prompts,
+            known_issue=failed.known_issue if failed is not None else None,
         )
         agg.concurrency = concurrency
         agg.tp_size = tp_size
         agg.instances = expected
         agg.full_host_measured = True
         return agg
+    aggregate_values = {
+        "success_rate": min(r.success_rate for r in healthy),
+        "request_throughput": sum(r.request_throughput for r in healthy),
+        "output_throughput": sum(r.output_throughput for r in healthy),
+        "total_throughput": sum(r.total_throughput for r in healthy),
+        "mean_ttft_ms": max(r.mean_ttft_ms for r in healthy),
+        "p99_ttft_ms": max(r.p99_ttft_ms for r in healthy),
+        "mean_tpot_ms": max(r.mean_tpot_ms for r in healthy),
+        "p99_tpot_ms": max(r.p99_tpot_ms for r in healthy),
+        "avg_output_tokens": min(r.avg_output_tokens for r in healthy),
+        "duration": max(r.duration for r in healthy),
+    }
+    invalid_derived = next(
+        (
+            name
+            for name, value in aggregate_values.items()
+            if not _is_finite_nonnegative_metric(value)
+        ),
+        None,
+    )
+    if invalid_derived is not None:
+        agg = _probe_failure_result(
+            candidate_id,
+            f"满载聚合产生非法指标: {invalid_derived}",
+            status=ProbeStatus.INVALID_RESULT,
+            tp_size=tp_size,
+            concurrency=concurrency,
+            num_prompts=sum(r.num_prompts for r in healthy),
+        )
+        agg.instances = expected
+        agg.full_host_measured = True
+        return agg
+
     return RunResult(
         candidate_id=candidate_id,
         concurrency=concurrency,
         num_prompts=sum(r.num_prompts for r in healthy),
         completed=sum(r.completed for r in healthy),
-        success_rate=min(r.success_rate for r in healthy),
-        request_throughput=sum(r.request_throughput for r in healthy),
-        output_throughput=sum(r.output_throughput for r in healthy),
-        total_throughput=sum(r.total_throughput for r in healthy),
-        mean_ttft_ms=max(r.mean_ttft_ms for r in healthy),
-        p99_ttft_ms=max(r.p99_ttft_ms for r in healthy),
-        mean_tpot_ms=max(r.mean_tpot_ms for r in healthy),
-        p99_tpot_ms=max(r.p99_tpot_ms for r in healthy),
+        success_rate=aggregate_values["success_rate"],
+        request_throughput=aggregate_values["request_throughput"],
+        output_throughput=aggregate_values["output_throughput"],
+        total_throughput=aggregate_values["total_throughput"],
+        mean_ttft_ms=aggregate_values["mean_ttft_ms"],
+        p99_ttft_ms=aggregate_values["p99_ttft_ms"],
+        mean_tpot_ms=aggregate_values["mean_tpot_ms"],
+        p99_tpot_ms=aggregate_values["p99_tpot_ms"],
         total_output_tokens=sum(r.total_output_tokens for r in healthy),
-        avg_output_tokens=min(r.avg_output_tokens for r in healthy),
-        duration=max(r.duration for r in healthy),
+        avg_output_tokens=aggregate_values["avg_output_tokens"],
+        duration=aggregate_values["duration"],
         tp_size=tp_size,
         instances=len(healthy),
         full_host_measured=True,
@@ -290,27 +361,81 @@ def _aggregate_replicas(replicas: list[RunResult], *, expected: int) -> RunResul
     )
 
 
-def _health_check_failed_result(candidate_id: str, reason: str) -> RunResult:
-    return RunResult(
-        candidate_id=candidate_id,
-        tp_size=1,
-        concurrency=0,
-        num_prompts=0,
-        completed=0,
-        success_rate=0.0,
-        request_throughput=0.0,
-        output_throughput=0.0,
-        total_throughput=0.0,
-        mean_ttft_ms=0.0,
-        p99_ttft_ms=0.0,
-        mean_tpot_ms=0.0,
-        p99_tpot_ms=0.0,
-        total_output_tokens=0,
-        avg_output_tokens=0.0,
-        duration=0.0,
-        status="health_check_failed",
-        failure_reason=reason,
+def _is_finite_nonnegative_metric(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        numeric = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return False
+    return math.isfinite(numeric) and numeric >= 0
+
+
+def _probe_failure_result(
+    candidate_id: str,
+    reason: str,
+    *,
+    status: ProbeStatus,
+    tp_size: int,
+    concurrency: int,
+    num_prompts: int,
+    known_issue: str | None = None,
+) -> RunResult:
+    return failed_probe_result(
+        candidate_id,
+        status=status,
+        reason=reason,
+        tp_size=tp_size,
+        concurrency=concurrency,
+        num_prompts=num_prompts,
+        known_issue=known_issue,
     )
+
+
+def _is_transport_failure(result: CommandResult | Any) -> bool:
+    kind = getattr(result, "failure_kind", None)
+    return kind in {CommandFailureKind.TRANSPORT, CommandFailureKind.TIMEOUT} or (
+        kind is None and getattr(result, "returncode", None) == 255
+    )
+
+
+def _command_failure_detail(result: CommandResult | Any) -> str:
+    detail = (getattr(result, "stderr", "") or getattr(result, "stdout", "")).strip()
+    return detail or f"exit {getattr(result, 'returncode', 'unknown')}"
+
+
+def _candidate_param(candidate: dict[str, Any] | None, name: str) -> str | None:
+    if not candidate:
+        return None
+    params = candidate.get("params", {})
+    if not isinstance(params, dict):
+        return None
+    for spelling in (name, name.replace("_", "-")):
+        value = params.get(spelling)
+        if value is not None:
+            return str(value)
+    return None
+
+
+def _classify_probe_for_search(result: RunResult, *, output_len: int, sla: Any) -> bool:
+    """Assign the sole two verdict statuses after strict data-health validation."""
+
+    if result.status != ProbeStatus.OK:
+        return False
+    healthy, reason = data_health_check(result, output_len=output_len)
+    if not healthy:
+        result.status = ProbeStatus.INVALID_RESULT
+        result.failure_reason = reason or "probe data health failed"
+        return False
+    if passes_sla(result, sla):
+        return True
+    result.status = ProbeStatus.SLA_FAILED
+    result.failure_reason = (
+        "SLA failed: "
+        f"ttft={result.mean_ttft_ms}, tpot={result.mean_tpot_ms}, "
+        f"success_rate={result.success_rate}"
+    )
+    return False
 
 
 def _make_evaluate(
@@ -319,6 +444,9 @@ def _make_evaluate(
     candidate_dir: Path,
     tp_size: int = 1,
     ports: list[int] | None = None,
+    *,
+    output_len: int,
+    candidate: dict[str, Any] | None = None,
 ):
     """Build the (evaluate, warmup) closures the search uses.
 
@@ -333,8 +461,8 @@ def _make_evaluate(
       求和成一条 instances=N 的 per-host 结果(round2 fill_host)。
 
     每次 evaluate 把单一模板按并发档改写,在容器里跑 bench,把 console + 结果拉回
-    candidate_dir(每个真实 bench 恰好落一份证据)并解析指标。任何异常收敛成不合格
-    RunResult,使过载塌缩记为边界失败而非中断整轮搜索。
+    candidate_dir(每个真实 bench 恰好落一份证据)并解析指标。探测异常收敛成 typed
+    RunResult；搜索会把该候选标为 incomplete/unknown，绝不把基础设施故障当作 SLA 边界。
     """
     container = ctx.container
     candidate_out = f"{ctx.outputs_container_path}/{candidate_id}"
@@ -357,7 +485,25 @@ def _make_evaluate(
             timestamp=timestamp,
         )
         command = _force_output_file(base_command, result_container_path)
-        _log(f"    [{candidate_id}] bench C={concurrency}{tag} @port{port} (num_prompts={num_prompts}) ...")
+        cleared = container.exec(f"rm -f -- {shlex.quote(result_container_path)}")
+        if not cleared.ok:
+            status = (
+                ProbeStatus.TRANSPORT_FAILED
+                if _is_transport_failure(cleared)
+                else ProbeStatus.BENCHMARK_FAILED
+            )
+            return _probe_failure_result(
+                candidate_id,
+                f"cannot clear prior benchmark result: {_command_failure_detail(cleared)}",
+                status=status,
+                tp_size=tp_size,
+                concurrency=concurrency,
+                num_prompts=num_prompts,
+            )
+        _log(
+            f"    [{candidate_id}] bench C={concurrency}{tag} @port{port} "
+            f"(num_prompts={num_prompts}) ..."
+        )
         bench_run = run_benchmark(container, command)
 
         log_name = f"bench_c{concurrency}{tag}_{timestamp}.log"
@@ -369,20 +515,96 @@ def _make_evaluate(
         )
         (candidate_dir / log_name).write_text(bench_console, encoding="utf-8")
 
-        text = container.exec(f"cat {shlex.quote(result_container_path)}").stdout
+        if _is_transport_failure(bench_run):
+            return _probe_failure_result(
+                candidate_id,
+                f"benchmark transport failed: {_command_failure_detail(bench_run)}",
+                status=ProbeStatus.TRANSPORT_FAILED,
+                tp_size=tp_size,
+                concurrency=concurrency,
+                num_prompts=num_prompts,
+            )
+
+        post_health = container.exec(f"curl -sf http://127.0.0.1:{port}/health")
+        if _is_transport_failure(post_health):
+            return _probe_failure_result(
+                candidate_id,
+                f"post-benchmark health transport failed: "
+                f"{_command_failure_detail(post_health)}",
+                status=ProbeStatus.TRANSPORT_FAILED,
+                tp_size=tp_size,
+                concurrency=concurrency,
+                num_prompts=num_prompts,
+            )
+        if not post_health.ok:
+            replica_match = re.search(r"_i(\d+)$", tag)
+            replica_index = int(replica_match.group(1)) if replica_match else 0
+            server_log_path = (
+                f"{candidate_out}/server.log"
+                if replica_index == 0
+                else f"{candidate_out}/server_i{replica_index}.log"
+            )
+            server_log_result = container.exec(
+                f"cat {shlex.quote(server_log_path)}"
+            )
+            traceback_text = server_log_result.stdout if server_log_result.ok else ""
+            known_issue = classify_known_runtime_issue(
+                engine_version=ctx.engine_version,
+                attention_backend=_candidate_param(candidate, "attention_backend"),
+                speculative_algorithm=_candidate_param(
+                    candidate, "speculative_algorithm"
+                ),
+                traceback_text=traceback_text,
+            )
+            return _probe_failure_result(
+                candidate_id,
+                f"server unhealthy after benchmark: {_command_failure_detail(post_health)}",
+                status=ProbeStatus.RUNTIME_FAILED,
+                tp_size=tp_size,
+                concurrency=concurrency,
+                num_prompts=num_prompts,
+                known_issue=known_issue,
+            )
+        if not bench_run.ok:
+            return _probe_failure_result(
+                candidate_id,
+                f"bench exit {bench_run.returncode}; see {log_name}: "
+                f"{_command_failure_detail(bench_run)}",
+                status=ProbeStatus.BENCHMARK_FAILED,
+                tp_size=tp_size,
+                concurrency=concurrency,
+                num_prompts=num_prompts,
+            )
+
+        read_result = container.exec(f"cat {shlex.quote(result_container_path)}")
+        if _is_transport_failure(read_result):
+            return _probe_failure_result(
+                candidate_id,
+                f"benchmark result transport failed: "
+                f"{_command_failure_detail(read_result)}",
+                status=ProbeStatus.TRANSPORT_FAILED,
+                tp_size=tp_size,
+                concurrency=concurrency,
+                num_prompts=num_prompts,
+            )
+        if not read_result.ok:
+            return _probe_failure_result(
+                candidate_id,
+                f"benchmark result read failed: {_command_failure_detail(read_result)}",
+                status=ProbeStatus.BENCHMARK_FAILED,
+                tp_size=tp_size,
+                concurrency=concurrency,
+                num_prompts=num_prompts,
+            )
+        text = read_result.stdout
         run_result = parse_bench_text(
             text,
             candidate_id=candidate_id,
             concurrency=concurrency,
             num_prompts=num_prompts,
             tp_size=tp_size,
+            output_len=output_len,
         )
-        if run_result.status == "bad_args" and bench_run.returncode != 0:
-            tail = (bench_run.stderr or bench_run.stdout).strip().splitlines()[-3:]
-            run_result.failure_reason = (
-                f"bench exit {bench_run.returncode}; see {log_name}: "
-                + " | ".join(tail)
-            )
         (candidate_dir / result_name).write_text(text, encoding="utf-8")
         return run_result
 
@@ -407,19 +629,25 @@ def _make_evaluate(
                 f"succ={run_result.success_rate:.2f} status={run_result.status}"
             )
             return run_result
-        except Exception as exc:  # collapse != abort; the search treats this as a fail
-            return _health_check_failed_result(
-                candidate_id, f"evaluate raised at C={concurrency}: {exc!r}"
+        except Exception as exc:  # typed incomplete evidence, never an SLA verdict
+            return _probe_failure_result(
+                candidate_id,
+                f"evaluate raised at C={concurrency}: {exc!r}",
+                status=ProbeStatus.BENCHMARK_FAILED,
+                tp_size=tp_size,
+                concurrency=concurrency,
+                num_prompts=concurrency * ctx.multiplier,
             )
 
-    def warmup(concurrency: int = WARMUP_CONCURRENCY) -> None:
+    def warmup(concurrency: int = WARMUP_CONCURRENCY) -> RunResult | None:
         """server ready 后、正式并发搜索前跑一次预热压测,结果**丢弃不计入搜索**。
 
         目的:吸收首次运行的 kernel 编译/JIT 尖峰(见 client knowledge §「丢弃第一条」),
         让正式 probe 的每一档都从热 kernel 起步,不再出现「首测 ttft 断崖高、复测断崖低」。
         用固定小并发(WARMUP_CONCURRENCY),整机满载时对所有副本端口各预热一次。
         因候选默认已 pin `--disable-radix-cache`,预热不会给正式 probe 留下 prefix 缓存,
-        故只热 kernel、不喂缓存,保持各候选/各档横向可比。异常吞掉,预热失败不阻断搜索。
+        故只热 kernel、不喂缓存,保持各候选/各档横向可比。预热若出现基础设施
+        故障则返回 typed failure，调用方把候选标成 incomplete，而不是继续发布结果。
         """
         try:
             for i, port in enumerate(bench_ports):
@@ -433,8 +661,18 @@ def _make_evaluate(
                     f"      [{candidate_id}] warmup done "
                     f"(ttft={r.mean_ttft_ms:.0f}ms status={r.status},不计入搜索)"
                 )
-        except Exception as exc:  # 预热失败不应阻断搜索
-            _log(f"      [{candidate_id}] warmup skipped ({exc!r})")
+                if r.status not in SEARCH_VERDICT_STATUSES:
+                    return r
+        except Exception as exc:
+            return _probe_failure_result(
+                candidate_id,
+                f"warmup raised at C={concurrency}: {exc!r}",
+                status=ProbeStatus.BENCHMARK_FAILED,
+                tp_size=tp_size,
+                concurrency=concurrency,
+                num_prompts=concurrency * ctx.multiplier,
+            )
+        return None
 
     return evaluate, warmup
 
@@ -873,6 +1111,7 @@ def _run_batch_parallel(
     outputs_container_path: str,
     *,
     qualifies,
+    output_len: int,
     round_label: str,
     max_probes: int,
     confirm: int,
@@ -925,7 +1164,8 @@ def _run_batch_parallel(
             n_replicas = len(replica_slices)
             if n_replicas < 1:
                 raise ValueError(
-                    f"candidate {candidate_id}: 整机 {_n_devices} 卡放不下一个 tp_size={_tp_size} 实例。"
+                    f"candidate {candidate_id}: 整机 {_n_devices} 卡放不下一个 "
+                    f"tp_size={_tp_size} 实例。"
                 )
             replica_ports = list(planned.ports)
             if len(replica_ports) != n_replicas or replica_ports[0] != port:
@@ -945,7 +1185,8 @@ def _run_batch_parallel(
             if _n_devices != _tp_size:
                 raise ValueError(
                     f"candidate {candidate_id}: tp_size={_tp_size} 需要 {_tp_size} 张 GPU,"
-                    f"实际分到 {_n_devices} 张({gpu_ids_str})。拒绝启动以免 CUDA invalid device ordinal。"
+                    f"实际分到 {_n_devices} 张({gpu_ids_str})。"
+                    "拒绝启动以免 CUDA invalid device ordinal。"
                 )
         container_name = f"{config.container_name}-{candidate_id}"
         container_config = ContainerConfig(
@@ -1029,7 +1270,11 @@ def _run_batch_parallel(
                 {
                     "failed_at": datetime.now(UTC).astimezone().isoformat(),
                     "round": failed_round,
-                    "concurrency": None,
+                    "concurrency": 0,
+                    "num_prompts": 0,
+                    "tp_size": _candidate_tp_size(candidate),
+                    "status": str(ProbeStatus.STARTUP_FAILED),
+                    "known_issue": None,
                     "attempt": attempt,
                     "stage": "container_start",
                     "reason": f"container did not start: {reason}",
@@ -1072,17 +1317,27 @@ def _run_batch_parallel(
 
     # Run each candidate (server lifecycle + search) CONCURRENTLY within the batch.
     # 每个候选独占容器+GPU+端口,底层 subprocess.run 线程安全,故用线程池并发跑。
-    # 单个候选内部抛异常(RemoteRunner OSError 等)被收敛成 health_check_failed
+    # 单个候选内部抛异常(RemoteRunner OSError 等)被收敛成 typed failure
     # 结果而非中断整批;try/finally 仍保证本 batch 已启动的容器一定被 stop+remove,
     # 不会留下孤儿容器占住 GPU/端口导致下个 batch 撞车。
     def _run_one(entry) -> tuple[str, SearchOutcome]:
         candidate_id, container, ctx, candidate, gpu_ids_str, port = entry
+        candidate_tp = _candidate_tp_size(candidate)
         if not ctx.container_ready:
             reason = ctx.container_start_failures[-1]["reason"]
             return candidate_id, SearchOutcome(
-                results=[_health_check_failed_result(candidate_id, reason)],
+                results=[
+                    _probe_failure_result(
+                        candidate_id,
+                        reason,
+                        status=ProbeStatus.STARTUP_FAILED,
+                        tp_size=candidate_tp,
+                        concurrency=0,
+                        num_prompts=0,
+                    )
+                ],
                 c_star=None,
-                stop_reason="health_check_failed",
+                stop_reason=ProbeStatus.STARTUP_FAILED,
                 last_pass=None,
                 first_fail=None,
                 num_evals=0,
@@ -1090,6 +1345,8 @@ def _run_batch_parallel(
                 log=[reason],
                 startup_attempts=len(ctx.container_start_failures),
                 failures=list(ctx.container_start_failures),
+                complete=False,
+                certainty="unknown",
             )
         cand_seeds = None
         if seeds_by_id and candidate_id in seeds_by_id:
@@ -1099,6 +1356,7 @@ def _run_batch_parallel(
                 ctx,
                 candidate,
                 qualifies=qualifies,
+                output_len=output_len,
                 round_label=round_label,
                 max_probes=max_probes,
                 confirm=confirm,
@@ -1113,23 +1371,43 @@ def _run_batch_parallel(
                 failed_round = int(round_label.removeprefix("r"))
             except ValueError:
                 failed_round = 0
+            # RemoteRunner already turns transport failures into an explicit
+            # CommandResult.failure_kind at the command boundary.  An exception
+            # escaping this orchestration layer is therefore not safe to label
+            # as transport merely because it inherits OSError/ConnectionError.
+            status = ProbeStatus.RUNTIME_FAILED
             failure = {
                 "failed_at": datetime.now(UTC).astimezone().isoformat(),
                 "round": failed_round,
-                "concurrency": None,
+                "concurrency": 0,
+                "num_prompts": 0,
+                "tp_size": candidate_tp,
+                "status": str(status),
+                "known_issue": None,
                 "attempt": 1,
                 "reason": f"_run_candidate raised: {exc!r}",
             }
             outcome = SearchOutcome(
-                results=[_health_check_failed_result(candidate_id, f"_run_candidate raised: {exc!r}")],
+                results=[
+                    _probe_failure_result(
+                        candidate_id,
+                        f"_run_candidate raised: {exc!r}",
+                        status=status,
+                        tp_size=candidate_tp,
+                        concurrency=0,
+                        num_prompts=0,
+                    )
+                ],
                 c_star=None,
-                stop_reason="health_check_failed",
+                stop_reason=status,
                 last_pass=None,
                 first_fail=None,
                 num_evals=0,
                 newly_probed=[],
                 log=[f"_run_candidate raised: {exc!r}"],
                 failures=[failure],
+                complete=False,
+                certainty="unknown",
             )
         return candidate_id, outcome
 
@@ -1185,7 +1463,11 @@ def _extract_failure_reason(log_path: Path) -> str:
     return "(empty server log)"
 
 
-def _build_cmd_from_params(params: dict, model_path_placeholder: str = "${MODEL_PATH}", port: int = 30000) -> str:
+def _build_cmd_from_params(
+    params: dict,
+    model_path_placeholder: str = "${MODEL_PATH}",
+    port: int = 30000,
+) -> str:
     """Build a complete launch_server command from a params dict.
 
     Rules:
@@ -1358,6 +1640,7 @@ def _run_candidate(
     candidate: dict[str, Any],
     *,
     qualifies,
+    output_len: int,
     round_label: str,
     max_probes: int,
     confirm: int,
@@ -1368,11 +1651,12 @@ def _run_candidate(
 
     Returns the SearchOutcome (results = deduped seeds + new probes). On a server
     that never becomes ready, returns a one-element outcome with a
-    health_check_failed result so ranking still sees the candidate.
+    startup_failed result so reporting still sees the candidate.
     """
     container = ctx.container
     config = ctx.config
     candidate_id = str(candidate.get("id", "unknown"))
+    tp_size = _candidate_tp_size(candidate)
     raw_cmd = candidate.get("cmd")
     cmd = raw_cmd if isinstance(raw_cmd, str) and raw_cmd.strip() else ""
     # Structured params are the primary input when the optional legacy cmd is absent.
@@ -1453,7 +1737,11 @@ def _run_candidate(
             {
                 "failed_at": datetime.now(UTC).astimezone().isoformat(),
                 "round": failed_round,
-                "concurrency": None,
+                "concurrency": 0,
+                "num_prompts": 0,
+                "tp_size": tp_size,
+                "status": str(ProbeStatus.STARTUP_FAILED),
+                "known_issue": None,
                 "attempt": startup_attempt,
                 "stage": "server_start",
                 "reason": f"server did not become ready: {reason}",
@@ -1471,13 +1759,18 @@ def _run_candidate(
                 f"{startup_attempt} attempt(s)"
             )
             reason = startup_failures[-1]["reason"] if startup_failures else "unknown"
-            failed = _health_check_failed_result(
-                candidate_id, reason
+            failed = _probe_failure_result(
+                candidate_id,
+                reason,
+                status=ProbeStatus.STARTUP_FAILED,
+                tp_size=tp_size,
+                concurrency=0,
+                num_prompts=0,
             )
             outcome = SearchOutcome(
                 results=[failed],
                 c_star=None,
-                stop_reason="health_check_failed",
+                stop_reason=ProbeStatus.STARTUP_FAILED,
                 last_pass=None,
                 first_fail=None,
                 num_evals=0,
@@ -1485,26 +1778,61 @@ def _run_candidate(
                 log=["server did not become ready"],
                 startup_attempts=startup_attempt + len(ctx.container_start_failures),
                 failures=startup_failures,
+                complete=False,
+                certainty="unknown",
             )
         else:
             _log(f"[{round_label}] {candidate_id}: server ready, probing concurrency ...")
-            tp_size = int(candidate.get("params", {}).get("tp_size", 1))
+            version_result = container.exec(ENGINE_VERSION_COMMAND)
+            ctx.engine_version = (
+                version_result.stdout.strip().splitlines()[0]
+                if version_result.ok and version_result.stdout.strip()
+                else ""
+            )
             evaluate, warmup = _make_evaluate(
                 ctx, candidate_id, candidate_dir, tp_size=tp_size,
                 ports=ctx.replica_ports,
+                output_len=output_len,
+                candidate=candidate,
             )
-            warmup()  # 正式搜索前预热一次(结果丢弃,吸收 kernel 编译尖峰)
-            outcome = search_saturation(
-                evaluate,
-                qualifies,
-                start=1,
-                factor=2,
-                max_cap=config.max_cap,
-                max_probes=max_probes,
-                refine=refine,
-                confirm=confirm,
-                seeds=seeds,
-            )
+
+            def on_evaluate_exception(concurrency: int, exc: Exception) -> RunResult:
+                return _probe_failure_result(
+                    candidate_id,
+                    f"evaluate raised at C={concurrency}: {exc!r}",
+                    status=ProbeStatus.BENCHMARK_FAILED,
+                    tp_size=tp_size,
+                    concurrency=concurrency,
+                    num_prompts=concurrency * ctx.multiplier,
+                )
+
+            warmup_failure = warmup()
+            if warmup_failure is not None:
+                outcome = SearchOutcome(
+                    results=[warmup_failure],
+                    c_star=None,
+                    stop_reason=warmup_failure.status,
+                    last_pass=None,
+                    first_fail=None,
+                    num_evals=0,
+                    newly_probed=[],
+                    log=[warmup_failure.failure_reason or "warmup failed"],
+                    complete=False,
+                    certainty="unknown",
+                )
+            else:
+                outcome = search_saturation(
+                    evaluate,
+                    qualifies,
+                    start=1,
+                    factor=2,
+                    max_cap=config.max_cap,
+                    max_probes=max_probes,
+                    refine=refine,
+                    confirm=confirm,
+                    seeds=seeds,
+                    on_evaluate_exception=on_evaluate_exception,
+                )
             _pull_container_file(
                 container, server_log, candidate_dir / f"server.{round_label}.log"
             )
@@ -1517,7 +1845,23 @@ def _run_candidate(
                 f"stop={outcome.stop_reason} evals={outcome.num_evals}"
             )
             outcome.startup_attempts = startup_attempt + len(ctx.container_start_failures)
-            outcome.failures = startup_failures
+            probe_failures = [
+                {
+                    "failed_at": datetime.now(UTC).astimezone().isoformat(),
+                    "round": failed_round,
+                    "concurrency": result.concurrency,
+                    "num_prompts": result.num_prompts,
+                    "tp_size": result.tp_size,
+                    "attempt": 1,
+                    "stage": "probe",
+                    "status": str(result.status),
+                    "reason": result.failure_reason,
+                    "known_issue": result.known_issue,
+                }
+                for result in outcome.results
+                if result.status not in SEARCH_VERDICT_STATUSES
+            ]
+            outcome.failures = startup_failures + probe_failures
     finally:
         _cleanup_servers_checked(container, candidate_id=candidate_id)
 
@@ -1534,6 +1878,8 @@ def _outcome_diag(outcome: SearchOutcome) -> dict[str, Any]:
         "newly_probed": list(outcome.newly_probed),
         "num_results": len(outcome.results),
         "startup_attempts": outcome.startup_attempts,
+        "complete": outcome.complete,
+        "certainty": outcome.certainty,
     }
 def _norm_gpu(name: str) -> str:
     """归一化 GPU 型号名以便比较。
@@ -1630,8 +1976,9 @@ def run_executor(
     # both data-healthy (not truncated) and within SLA. Injected so the search
     # module stays ranker/SLA-agnostic.
     def qualifies(result: RunResult) -> bool:
-        healthy, _ = data_health_check(result, output_len=output_len)
-        return healthy and passes_sla(result, job.sla)
+        return _classify_probe_for_search(
+            result, output_len=output_len, sla=job.sla
+        )
 
     # docker -v resolves host paths on the REMOTE machine, so the outputs mount
     # must be an absolute path that exists on the remote host — a local relative
@@ -1678,6 +2025,7 @@ def run_executor(
         outcomes = _run_batch_parallel(
             ctx_template, alloc, remote, outputs_host_dir, outputs_container_path,
             qualifies=qualifies,
+            output_len=output_len,
             round_label="r1",
             max_probes=ROUND1_MAX_PROBES,
             confirm=ROUND1_CONFIRM,
@@ -1706,7 +2054,10 @@ def run_executor(
         gpu_count=job.gpu_count,
     )
     refine_ids = [str(candidate.get("id", "unknown")) for candidate in candidates]
-    _log(f"round-1 done. ranking={[(r['candidate_id'], r['goodput_per_host']) for r in round1_ranking]}")
+    _log(
+        "round-1 diagnostic/provisional ranking="
+        f"{[(r['candidate_id'], r['goodput_per_host']) for r in round1_ranking]}"
+    )
     _log(f"round-2 refining ALL {len(refine_ids)} candidates: {refine_ids}")
 
     # ---- ROUND 2: precise bisection on ALL candidates (batch-parallel) ----
@@ -1727,6 +2078,7 @@ def run_executor(
         outcomes = _run_batch_parallel(
             ctx_template, alloc, remote, outputs_host_dir, outputs_container_path,
             qualifies=qualifies,
+            output_len=output_len,
             round_label="r2",
             max_probes=ROUND2_MAX_PROBES,
             confirm=ROUND2_CONFIRM,
@@ -1755,8 +2107,18 @@ def run_executor(
                 for failure in outcome.failures
             )
 
+    exact_results_by_candidate = {
+        candidate_id: results
+        for candidate_id, results in results_by_candidate.items()
+        if candidate_summaries.get(candidate_id, {}).get("round2", {}).get("complete")
+        is True
+        and candidate_summaries.get(candidate_id, {})
+        .get("round2", {})
+        .get("certainty")
+        == "exact"
+    }
     ranking = rank_candidates(
-        results_by_candidate, job.sla, output_len=output_len,
+        exact_results_by_candidate, job.sla, output_len=output_len,
         gpu_count=job.gpu_count,
     )
 
@@ -1857,8 +2219,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
     parser.add_argument("--concurrencies", default=None,
                         help="deprecated: adaptive search now chooses probes")
-    parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K,
-                        help="deprecated compatibility option; round-2 always refines all candidates")
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=DEFAULT_TOP_K,
+        help="deprecated compatibility option; round-2 always refines all candidates",
+    )
     parser.add_argument("--max-cap", type=int, default=DEFAULT_MAX_CAP,
                         help="upper bound on concurrency the search will probe")
     parser.add_argument("--container-name", default=None)

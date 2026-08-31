@@ -8,26 +8,107 @@ TP8 ×1 instance on the same 8-GPU machine).
 
 from __future__ import annotations
 
-from runners.metrics import RunResult
+import math
+
+from runners.metrics import SEARCH_VERDICT_STATUSES, ProbeStatus, RunResult
 from schemas.job_spec import SLA
+
+
+def _metric_sanity_error(
+    result: RunResult, *, output_len: int | None = None
+) -> str | None:
+    if type(result.full_host_measured) is not bool:
+        return (
+            "full_host_measured must be a boolean, got "
+            f"{result.full_host_measured!r}"
+        )
+    for field_name in ("concurrency", "num_prompts", "completed", "tp_size", "instances"):
+        value = getattr(result, field_name)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            return f"{field_name} must be a positive integer, got {value!r}"
+    if not result.full_host_measured and result.instances != 1:
+        return "instances must equal 1 when full_host_measured is false"
+    if result.completed != result.num_prompts:
+        return (
+            f"completed={result.completed} does not match "
+            f"num_prompts={result.num_prompts}"
+        )
+    if (
+        isinstance(result.total_output_tokens, bool)
+        or not isinstance(result.total_output_tokens, int)
+        or result.total_output_tokens < 0
+    ):
+        return "total_output_tokens must be a non-negative integer"
+    numeric_fields = (
+        "success_rate",
+        "request_throughput",
+        "output_throughput",
+        "total_throughput",
+        "mean_ttft_ms",
+        "p99_ttft_ms",
+        "mean_tpot_ms",
+        "p99_tpot_ms",
+        "avg_output_tokens",
+        "duration",
+    )
+    for field_name in numeric_fields:
+        value = getattr(result, field_name)
+        if not _is_finite_nonnegative_number(value):
+            return f"{field_name} must be finite and non-negative, got {value!r}"
+    if not 0 <= result.success_rate <= 1:
+        return f"success_rate must be in [0, 1], got {result.success_rate!r}"
+    if output_len is not None:
+        if isinstance(output_len, bool) or not isinstance(output_len, int) or output_len <= 0:
+            return f"output_len must be a positive integer, got {output_len!r}"
+        scaled_tokens = 10 * result.total_output_tokens
+        lower_scaled = 9 * output_len * result.completed
+        upper_scaled = 11 * output_len * result.completed
+        if not lower_scaled <= scaled_tokens <= upper_scaled:
+            return (
+                "total_output_tokens is outside 90%..110% of the expected "
+                "completed-token total"
+            )
+        try:
+            average_numerator, average_denominator = (
+                result.avg_output_tokens.as_integer_ratio()
+            )
+        except (AttributeError, OverflowError, ValueError):
+            return "avg_output_tokens is not representable as a finite ratio"
+        average_scaled = 10 * average_numerator
+        average_lower_scaled = 9 * output_len * average_denominator
+        average_upper_scaled = 11 * output_len * average_denominator
+        if not average_lower_scaled <= average_scaled <= average_upper_scaled:
+            return (
+                f"avg_output_tokens={result.avg_output_tokens!r} outside "
+                "90%..110% of output_len"
+            )
+    return None
+
+
+def _is_finite_nonnegative_number(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        numeric = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return False
+    return math.isfinite(numeric) and numeric >= 0
 
 
 def data_health_check(result: RunResult, *, output_len: int) -> tuple[bool, str | None]:
     """§5 data sanity: at least one completed request and outputs not truncated."""
-    if result.completed <= 0:
-        return False, "no_completed: 0 completed requests"
-    threshold = output_len * 0.9
-    if result.avg_output_tokens < threshold:
-        return (
-            False,
-            f"truncated: avg_output_tokens={result.avg_output_tokens:.1f} "
-            f"< {threshold:.1f} (target {output_len})",
-        )
+    if result.status != ProbeStatus.OK:
+        return False, f"probe_status: {result.status}"
+    sanity_error = _metric_sanity_error(result, output_len=output_len)
+    if sanity_error is not None:
+        return False, f"invalid_metrics: {sanity_error}"
     return True, None
 
 
 def passes_sla(result: RunResult, sla: SLA) -> bool:
     """Latency and reliability gate: mean TTFT, mean TPOT, and success rate."""
+    if result.status != ProbeStatus.OK or _metric_sanity_error(result) is not None:
+        return False
     return (
         result.mean_ttft_ms <= sla.max_avg_ttft_ms
         and result.mean_tpot_ms <= sla.max_avg_tpot_ms
@@ -46,9 +127,22 @@ def _instances_per_host(tp_size: int, gpu_count: int) -> float:
     在非 2 的幂主机上把真正打包更优的候选(如 TP3×2)挤下去。
     tp_size > gpu_count 时返回 0(单主机连一个实例都放不下)。
     """
-    if tp_size <= 0:
-        return 1.0
+    if not _is_representable_positive_int(tp_size) or not _is_representable_positive_int(
+        gpu_count
+    ):
+        return 0.0
     return float(gpu_count // tp_size)
+
+
+def _is_representable_positive_int(value: object) -> bool:
+    """Return whether a topology count is a strict, finite positive integer."""
+
+    if type(value) is not int or value <= 0:
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, TypeError, ValueError):
+        return False
 
 
 def _best_qualifying(
@@ -64,10 +158,21 @@ def _best_qualifying(
     * raw_goodput       = total_throughput of the single instance
     * per_host_goodput   = raw_goodput × (gpu_count / tp_size)
     """
+    if not _is_representable_positive_int(gpu_count) or not results or any(
+        result.status not in SEARCH_VERDICT_STATUSES
+        or _metric_sanity_error(result, output_len=output_len) is not None
+        for result in results
+    ):
+        return 0.0, 0.0, None
     best_raw = 0.0
     best_per_host = 0.0
     best_concurrency: int | None = None
     for result in results:
+        physical_capacity = gpu_count // result.tp_size
+        if physical_capacity < 1 or (
+            result.full_host_measured and result.instances > physical_capacity
+        ):
+            return 0.0, 0.0, None
         healthy, _ = data_health_check(result, output_len=output_len)
         if not healthy or not passes_sla(result, sla):
             continue
@@ -75,12 +180,17 @@ def _best_qualifying(
         # round1 单实例仍按 floor(gpu/tp) 做兼容外推；round2 满载结果已经
         # 按真实 NUMA topology 聚合，必须直接使用实测总和，不能拿理论 floor
         # 补齐放不下的碎片，否则会系统性高估该候选。
-        measured = max(1, int(getattr(result, "instances", 1)))
-        raw = result.total_throughput / measured
+        measured = result.instances
+        try:
+            raw = result.total_throughput / measured
+        except OverflowError:
+            return 0.0, 0.0, None
         if getattr(result, "full_host_measured", False):
             per_host = result.total_throughput
         else:
             per_host = raw * _instances_per_host(result.tp_size, gpu_count)
+        if not math.isfinite(raw) or raw < 0 or not math.isfinite(per_host) or per_host < 0:
+            return 0.0, 0.0, None
         if best_concurrency is None or per_host > best_per_host:
             best_raw = raw
             best_per_host = per_host
@@ -116,9 +226,18 @@ def rank_candidates(
     """
     ranking: list[dict] = []
     for candidate_id, results in results_by_candidate.items():
+        # Any infrastructure/invalid point means this candidate did not finish
+        # an exact statistical search.  Keep it in candidate reporting, but do
+        # not manufacture an official rank from an older successful point.
+        if not results or any(
+            result.status not in SEARCH_VERDICT_STATUSES for result in results
+        ):
+            continue
         raw, per_host, best_concurrency = _best_qualifying(
             results, sla, output_len=output_len, gpu_count=gpu_count
         )
+        if best_concurrency is None:
+            continue
         # tp_size from the first healthy result for display
         tp_size = 1
         for r in results:

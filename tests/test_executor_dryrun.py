@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -109,7 +111,15 @@ class _FakeContainer:
     def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
         self.cstar = cstar_by_candidate
         self.current: str | None = None          # candidate whose server is up
-        self.alive = False
+        # Production creates one Container object per candidate.  Most dry-run
+        # tests intentionally return this one shared fake from the factory, so
+        # model server liveness must be scoped to the worker thread/port rather
+        # than one global boolean (otherwise one candidate's cleanup kills a
+        # sibling candidate in the fake only).
+        self._server_lock = threading.Lock()
+        self._alive_ports: set[int] = set()
+        self._thread_servers = threading.local()
+        self._fallback_alive = False
         self.bench_calls: list[tuple[str, int, int]] = []  # (candidate, C, num_prompts)
         self.warmup_calls: list[tuple[str, int, int]] = []  # 预热压测(丢弃,不计入搜索)
         # 满载测试要证明「同一并发档打到了 N 个不同副本端口」,单独记录 (candidate, C, port),
@@ -119,6 +129,51 @@ class _FakeContainer:
         self._result_files: dict[str, str] = {}   # container path -> jsonl text
         self.launched_cmds: list[str] = []        # 每次 exec_detached 收到的 server 启动命令
         self.container_exists = False
+
+    def _owned_ports(self) -> set[int]:
+        ports = getattr(self._thread_servers, "ports", None)
+        if ports is None:
+            ports = set()
+            self._thread_servers.ports = ports
+        return ports
+
+    def _record_launch_port(self, command: str) -> None:
+        port = _flag_int(shlex.split(command), "--port")
+        if port <= 0:
+            return
+        ports = self._owned_ports()
+        with self._server_lock:
+            # ThreadPool workers may be reused by a later candidate.  A worker
+            # with no live owned server starts a fresh logical container.
+            if not (ports & self._alive_ports):
+                ports.clear()
+            ports.add(port)
+
+    @property
+    def alive(self) -> bool:
+        ports = self._owned_ports()
+        with self._server_lock:
+            if ports:
+                return bool(ports & self._alive_ports)
+            return self._fallback_alive
+
+    @alive.setter
+    def alive(self, value: bool) -> None:
+        ports = self._owned_ports()
+        with self._server_lock:
+            if ports:
+                if value:
+                    self._alive_ports.update(ports)
+                else:
+                    self._alive_ports.difference_update(ports)
+            else:
+                self._fallback_alive = value
+
+    def _forget_owned_servers(self) -> None:
+        ports = self._owned_ports()
+        with self._server_lock:
+            self._alive_ports.difference_update(ports)
+        ports.clear()
 
     # -- lifecycle no-ops the executor calls on the container object ------------
     def start(self, *, timeout=None) -> _FakeResult:
@@ -144,6 +199,7 @@ class _FakeContainer:
         # launching a candidate's server: infer which candidate from the -v mount
         # path baked into the launch cmd is not available, so track by outputs dir
         self.launched_cmds.append(command)
+        self._record_launch_port(command)
         # 复刻真实 nohup 陷阱:exec_detached 会拼成 `nohup {command} ...`,nohup 把
         # 第一个词当程序名。裸 `CUDA_VISIBLE_DEVICES=0 python...` 前缀会让 nohup 去找名为
         # "CUDA_VISIBLE_DEVICES=0" 的可执行文件而失败(线上就是这么崩的)。正确写法是
@@ -165,11 +221,17 @@ class _FakeContainer:
             f"pkill -TERM -f {shlex.quote(ex.SERVER_PROCESS_PATTERN)}",
             f"pkill -KILL -f {shlex.quote(ex.SERVER_PROCESS_PATTERN)}",
         }:
-            self.alive = False
+            self._forget_owned_servers()
             self.current = None
             return _FakeResult()
         if "/health" in command:
-            return _FakeResult(0 if self.alive else 7)
+            match = re.search(r":(\d+)/health\b", command)
+            if match is not None:
+                with self._server_lock:
+                    alive = int(match.group(1)) in self._alive_ports
+            else:
+                alive = self.alive
+            return _FakeResult(0 if alive else 7)
         if command.startswith("mkdir -p"):
             # the candidate output dir tells us which candidate is active
             path = command.split(None, 2)[-1].strip().strip("'\"")
@@ -234,6 +296,7 @@ class _StrictLaunchContainer(_FakeContainer):
     def exec_detached(self, command: str, log_container_path: str, *, timeout=None):
         if command.split()[:3] != ["python", "-m", "sglang.launch_server"]:
             self.launched_cmds.append(command)
+            self._record_launch_port(command)
             self.rejected_launches.append(command)
             self.alive = False
             return _FakeResult(returncode=127, stderr="synthetic invalid executable")
@@ -249,6 +312,7 @@ class _FlakyServerContainer(_FakeContainer):
     def exec_detached(self, command: str, log_container_path: str, *, timeout=None):
         self.launch_attempts += 1
         self.launched_cmds.append(command)
+        self._record_launch_port(command)
         if self.failures_remaining > 0:
             self.failures_remaining -= 1
             self.alive = False
@@ -555,7 +619,8 @@ def test_two_round_dryrun_ranks_by_true_goodput(tmp_path, workloads_output_len):
     assert ids_in_order == ["cand-b", "cand-d", "cand-a", "cand-c"]
     by_id = {row["candidate_id"]: row for row in ranking}
     for cid, expected_cstar in cstar.items():
-        assert by_id[cid]["goodput_per_host"] == expected_cstar * 100.0 * 8  # gpu_count=8, tp_size=1
+        # gpu_count=8, tp_size=1
+        assert by_id[cid]["goodput_per_host"] == expected_cstar * 100.0 * 8
         assert by_id[cid]["best_concurrency"] == expected_cstar
 
     # -- every candidate enters precise round 2; --top-k is compatibility-only --
@@ -578,6 +643,35 @@ def test_two_round_dryrun_ranks_by_true_goodput(tmp_path, workloads_output_len):
     assert (results_dir / "ranking.json").exists()
     for cid in cstar:
         assert (results_dir / cid / "run_result.r1.json").exists()
+
+
+def test_hit_cap_candidate_is_incomplete_and_has_no_final_rank(
+    tmp_path, workloads_output_len, monkeypatch
+):
+    config = ExecutorConfig(
+        job_path=_write_job(tmp_path),
+        configs_path=_write_configs(tmp_path, ["uncertain"]),
+        results_dir=tmp_path / "results",
+        ssh_target="fake@host",
+        image_ref="sglang-test",
+        model_host_dir="/data/models/qwen",
+        model_container_path="/models/qwen",
+        project_root=Path.cwd(),
+        max_cap=4,
+    )
+    container = _FakeContainer({"uncertain": 1_000})
+    monkeypatch.setattr(ex, "Container", lambda _remote, _config: container)
+
+    summary = run_executor(config, remote=_FakeRemote())
+
+    row = summary["candidate_results"][0]
+    assert row["status"] == "incomplete"
+    assert row["round2"]["complete"] is False
+    assert row["round2"]["certainty"] == "lower_bound"
+    assert summary["ranking"] == []
+    assert "rank" not in row
+    assert summary["task_status"] == "INCOMPLETE"
+    assert summary["ranking_status"] == "PROVISIONAL"
 
 
 def test_executor_consumes_preflight_plan_for_both_rounds(
@@ -799,15 +893,17 @@ def test_round2_fill_host_benches_n_replicas_no_double_count(tmp_path, workloads
     finally:
         exmod.Container = original_container
 
-    ranking = summary["ranking"]
-    assert ranking[0]["candidate_id"] == "full"
-    assert ranking[0]["best_concurrency"] == 8
-
-    # tp=2, gpu=8 -> floor(8/2)=4 副本。per_host = (4×800 / 4) × 4 = 3200。
-    # 若双重计数会是 4×800 × 4 = 12800。
-    assert ranking[0]["tp_size"] == 2
-    assert ranking[0]["instances_per_host"] == 4.0
-    assert ranking[0]["goodput_per_host"] == 3200.0
+    # Task 8 will revise the precise-search budget.  With today's fixed 14
+    # probes this confirmed fill-host search stops at max_probes before proving
+    # the exact boundary, so Task 6 must fail closed instead of publishing the
+    # tempting C=8 / 3200 tok/s lower bound as an official rank.
+    assert summary["ranking"] == []
+    assert summary["task_status"] == "INCOMPLETE"
+    assert summary["ranking_status"] == "PROVISIONAL"
+    row = summary["candidate_results"][0]
+    assert row["status"] == "incomplete"
+    assert row["round2"]["stop_reason"] == "max_probes"
+    assert row["round2"]["complete"] is False
 
     # round2 满载:c*=8 这一档必须打满 4 个不同副本端口 30000..30003
     #(round1 单实例也在 30000 压过 8,取并集仍是这 4 个)。
@@ -1336,7 +1432,7 @@ def test_exhausted_startup_retries_keeps_failed_candidate_row(
 ):
     config = ExecutorConfig(
         job_path=_write_job(tmp_path),
-        configs_path=_write_configs(tmp_path, ["broken"]),
+        configs_path=_write_configs_with_params(tmp_path, {"broken": {"tp_size": 4}}),
         results_dir=tmp_path / "results",
         ssh_target="fake@host",
         image_ref="sglang-test",
@@ -1360,9 +1456,14 @@ def test_exhausted_startup_retries_keeps_failed_candidate_row(
     assert summary["task_status"] == "INCOMPLETE"
     assert summary["ranking_status"] == "PROVISIONAL"
     assert row["candidate_id"] == "broken"
-    assert row["status"] == "failed"
+    assert row["status"] == "incomplete"
     assert row["failed_at"]
     assert row["failed_round"] == 2
+    assert row["failure_status"] == "startup_failed"
+    assert row["failed_tp_size"] == 4
+    assert row["failed_concurrency"] == 0
+    assert row["failed_num_prompts"] == 0
+    assert row["known_issue"] is None
     assert row["failure_reason"]
 
 

@@ -7,9 +7,17 @@ import subprocess
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 
 CompletedProcess = subprocess.CompletedProcess[str]
 Runner = Callable[..., CompletedProcess]
+
+
+class CommandFailureKind(StrEnum):
+    """Failures produced by the command transport rather than the remote child."""
+
+    TRANSPORT = "transport"
+    TIMEOUT = "timeout"
 
 # Key-based (passwordless) SSH: disable password auth entirely so failures are
 # immediate instead of hanging on a prompt.
@@ -37,6 +45,7 @@ class CommandResult:
     returncode: int
     stdout: str
     stderr: str
+    failure_kind: CommandFailureKind | None = None
 
     @property
     def ok(self) -> bool:
@@ -86,7 +95,9 @@ class RemoteRunner:
 
     def run(self, command: str, *, timeout: int | None = None) -> CommandResult:
         if not self._ssh_password:
-            return self._invoke(self.build_ssh_argv(command), timeout=timeout)
+            return self._invoke(
+                self.build_ssh_argv(command), timeout=timeout, via_ssh=True
+            )
 
         read_fd, write_fd = os.pipe()
         writer = threading.Thread(
@@ -101,6 +112,7 @@ class RemoteRunner:
                 self.build_ssh_argv(command, password_fd=read_fd),
                 timeout=timeout,
                 pass_fds=(read_fd,),
+                via_ssh=True,
             )
         finally:
             os.close(read_fd)
@@ -109,7 +121,7 @@ class RemoteRunner:
     def run_local(
         self, argv: Sequence[str], *, timeout: int | None = None
     ) -> CommandResult:
-        return self._invoke(list(argv), timeout=timeout)
+        return self._invoke(list(argv), timeout=timeout, via_ssh=False)
 
     def _invoke(
         self,
@@ -117,6 +129,7 @@ class RemoteRunner:
         *,
         timeout: int | None,
         pass_fds: tuple[int, ...] = (),
+        via_ssh: bool,
     ) -> CommandResult:
         # timeout=0 is the explicit opt-out used by long-running benchmarks.
         # None retains the ordinary per-command safety default.
@@ -138,14 +151,29 @@ class RemoteRunner:
             stderr = _as_text(exc.stderr)
             detail = f"command timed out after {effective_timeout}s"
             stderr = f"{stderr}\n{detail}".strip() if stderr else detail
-            return CommandResult(returncode=124, stdout=stdout, stderr=stderr)
+            return CommandResult(
+                returncode=124,
+                stdout=stdout,
+                stderr=stderr,
+                failure_kind=CommandFailureKind.TIMEOUT,
+            )
         except OSError as exc:
-            return CommandResult(returncode=127, stdout="", stderr=str(exc))
+            return CommandResult(
+                returncode=127,
+                stdout="",
+                stderr=str(exc),
+                failure_kind=CommandFailureKind.TRANSPORT,
+            )
 
         return CommandResult(
             returncode=completed.returncode,
             stdout=completed.stdout or "",
             stderr=completed.stderr or "",
+            failure_kind=(
+                CommandFailureKind.TRANSPORT
+                if via_ssh and completed.returncode == 255
+                else None
+            ),
         )
 
 

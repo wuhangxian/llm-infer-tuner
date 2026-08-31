@@ -7,6 +7,11 @@ ranker 再用 per_host = (total/instances) × floor(gpu/tp) 把外推乘数除�
 
 from __future__ import annotations
 
+import math
+import sys
+
+import pytest
+
 from runners.executor import _aggregate_replicas
 from runners.metrics import RunResult
 from runners.ranker import _best_qualifying, _instances_per_host, rank_candidates
@@ -52,7 +57,7 @@ def test_aggregate_missing_replica_fails():
     """副本不齐(只回来 3 个,期望 4)→ 整体失败,绝不拿部分求和冒充满载。"""
     reps = [_r(), _r(), _r()]
     agg = _aggregate_replicas(reps, expected=4)
-    assert agg.status == "health_check_failed"
+    assert agg.status == "invalid_result"
     assert agg.instances == 4  # 期望值,供 ranker 判定
 
 
@@ -60,7 +65,19 @@ def test_aggregate_one_unhealthy_fails():
     """有一个副本 status != ok → 整体失败。"""
     reps = [_r(), _r(), _r(), _r(status="bad_args")]
     agg = _aggregate_replicas(reps, expected=4)
-    assert agg.status == "health_check_failed"
+    assert agg.status == "invalid_result"
+
+
+@pytest.mark.parametrize("throughput", [sys.float_info.max, 10**1000])
+def test_aggregate_rejects_nonfinite_derived_throughput(throughput: float) -> None:
+    agg = _aggregate_replicas(
+        [_r(tput=throughput), _r(tput=throughput)],
+        expected=2,
+    )
+
+    assert agg.status == "invalid_result"
+    assert agg.total_throughput == 0.0
+    assert math.isfinite(agg.total_throughput)
 
 
 def test_no_double_count_fullload_equals_measured_sum():

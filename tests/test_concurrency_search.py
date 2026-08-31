@@ -16,7 +16,6 @@ from runners.metrics import RunResult
 from runners.ranker import candidate_goodput
 from schemas.job_spec import SLA
 
-
 # --- synthetic harness --------------------------------------------------------
 
 
@@ -229,23 +228,45 @@ def test_max_probes_degenerate_zero() -> None:
 # --- overload collapse (evaluate raises) --------------------------------------
 
 
-def test_overload_collapse_counts_as_fail_not_abort() -> None:
+def test_overload_collapse_marks_search_incomplete_not_sla_boundary() -> None:
     sla = _sla()
 
     def evaluate(c: int) -> RunResult:
         if c > 4:
-            raise RuntimeError("server crashed under overload")
+            return RunResult(
+                candidate_id="c",
+                concurrency=c,
+                num_prompts=c * 4,
+                completed=0,
+                success_rate=0.0,
+                request_throughput=0.0,
+                output_throughput=0.0,
+                total_throughput=0.0,
+                mean_ttft_ms=0.0,
+                p99_ttft_ms=0.0,
+                mean_tpot_ms=0.0,
+                p99_tpot_ms=0.0,
+                total_output_tokens=0,
+                avg_output_tokens=0.0,
+                duration=0.0,
+                status="runtime_failed",
+                failure_reason="server crashed under overload",
+            )
         return _mk(c, ok=True)
 
     oc = search_saturation(
         evaluate, _qualifies(sla),
         start=1, factor=2, max_cap=256, max_probes=30, refine=True, confirm=1,
     )
-    assert oc.c_star == 4
-    assert oc.stop_reason == "found_boundary"
-    # crashed probes recorded but excluded from goodput (throughput 0, unhealthy)
-    assert candidate_goodput(oc.results, sla, output_len=1000) == 400.0
-    assert any(r.status == "health_check_failed" for r in oc.results)
+    assert oc.complete is False
+    assert oc.certainty == "unknown"
+    assert oc.c_star is None
+    assert oc.first_fail is None
+    assert oc.stop_reason == "runtime_failed"
+    # Infrastructure failure invalidates any earlier successful points for an
+    # official goodput/rank; it is not an SLA fail boundary.
+    assert candidate_goodput(oc.results, sla, output_len=1000) == 0.0
+    assert any(r.status == "runtime_failed" for r in oc.results)
 
 
 # --- health gate uniform with SLA ---------------------------------------------

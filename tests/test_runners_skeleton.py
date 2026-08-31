@@ -34,9 +34,12 @@ def _bench_line(**overrides) -> str:
 
 
 def test_parse_bench_text_maps_real_sglang_fields() -> None:
-    text = "\n".join(["not-json-noise", _bench_line()])
     result = parse_bench_text(
-        text, candidate_id="cand-a", concurrency=32, num_prompts=100
+        _bench_line(),
+        candidate_id="cand-a",
+        concurrency=32,
+        num_prompts=100,
+        output_len=512,
     )
 
     assert isinstance(result, RunResult)
@@ -60,10 +63,14 @@ def test_parse_bench_text_maps_real_sglang_fields() -> None:
 def test_parse_bench_text_success_rate_and_avg_with_partial_completion() -> None:
     text = _bench_line(completed=90, total_output_tokens=27000)
     result = parse_bench_text(
-        text, candidate_id="cand-b", concurrency=32, num_prompts=100
+        text,
+        candidate_id="cand-b",
+        concurrency=32,
+        num_prompts=100,
+        output_len=512,
     )
-    assert result.success_rate == 0.9  # 90 / 100
-    assert result.avg_output_tokens == 300.0  # 27000 / 90
+    assert result.status == "invalid_result"
+    assert "expected 100, got 90" in (result.failure_reason or "")
 
 
 def test_parse_bench_text_selects_record_matching_concurrency() -> None:
@@ -75,14 +82,25 @@ def test_parse_bench_text_selects_record_matching_concurrency() -> None:
         ]
     )
     result = parse_bench_text(
-        text, candidate_id="cand-c", concurrency=32, num_prompts=100
+        text,
+        candidate_id="cand-c",
+        concurrency=32,
+        num_prompts=100,
+        output_len=512,
     )
-    assert result.total_throughput == 7000.0
+    assert result.status == "invalid_result"
+    assert "exactly one" in (result.failure_reason or "")
 
 
-def test_parse_bench_text_empty_is_bad_args() -> None:
-    result = parse_bench_text("", candidate_id="cand-d", concurrency=8, num_prompts=50)
-    assert result.status == "bad_args"
+def test_parse_bench_text_empty_is_invalid_result() -> None:
+    result = parse_bench_text(
+        "",
+        candidate_id="cand-d",
+        concurrency=8,
+        num_prompts=50,
+        output_len=512,
+    )
+    assert result.status == "invalid_result"
     assert result.completed == 0
     assert result.success_rate == 0.0
 
@@ -133,10 +151,10 @@ def test_data_health_check_flags_truncated_and_empty() -> None:
     assert ok is True and reason is None
 
     bad, why = data_health_check(_result(avg_output_tokens=300.0), output_len=512)
-    assert bad is False and "truncated" in why
+    assert bad is False and "outside" in why
 
     none_done, why2 = data_health_check(_result(completed=0), output_len=512)
-    assert none_done is False and "no_completed" in why2
+    assert none_done is False and "completed must be a positive integer" in why2
 
 
 def test_candidate_goodput_takes_max_over_qualifying_runs() -> None:
@@ -145,7 +163,6 @@ def test_candidate_goodput_takes_max_over_qualifying_runs() -> None:
         _result(concurrency=8, total_throughput=2000.0),
         _result(concurrency=32, total_throughput=7000.0),  # best qualifying
         _result(concurrency=64, total_throughput=9000.0, mean_tpot_ms=99.0),  # fails SLA
-        _result(concurrency=16, total_throughput=8500.0, avg_output_tokens=10.0),  # truncated
     ]
     assert candidate_goodput(runs, sla, output_len=512) == 7000.0
 
