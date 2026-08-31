@@ -210,8 +210,8 @@ def _aggregate_replicas(replicas: list[RunResult], *, expected: int) -> RunResul
     这是「整机满载实测」口径落地的核心,也是防双重计数的关键:
     · total_throughput / request_throughput / output_throughput / completed /
       total_output_tokens = N 个副本求和(整机真实吞吐,不再靠 floor(gpu/tp) 外推);
-    · instances = 实际参与求和的副本数,ranker 用它把外推乘数除回去(见 ranker),
-      使 per_host 恰等于这里的实测求和、N 只被计一次;
+    · instances = 实际参与求和的副本数,full_host_measured=True 明确告诉 ranker
+      直接使用该实测总和,不得按理论 floor(gpu/tp) 补齐 NUMA 碎片;
     · 延迟(ttft/tpot)取各副本里最差的一个 —— 满载下 SLA 必须每个副本都过;
     · success_rate / avg_output_tokens 取最差,duration 取最长;
     · 只要有副本缺失(len<expected)或本身不健康,整体标记为失败,绝不拿"部分副本"
@@ -229,6 +229,7 @@ def _aggregate_replicas(replicas: list[RunResult], *, expected: int) -> RunResul
         agg.concurrency = concurrency
         agg.tp_size = tp_size
         agg.instances = expected
+        agg.full_host_measured = True
         return agg
     return RunResult(
         candidate_id=candidate_id,
@@ -248,6 +249,7 @@ def _aggregate_replicas(replicas: list[RunResult], *, expected: int) -> RunResul
         duration=max(r.duration for r in healthy),
         tp_size=tp_size,
         instances=len(healthy),
+        full_host_measured=True,
         status="ok",
     )
 
@@ -300,7 +302,8 @@ def _make_evaluate(
     """
     container = ctx.container
     candidate_out = f"{ctx.outputs_container_path}/{candidate_id}"
-    bench_ports = ports if ports else [ctx.port]
+    full_host_measurement = ports is not None
+    bench_ports = ports if ports is not None else [ctx.port]
 
     def _bench_one_port(concurrency: int, port: int, tag: str) -> RunResult:
         command_tpl, num_prompts = rewrite_bench_command(
@@ -349,7 +352,7 @@ def _make_evaluate(
 
     def evaluate(concurrency: int) -> RunResult:
         try:
-            if len(bench_ports) == 1:
+            if not full_host_measurement:
                 run_result = _bench_one_port(concurrency, bench_ports[0], "")
             else:
                 # 整机满载:N 个副本端口并发各压一份(同一并发档),再求和。
@@ -1226,7 +1229,7 @@ def _run_candidate(
             tp_size = int(candidate.get("params", {}).get("tp_size", 1))
             evaluate, warmup = _make_evaluate(
                 ctx, candidate_id, candidate_dir, tp_size=tp_size,
-                ports=(replica_ports if n_replicas > 1 else None),
+                ports=ctx.replica_ports,
             )
             warmup()  # 正式搜索前预热一次(结果丢弃,吸收 kernel 编译尖峰)
             outcome = search_saturation(

@@ -72,14 +72,15 @@ def _best_qualifying(
         if not healthy or not passes_sla(result, sla):
             continue
         # total_throughput 是 result.instances 个并发实例的实测求和。
-        # 先除回单实例吞吐,再乘"整机能放几个实例",得到 per-host goodput:
-        #   per_host = (total / instances) × floor(gpu/tp)
-        # · round1 单实例(instances=1):= single × floor —— 纸面外推,只用于粗筛选 top-K。
-        # · round2 整机满载(instances=floor(gpu/tp)):= (S/N)×N = S —— 外推乘数被实测实例数
-        #   除掉、塌成 ×1,得到的就是实测满载求和。这样 N 只被计一次,绝不会 S×N 双重计数。
+        # round1 单实例仍按 floor(gpu/tp) 做兼容外推；round2 满载结果已经
+        # 按真实 NUMA topology 聚合，必须直接使用实测总和，不能拿理论 floor
+        # 补齐放不下的碎片，否则会系统性高估该候选。
         measured = max(1, int(getattr(result, "instances", 1)))
         raw = result.total_throughput / measured
-        per_host = raw * _instances_per_host(result.tp_size, gpu_count)
+        if getattr(result, "full_host_measured", False):
+            per_host = result.total_throughput
+        else:
+            per_host = raw * _instances_per_host(result.tp_size, gpu_count)
         if best_concurrency is None or per_host > best_per_host:
             best_raw = raw
             best_per_host = per_host
@@ -125,11 +126,22 @@ def rank_candidates(
             if healthy and passes_sla(r, sla):
                 tp_size = r.tp_size
                 break
+        instances_per_host = _instances_per_host(tp_size, gpu_count)
+        for result in reversed(results):
+            healthy, _ = data_health_check(result, output_len=output_len)
+            if (
+                result.concurrency == best_concurrency
+                and healthy
+                and passes_sla(result, sla)
+                and getattr(result, "full_host_measured", False)
+            ):
+                instances_per_host = float(result.instances)
+                break
         ranking.append(
             {
                 "candidate_id": candidate_id,
                 "tp_size": tp_size,
-                "instances_per_host": _instances_per_host(tp_size, gpu_count),
+                "instances_per_host": instances_per_host,
                 "goodput_raw": raw,
                 "goodput_per_host": per_host,
                 "best_concurrency": best_concurrency,

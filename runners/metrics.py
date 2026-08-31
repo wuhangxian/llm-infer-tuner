@@ -27,9 +27,11 @@ class RunResult:
     duration: float
     tp_size: int = 1
     # 本条 total_throughput 是几个并发实例求和得来的。round1 单实例粗筛 = 1;
-    # round2 整机满载 = floor(gpu_count/tp_size) 个副本的实测求和。ranker 用它
-    # 把外推乘数除回去,使满载实测不被二次外推(详见 ranker._best_qualifying)。
+    # round2 整机满载 = topology 实际可放置副本的实测求和。
     instances: int = 1
+    # True means total_throughput already is the measured aggregate for this
+    # host/topology and must never be extrapolated to floor(gpu_count/tp_size).
+    full_host_measured: bool = False
     status: str = "ok"
     failure_reason: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)

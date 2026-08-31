@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from runners.executor import _aggregate_replicas
 from runners.metrics import RunResult
-from runners.ranker import _best_qualifying, _instances_per_host
+from runners.ranker import _best_qualifying, _instances_per_host, rank_candidates
 from schemas.job_spec import SLA
 
 
@@ -43,6 +43,7 @@ def test_aggregate_sums_throughput_sets_instances():
     assert agg.status == "ok"
     assert agg.total_throughput == 4050.0        # 求和
     assert agg.instances == 4
+    assert agg.full_host_measured is True
     assert agg.mean_ttft_ms == 120.0             # 最差副本
     assert agg.duration == 10.0
 
@@ -73,6 +74,44 @@ def test_no_double_count_fullload_equals_measured_sum():
     assert _instances_per_host(2, 8) == 4.0
     assert per_host == 4000.0        # = 实测求和,NOT 16000
     assert raw == 1000.0             # 单实例等效吞吐 = total/instances
+
+
+def test_fragmented_full_host_uses_actual_measured_replica_count() -> None:
+    """NUMA fragmentation must not be filled in later by theoretical extrapolation."""
+    sla = SLA(max_avg_ttft_ms=1000.0, max_avg_tpot_ms=100.0)
+    aggregate = _aggregate_replicas(
+        [_r(tput=1000.0, tp=2), _r(tput=1000.0, tp=2)],
+        expected=2,
+    )
+
+    raw, per_host, _ = _best_qualifying(
+        [aggregate], sla, output_len=1000, gpu_count=6
+    )
+    ranking = rank_candidates(
+        {"c": [aggregate]}, sla, output_len=1000, gpu_count=6
+    )
+
+    assert raw == 1000.0
+    assert per_host == 2000.0
+    assert ranking[0]["goodput_per_host"] == 2000.0
+    assert ranking[0]["instances_per_host"] == 2.0
+
+
+def test_one_measured_full_host_replica_is_not_extrapolated() -> None:
+    sla = SLA(max_avg_ttft_ms=1000.0, max_avg_tpot_ms=100.0)
+    aggregate = _aggregate_replicas([_r(tput=1000.0, tp=2)], expected=1)
+
+    raw, per_host, _ = _best_qualifying(
+        [aggregate], sla, output_len=1000, gpu_count=4
+    )
+    ranking = rank_candidates(
+        {"c": [aggregate]}, sla, output_len=1000, gpu_count=4
+    )
+
+    assert aggregate.full_host_measured is True
+    assert raw == 1000.0
+    assert per_host == 1000.0
+    assert ranking[0]["instances_per_host"] == 1.0
 
 
 def test_single_instance_path_unchanged():
