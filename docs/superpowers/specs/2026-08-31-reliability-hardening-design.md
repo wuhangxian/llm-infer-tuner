@@ -39,6 +39,9 @@ The following decisions are fixed:
    candidate IDs, commands, ports, and GPU allocation all pass local validation.
 2. Empty, partially malformed, duplicate-ID, duplicate-effective-config, or count-mismatched
    candidate sets fail closed and preserve the previous valid output.
+   Candidate count means exactly `search.max_candidates` non-baseline candidates, plus exactly
+   one baseline when `search.baseline` is present. Without a configured baseline, the total is
+   exactly `search.max_candidates`. Multiple baselines are invalid.
 3. Remote validation is read-only and verifies actual GPU count/model/memory, model path,
    image availability, port range, and exclusive-host eligibility before cleanup.
 4. Cleanup is explicitly authorized by the target and scoped to this job by default.
@@ -59,6 +62,12 @@ Candidates are represented as structured parameters. Legacy `cmd` remains readab
 the migration, but must parse to the approved `python -m sglang.launch_server` entry point,
 must not contain shell control syntax, and must agree with `params`. Runtime code constructs
 the final argv from validated values rather than accepting arbitrary shell fragments.
+
+Cache fairness is canonical rather than advisory: every cache-enabling spelling is rejected;
+all duplicate disable spellings are removed; the generated argv contains exactly one
+`--disable-radix-cache`; effective params always contain `disable_radix_cache: true`.
+The user's requested Mamba radix strategy remains in audit metadata, while its effective value
+is recorded as inactive under Radix-off.
 
 `gen_configs.sh` validates the Job before invoking AI and validates a temporary CandidateSet
 before atomically replacing `configs.jsonl`. The prompt uses a quoted template so Markdown
@@ -99,6 +108,22 @@ server health. On `runtime_failed`, it preserves the evidence, restarts the cand
 startup retry policy, and repeats the current concurrency. If recovery is exhausted, that
 candidate becomes `incomplete`; the executor continues with the remaining candidates.
 
+Probe liveness has no fixed successful-runtime ceiling. The benchmark runs under a monitor
+that polls process state, server health, and evidence-file/log growth. Five minutes with no
+progress is a stall; the monitor sends TERM, waits ten seconds, then sends KILL. Startup,
+runtime, transport, benchmark, and invalid-result recovery each use at most three attempts.
+Failed infrastructure attempts consume the recovery-attempt budget, but never consume the
+three statistical samples or the search probe budget. Exhaustion marks the candidate
+`incomplete` and preserves all attempts.
+
+The known upstream image defect is detected only when all of the following match: runtime
+engine version `0.5.16`, effective Triton attention plus EAGLE, and a server traceback through
+`triton_backend._update_target_verify_buffers` containing the custom-mask expanded-size
+mismatch. It is reported as `runtime_failed` with
+`known_issue=sglang-0.5.16-triton-eagle-custom-mask-shape`; it receives the same bounded
+recovery treatment as any engine failure and is never boundary evidence. Other crashes remain
+generic `runtime_failed` rather than being guessed.
+
 All container starts are inside one outer lifecycle `try/finally`. SIGINT/SIGTERM write an
 atomic `INTERRUPTED` task status and attempt checked cleanup. The next invocation may restart
 the interrupted candidate; completed candidate reuse is optional and is not required in this
@@ -118,6 +143,11 @@ Round 2:
   through `max_cap`;
 - returns `exact`, `lower_bound`, or `unknown` certainty;
 - never publishes `max_probes`, `hit_cap`, runtime failure, or invalid evidence as exact.
+
+Every candidate is scheduled in Round 2 even when Round 1 produced no valid bracket. In that
+case Round 2 starts fresh at C=1 and performs bounded exponential expansion followed by
+bisection. If valid evidence still cannot be obtained, the candidate remains present as
+`incomplete/unknown`; it is never skipped.
 
 The complete candidate set is refined. Search tests exhaustively cover every monotone true
 boundary from zero through `max_cap`, noisy endpoint seeds, alternating samples, and stateful
@@ -141,18 +171,31 @@ with batch composition. The report preserves both single-instance and measured f
 metrics. Differences below measured repeat variability are marked as ties instead of implying
 false precision.
 
+For each measured point, the three samples produce `goodput_min`, `goodput_median`, and
+`goodput_max`; ranking uses the median. Candidates whose `[min,max]` goodput intervals overlap
+belong to the same deterministic rank group (overlapping intervals are merged transitively
+after median-descending sort). Baseline-threshold status is `yes` only when the candidate's
+minimum clears the threshold, `no` only when its maximum is below it, and `unknown` when the
+interval crosses it or the baseline is invalid.
+
 ### 6. Reporting and evidence
 
-Every candidate has exactly one report row, including failed and interrupted candidates. A
-row includes:
+Every candidate has exactly one candidate-summary row, including failed and interrupted
+candidates. Repeated measurements are separate probe-evidence records linked by candidate ID,
+round, concurrency, and probe ID. A candidate-summary row includes:
 
 - candidate ID and effective parameters;
 - requested TP/EP and actual instance count;
-- round, batch, probe concurrency, repeat index, and measurement mode;
-- start/end/failure timestamps;
-- throughput, request rate, TTFT, TPOT, success rate, and output-token health;
-- typed probe status, failure reason, recovery count, boundary certainty, and completion state;
+- per-round batch, bracket, tested concurrencies, and measurement mode;
+- candidate start/end/final-failure timestamps;
+- best-point median throughput, interval, request rate, TTFT, TPOT, success rate, and
+  output-token health;
+- final typed status, failure reason, recovery count, boundary certainty, and completion state;
 - baseline delta and threshold result (`yes`, `no`, or `unknown`).
+
+Each probe-evidence record includes round, batch, concurrency, repeat index, recovery attempt,
+start/end/failure timestamps, raw metrics, status, failure reason, server-health evidence, and
+artifact filenames.
 
 Task status is `COMPLETED/FINAL` only when every expected candidate has an exact, complete
 Round 2 result. Otherwise it is `INCOMPLETE/PROVISIONAL` or `INTERRUPTED`.
@@ -170,8 +213,12 @@ actual GPU information, engine version, and timestamps.
   and quotes.
 - Single-file mode parses directly or guarantees trap-based removal of restrictive temporary
   files.
-- Examples contain secret references, never real passwords. SSH keys are preferred; password
-  compatibility may read from a protected environment/file descriptor without exposing argv.
+- Tracked targets containing plaintext credentials are sanitized in this branch and migrated
+  to `ssh_password_env` references. SSH keys are preferred; password compatibility reads from
+  that environment variable or a protected file descriptor without exposing argv. CI scans
+  tracked files for credential patterns. Because old commits cannot be made secret by deleting
+  HEAD content, history rewriting is not automatic: the user must rotate every exposed
+  password/token, and any coordinated history purge is a separate repository-owner action.
 - CI runs pytest, Ruff, Pyright over production packages, and shell syntax/static checks.
 - Raw benchmark artifacts remain available, but summaries/manifests are separated from raw
   evidence so an optional archive/LFS policy can be adopted without changing result semantics.
