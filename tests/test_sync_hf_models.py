@@ -128,8 +128,12 @@ def test_save_models_yaml_tags_auto_cards(tmp_path, monkeypatch):
     shm.save_models_yaml(data)
     text = out.read_text(encoding="utf-8")
     # Auto card divider carries the tag; reviewed one does not.
-    auto_divider = next(l for l in text.splitlines() if "M02_auto:" in l)
-    reviewed_divider = next(l for l in text.splitlines() if "M01_reviewed:" in l)
+    auto_divider = next(
+        line for line in text.splitlines() if "M02_auto:" in line
+    )
+    reviewed_divider = next(
+        line for line in text.splitlines() if "M01_reviewed:" in line
+    )
     assert "[AUTO needs_review]" in auto_divider
     assert "[AUTO needs_review]" not in reviewed_divider
 

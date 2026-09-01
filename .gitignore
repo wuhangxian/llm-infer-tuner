@@ -11,6 +11,9 @@ build/
 outputs/
 .env
 *.env
+*.secret
+*.credentials
+.secrets/
 claude-raw-outputs/
 reports/
 logs/

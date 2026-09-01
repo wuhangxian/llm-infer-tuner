@@ -239,9 +239,26 @@ JSON 格式:
 
 排名按 `goodput_per_host = total_throughput × (gpu_count / tp_size)`,不是单实例吞吐。TP2 跑 300 tok/s × 4 实例 = 1200 > TP8 跑 1000 tok/s × 1 实例 = 1000。
 
-### SSH 密码支持
+### SSH 密码支持与凭据卫生
 
-target.json 里可选填 `ssh_password`,有密码用 sshpass,留空走 key 免密。
+推荐使用 SSH key；需要密码时，target 文件只保存环境变量名，不保存密码本身：
+
+```json
+"ssh_password_env": "LLM_INFER_TUNER_SSH_PASSWORD"
+```
+
+执行前在本地 shell 注入密码：
+
+```bash
+read -rs LLM_INFER_TUNER_SSH_PASSWORD
+export LLM_INFER_TUNER_SSH_PASSWORD
+./run_executor.sh input/jobs/<job>.json input/targets/<target>.json
+```
+
+`ssh_password` 仅为兼容旧的、未跟踪的本地 target 文件保留；不要把非空密码写入 Git。
+提交前可运行 `uv run python scripts/check_no_secrets.py`，CI 也会扫描所有 tracked 文件。
+历史提交中的凭据无法靠删除当前文件撤回；若曾经提交过真实密码或 token，请立即轮换（rotate），
+历史清理需由仓库 owner 单独安排。
 
 ### 服务启动失败分析
 

@@ -37,6 +37,7 @@ from runners.metrics import (
 Evaluate = Callable[[int], RunResult]    # run ONE bench at C -> parsed metrics
 Qualifies = Callable[[RunResult], bool]  # health_check(...) AND passes_sla(...)
 OnEvaluateException = Callable[[int, Exception], RunResult]
+Cancelled = Callable[[], bool]
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,10 @@ class _MonotonicityConflict(Exception):
     """Fresh majority groups contradict the required pass-prefix model."""
 
 
+class _SearchCancelled(Exception):
+    """The lifecycle gate closed while a partial sample group was running."""
+
+
 def required_sample_budget(
     max_cap: int,
     *,
@@ -133,6 +138,7 @@ def search_saturation(
     confirm: int = 3,
     seeds: list[RunResult] | None = None,  # round-1 coordinates used only as hints
     on_evaluate_exception: OnEvaluateException | None = None,
+    cancelled: Cancelled | None = None,
 ) -> SearchOutcome:
     start = max(1, int(start))
     factor = max(2, int(factor))
@@ -266,7 +272,32 @@ def search_saturation(
         samples: list[RunResult] = []
         votes: list[bool] = []
         for _ in range(confirm):
-            result = _raw_probe(c)
+            if cancelled is not None and cancelled():
+                # No call was made for this slot.  Preserve an already
+                # observed prefix, but never invent a statistical vote.
+                if samples:
+                    incomplete_samples[c] = tuple(samples)
+                    cache[c] = samples[-1]
+                    if c not in order:
+                        order.append(c)
+                        newly.append(c)
+                raise _SearchCancelled()
+            try:
+                result = _raw_probe(c)
+            except BaseException:
+                # LifecycleInterrupted intentionally derives from
+                # BaseException.  If cancellation is already recorded, turn
+                # it into a partial outcome so the caller can journal samples
+                # before the outer lifecycle raises.
+                if cancelled is not None and cancelled():
+                    if samples:
+                        incomplete_samples[c] = tuple(samples)
+                        cache[c] = samples[-1]
+                        if c not in order:
+                            order.append(c)
+                            newly.append(c)
+                    raise _SearchCancelled()
+                raise
             try:
                 sample_verdict = _search_verdict(result)
             except _ProbeIncomplete:
@@ -278,6 +309,15 @@ def search_saturation(
             samples.append(result)
             votes.append(sample_verdict)
             state["evals"] += 1
+            if cancelled is not None and cancelled():
+                # This valid result is retained as an incomplete group; the
+                # remaining confirmation votes cannot be collected safely.
+                incomplete_samples[c] = tuple(samples)
+                cache[c] = result
+                if c not in order:
+                    order.append(c)
+                    newly.append(c)
+                raise _SearchCancelled()
         pass_votes = sum(votes)
         ok = pass_votes > len(votes) / 2
         if pass_votes * 2 == len(votes):
@@ -316,6 +356,7 @@ def search_saturation(
     capped = False
     exhausted = False
     monotonicity_conflict = False
+    cancelled_search = False
     try:
         if infrastructure_failure is not None:
             raise _ProbeIncomplete(infrastructure_failure)
@@ -367,10 +408,15 @@ def search_saturation(
     except _MonotonicityConflict:
         monotonicity_conflict = True
         log.append("fresh sample-group majorities violate the pass-prefix model")
+    except _SearchCancelled:
+        cancelled_search = True
+        log.append("search cancelled after preserving partial sample evidence")
 
     lp = last_pass()
     ff = first_fail_above(lp)
-    if infrastructure_failure is not None:
+    if cancelled_search:
+        c_star, stop = None, "interrupted"
+    elif infrastructure_failure is not None:
         c_star, stop = None, str(infrastructure_failure.status)
     elif monotonicity_conflict:
         c_star, stop = None, "monotonicity_conflict"
@@ -391,6 +437,7 @@ def search_saturation(
                   f"distinct={len(order)} last_pass={lp} first_fail={ff}")
     exact_completion = (
         refine
+        and not cancelled_search
         and infrastructure_failure is None
         and not monotonicity_conflict
         and stop
@@ -402,7 +449,8 @@ def search_saturation(
     if exact_completion:
         certainty = "exact"
     elif (
-        infrastructure_failure is None
+        not cancelled_search
+        and infrastructure_failure is None
         and not monotonicity_conflict
         and lp is not None
     ):

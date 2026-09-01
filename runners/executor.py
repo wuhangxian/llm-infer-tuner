@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -55,6 +56,11 @@ from runners.preflight import (
     prepare_remote_host,
     validate_local_preflight,
 )
+from runners.provenance import (
+    build_provenance,
+    capture_run_start,
+    provisional_provenance,
+)
 from runners.ranker import (
     CandidateMeasurement,
     MeasurementMode,
@@ -70,11 +76,12 @@ from runners.readiness import (
     wait_until_ready,
 )
 from runners.remote import CommandFailureKind, CommandResult, RemoteRunner
+from runners.report_session import ReportSession
 from runners.reporting import (
     annotate_baseline_threshold,
     build_candidate_rows,
+    load_report_generation,
     render_candidate_preview,
-    write_reports,
 )
 from schemas.document_io import load_candidates, load_job, load_target
 from schemas.job_spec import JobSpec, SearchBudget
@@ -114,6 +121,20 @@ def _log(message: str) -> None:
     Kept off stdout, which carries the final JSON summary; a Monitor greps these.
     """
     print(f"[executor] {message}", file=sys.stderr, flush=True)
+
+
+def _utc_now_iso() -> str:
+    """Return a canonical UTC timestamp for persisted evidence.
+
+    Report v2 deliberately accepts only zero-offset timestamps.  Using
+    ``astimezone()`` here is tempting because it produces a local, aware
+    timestamp, but it makes otherwise valid recovery evidence depend on the
+    machine's local timezone (and used to produce ``+08:00`` in CI).  Keep the
+    producer and validator contract in one place and use the compact ``Z``
+    spelling everywhere we persist attempt times.
+    """
+
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 @dataclass
@@ -287,6 +308,327 @@ def _search_sample_evidence(outcome: SearchOutcome) -> dict[str, Any]:
     }
 
 
+def _report_probe_rows(
+    candidate_id: str,
+    round_number: int,
+    batch: str,
+    outcome: SearchOutcome,
+    *,
+    measurement_mode: MeasurementMode,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Expand fresh groups into physical, aggregate, and sample-group evidence rows."""
+
+    probes: list[dict[str, Any]] = []
+    complete_groups: list[dict[str, Any]] = []
+    incomplete_groups: list[dict[str, Any]] = []
+    group_items: list[tuple[int, tuple[RunResult, ...], RunResult, bool]] = []
+    for concurrency, group in sorted(outcome.sample_groups.items()):
+        group_items.append((concurrency, group.samples, group.representative, True))
+    for concurrency, samples in sorted(outcome.incomplete_samples.items()):
+        if samples:
+            group_items.append((concurrency, samples, samples[-1], False))
+    for group_index, (concurrency, samples, representative, complete) in enumerate(
+        group_items
+    ):
+        aggregate_ids: list[str] = []
+        for sample_index, sample in enumerate(samples):
+            sample_token = f"{candidate_id}:r{round_number}:c{concurrency}:s{sample_index}"
+            started_at = _utc_now_iso()
+            ended_at = started_at
+            sample_status = str(sample.status)
+            verdict = sample.status in SEARCH_VERDICT_STATUSES
+            replica_values = sample.raw.get("_replicas") if isinstance(sample.raw, dict) else None
+            if not isinstance(replica_values, list) or not replica_values:
+                replica_values = [_run_result_dict(sample)]
+            physical_ids: list[str] = []
+            for replica_index, replica_value in enumerate(replica_values):
+                if not isinstance(replica_value, dict):
+                    replica_value = _run_result_dict(sample)
+                physical_id = f"{sample_token}:replica:{replica_index}"
+                physical_ids.append(physical_id)
+                status = str(replica_value.get("status", sample_status))
+                normalized = replica_value.get("normalized")
+                if not isinstance(normalized, dict):
+                    normalized = {
+                        "total_throughput": replica_value.get("total_throughput", 0.0),
+                        "mean_ttft_ms": replica_value.get("mean_ttft_ms", 0.0),
+                        "mean_tpot_ms": replica_value.get("mean_tpot_ms", 0.0),
+                        "success_rate": replica_value.get("success_rate", 0.0),
+                    }
+                failed = status not in {str(value) for value in SEARCH_VERDICT_STATUSES}
+                # ``SLA_FAILED`` is a terminal search verdict, not an
+                # infrastructure failure, but it still needs a human-readable
+                # reason in the auditable v2 hierarchy.  Some adapters return
+                # the status without populating ``failure_reason``; retain the
+                # evidence and use the status as a deterministic fallback
+                # rather than making an otherwise valid boundary unverifiable.
+                replica_failure_reason = (
+                    (
+                        replica_value.get("failure_reason")
+                        or sample.failure_reason
+                        or status
+                    )
+                    if (failed or status == ProbeStatus.SLA_FAILED.value)
+                    else None
+                )
+                probes.append(
+                    {
+                        "probe_id": physical_id,
+                        "candidate_id": candidate_id,
+                        "record_type": "physical_probe",
+                        "round": round_number,
+                        "batch": batch,
+                        "concurrency": concurrency,
+                        "repeat": sample_index if round_number == 2 else 0,
+                        "recovery": 0,
+                        "measurement_mode": str(measurement_mode),
+                        "started_at": started_at,
+                        "ended_at": ended_at,
+                        "failed_at": ended_at if failed else None,
+                        "status": status,
+                        "failure_reason": replica_failure_reason,
+                        "known_issue": replica_value.get("known_issue") or sample.known_issue,
+                        "raw": replica_value.get("raw", {}),
+                        "normalized": normalized,
+                        "instances": 1,
+                        "output_healthy": verdict,
+                        "server_health": {
+                            "before": "healthy",
+                            "after": "healthy" if verdict else "unknown",
+                        },
+                        "artifacts": [
+                            {
+                                "path": f"unavailable/{physical_id}",
+                                "sha256": None,
+                                "unavailable_reason": "executor did not retain local artifact",
+                            }
+                        ],
+                        "replica_index": replica_index,
+                        "port": 30000 + replica_index,
+                        "statistical_vote": False,
+                    }
+                )
+            aggregate_id = f"{sample_token}:aggregate"
+            aggregate_ids.append(aggregate_id)
+            aggregate_normalized = {
+                "total_throughput": sample.total_throughput,
+                "mean_ttft_ms": sample.mean_ttft_ms,
+                "mean_tpot_ms": sample.mean_tpot_ms,
+                "success_rate": sample.success_rate,
+            }
+            aggregate_failure_reason = (
+                (sample.failure_reason or sample_status)
+                if sample_status == ProbeStatus.SLA_FAILED.value
+                else (sample.failure_reason if not verdict else None)
+            )
+            probes.append(
+                {
+                    "probe_id": aggregate_id,
+                    "candidate_id": candidate_id,
+                    "record_type": "aggregate_sample",
+                    "round": round_number,
+                    "batch": batch,
+                    "concurrency": concurrency,
+                    "repeat": sample_index if round_number == 2 else 0,
+                    "recovery": 0,
+                    "measurement_mode": str(measurement_mode),
+                    "started_at": started_at,
+                    "ended_at": ended_at,
+                    "failed_at": ended_at if not verdict else None,
+                    "status": sample_status,
+                    "failure_reason": aggregate_failure_reason,
+                    "known_issue": sample.known_issue,
+                    "raw": sample.raw,
+                    "normalized": aggregate_normalized,
+                    "instances": sample.instances,
+                    "output_healthy": verdict,
+                    "server_health": {
+                        "before": "healthy",
+                        "after": "healthy" if verdict else "unknown",
+                    },
+                    "artifacts": [
+                        {
+                            "path": f"unavailable/{aggregate_id}",
+                            "sha256": None,
+                            "unavailable_reason": "executor did not retain local artifact",
+                        }
+                    ],
+                    "replica_probe_ids": physical_ids,
+                        "statistical_vote": sample_index >= 0 and verdict,
+                }
+            )
+        group_row = {
+            "group_id": f"{candidate_id}:r{round_number}:c{concurrency}:g{group_index}",
+            "round": round_number,
+            "concurrency": concurrency,
+            "aggregate_probe_ids": aggregate_ids,
+            "representative": {
+                "status": str(representative.status),
+                "request_throughput": representative.request_throughput,
+                "output_throughput": representative.output_throughput,
+                "total_throughput": representative.total_throughput,
+                "mean_ttft_ms": representative.mean_ttft_ms,
+                "p99_ttft_ms": representative.p99_ttft_ms,
+                "mean_tpot_ms": representative.mean_tpot_ms,
+                "p99_tpot_ms": representative.p99_tpot_ms,
+                "success_rate": representative.success_rate,
+                "avg_output_tokens": representative.avg_output_tokens,
+            },
+            "qualifies": bool(
+                complete
+                and representative.status in SEARCH_VERDICT_STATUSES
+                and concurrency in outcome.sample_groups
+                and outcome.sample_groups[concurrency].qualifies
+            ),
+        }
+        (complete_groups if complete else incomplete_groups).append(group_row)
+
+    # Startup/transport recovery attempts do not belong to a statistical
+    # sample group, but they are still auditable evidence.  Keep them as
+    # non-voting infrastructure rows at C=0 (or their failed probe C) so a
+    # recovered attempt is never silently dropped from the report hierarchy.
+    # Recovery ordinals are assigned per full logical coordinate and therefore
+    # remain contiguous even when different failure stages are interleaved.
+    represented_failure_indexes: set[int] = set()
+    for concurrency, samples in outcome.incomplete_samples.items():
+        for sample in samples:
+            if sample.status in SEARCH_VERDICT_STATUSES:
+                continue
+            for failure_index in range(len(outcome.failures) - 1, -1, -1):
+                if failure_index in represented_failure_indexes:
+                    continue
+                failure = outcome.failures[failure_index]
+                if not isinstance(failure, dict):
+                    continue
+                if (
+                    failure.get("concurrency") == concurrency
+                    and str(failure.get("status")) == str(sample.status)
+                ):
+                    represented_failure_indexes.add(failure_index)
+                    break
+
+    recovery_ordinals: dict[tuple[int, int, str], int] = {}
+    infrastructure_rows: list[dict[str, Any]] = []
+    for failure_index, failure in enumerate(outcome.failures):
+        if failure_index in represented_failure_indexes:
+            continue
+        if not isinstance(failure, dict):
+            continue
+        try:
+            concurrency_value = int(failure.get("concurrency", 0))
+        except (TypeError, ValueError):
+            concurrency_value = 0
+        concurrency_value = max(0, concurrency_value)
+        repeat = -1 if concurrency_value == 0 else 0
+        logical_key = (concurrency_value, repeat, str(measurement_mode))
+        recovery = recovery_ordinals.get(logical_key, 0)
+        recovery_ordinals[logical_key] = recovery + 1
+        status = str(failure.get("status") or ProbeStatus.RUNTIME_FAILED)
+        try:
+            parsed_status = ProbeStatus(status)
+        except ValueError:
+            parsed_status = ProbeStatus.RUNTIME_FAILED
+            status = parsed_status.value
+        now = _utc_now_iso()
+        probe_id = f"{candidate_id}:r{round_number}:infra:{failure_index}"
+        infrastructure_rows.append(
+            {
+                "probe_id": probe_id,
+                "candidate_id": candidate_id,
+                "record_type": "infrastructure_attempt",
+                "round": round_number,
+                "batch": batch,
+                "concurrency": concurrency_value,
+                "repeat": repeat,
+                "recovery": recovery,
+                "measurement_mode": str(measurement_mode),
+                "started_at": now,
+                "ended_at": now,
+                "failed_at": now,
+                "status": status,
+                "failure_reason": str(
+                    failure.get("reason") or failure.get("failure_reason") or status
+                ),
+                "known_issue": failure.get("known_issue"),
+                "raw": {"attempt": deepcopy(failure)},
+                "normalized": {
+                    "total_throughput": 0.0,
+                    "mean_ttft_ms": 0.0,
+                    "mean_tpot_ms": 0.0,
+                    "success_rate": 0.0,
+                },
+                "instances": 1,
+                "output_healthy": False,
+                "server_health": {"before": "healthy", "after": "unknown"},
+                "artifacts": [
+                    {
+                        "path": f"unavailable/{probe_id}",
+                        "sha256": None,
+                        "unavailable_reason": "executor did not retain attempt artifact",
+                    }
+                ],
+                "statistical_vote": False,
+            }
+        )
+    normal_search_stop = str(outcome.stop_reason) in {
+        "found_boundary",
+        "c1_failed",
+        "hit_cap",
+        "max_probes",
+    }
+    if infrastructure_rows and normal_search_stop and outcome.sample_groups:
+        # A complete search means startup/probe recovery eventually succeeded.
+        # Add one non-voting successful closure row per logical chain; this is
+        # intentionally separate from statistical aggregate samples.
+        chains = {
+            (row["concurrency"], row["repeat"], row["measurement_mode"]): row
+            for row in infrastructure_rows
+        }
+        for closure_index, (logical_key, previous) in enumerate(sorted(chains.items())):
+            concurrency_value, repeat, mode = logical_key
+            now = _utc_now_iso()
+            closure_id = f"{candidate_id}:r{round_number}:infra-closure:{closure_index}"
+            infrastructure_rows.append(
+                {
+                    "probe_id": closure_id,
+                    "candidate_id": candidate_id,
+                    "record_type": "infrastructure_attempt",
+                    "round": round_number,
+                    "batch": batch,
+                    "concurrency": concurrency_value,
+                    "repeat": repeat,
+                    "recovery": previous["recovery"] + 1,
+                    "measurement_mode": mode,
+                    "started_at": now,
+                    "ended_at": now,
+                    "failed_at": None,
+                    "status": ProbeStatus.OK.value,
+                    "failure_reason": None,
+                    "known_issue": None,
+                    "raw": {"recovered": True},
+                    "normalized": {
+                        "total_throughput": 0.0,
+                        "mean_ttft_ms": 0.0,
+                        "mean_tpot_ms": 0.0,
+                        "success_rate": 1.0,
+                    },
+                    "instances": 1,
+                    "output_healthy": True,
+                    "server_health": {"before": "healthy", "after": "healthy"},
+                    "artifacts": [
+                        {
+                            "path": f"unavailable/{closure_id}",
+                            "sha256": None,
+                            "unavailable_reason": "executor did not retain attempt artifact",
+                        }
+                    ],
+                    "statistical_vote": False,
+                }
+            )
+    probes.extend(infrastructure_rows)
+    return probes, complete_groups, incomplete_groups
+
+
 def _force_output_file(command: str, output_path: str) -> str:
     """Point the bench command's --output-file at a known in-container path.
 
@@ -328,6 +670,8 @@ class _CandidateContext:
     lifecycle: ExecutorLifecycle | None = None
     container_resource: str | None = None
     replica_server_logs: dict[int, str] = field(default_factory=dict)
+    observed_engine_versions: set[str] = field(default_factory=set)
+    engine_version_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 def _resolve_bench_template(
@@ -407,6 +751,10 @@ def _aggregate_replicas(replicas: list[RunResult], *, expected: int) -> RunResul
         agg.full_host_measured = True
         if failed is not None:
             agg.raw.update(failed.raw)
+        agg.raw.setdefault(
+            "_replicas",
+            [_run_result_dict(result) for result in replicas if result is not None],
+        )
         return agg
     aggregate_values = {
         "success_rate": min(r.success_rate for r in healthy),
@@ -439,9 +787,10 @@ def _aggregate_replicas(replicas: list[RunResult], *, expected: int) -> RunResul
         )
         agg.instances = expected
         agg.full_host_measured = True
+        agg.raw["_replicas"] = [_run_result_dict(result) for result in healthy]
         return agg
 
-    return RunResult(
+    aggregate = RunResult(
         candidate_id=candidate_id,
         concurrency=concurrency,
         num_prompts=sum(r.num_prompts for r in healthy),
@@ -462,6 +811,8 @@ def _aggregate_replicas(replicas: list[RunResult], *, expected: int) -> RunResul
         full_host_measured=True,
         status="ok",
     )
+    aggregate.raw["_replicas"] = [_run_result_dict(result) for result in healthy]
+    return aggregate
 
 
 def _is_finite_nonnegative_metric(value: object) -> bool:
@@ -863,6 +1214,7 @@ def _make_evaluate(
     attempt_failures: list[dict[str, Any]] = []
 
     repeat_counters: dict[int, int] = {}
+    completed_results: list[RunResult] = []
 
     def _run_group(
         concurrency: int, recovery_attempt: int, repeat: int
@@ -881,6 +1233,12 @@ def _make_evaluate(
         group_done = threading.Event()
         health_root: list[RunResult] = []
         health_exception: list[BaseException] = []
+        # ``ThreadPoolExecutor.map`` discards already-completed values when a
+        # later worker raises (notably LifecycleInterrupted).  Keep each
+        # returned replica in a side-channel so a cancellation can still emit
+        # one physical row and its aggregate failure row for the partial
+        # logical sample.
+        replica_results: dict[int, RunResult] = {}
 
         def _watch_group_health() -> None:
             try:
@@ -1004,11 +1362,16 @@ def _make_evaluate(
                 result.raw.update({"replica_index": i, "port": port})
             if result.status not in SEARCH_VERDICT_STATUSES:
                 peer_failed.set()
+            replica_results[i] = result
             return result
 
+        pool_error: BaseException | None = None
         try:
             with ThreadPoolExecutor(max_workers=len(bench_ports)) as pool:
                 replicas = list(pool.map(_one, enumerate(bench_ports)))
+        except BaseException as exc:
+            pool_error = exc
+            replicas = list(replica_results.values())
         finally:
             group_done.set()
             health_thread.join(timeout=6)
@@ -1016,6 +1379,14 @@ def _make_evaluate(
             raise CleanupError("replica group health watchdog did not stop")
         if health_exception:
             raise health_exception[0]
+        if pool_error is not None:
+            if isinstance(pool_error, LifecycleInterrupted) and replicas:
+                # An incomplete aggregate is intentionally a typed failure;
+                # _report_probe_rows expands its ``_replicas`` payload into
+                # auditable physical+aggregate evidence before defer_interrupt
+                # re-raises the lifecycle signal at the batch boundary.
+                return _aggregate_replicas(replicas, expected=len(bench_ports))
+            raise pool_error
         if health_root:
             root = health_root[0]
             root_index = root.raw.get("replica_index")
@@ -1028,7 +1399,7 @@ def _make_evaluate(
     def _record_attempt_failure(result: RunResult, attempt: int) -> None:
         attempt_failures.append(
             {
-                "failed_at": datetime.now(UTC).astimezone().isoformat(),
+                "failed_at": _utc_now_iso(),
                 "round": int(round_label.removeprefix("r") or 0),
                 "concurrency": result.concurrency,
                 "num_prompts": result.num_prompts,
@@ -1117,10 +1488,19 @@ def _make_evaluate(
                 if run_result.status in SEARCH_VERDICT_STATUSES:
                     break
                 _record_attempt_failure(run_result, attempt)
+                # A lifecycle signal makes any further recovery/start unsafe.
+                # Retain this typed cancellation result before the next retry
+                # observes the closed gate and raises LifecycleInterrupted;
+                # otherwise the completed first probe disappears from the
+                # durable partial-evidence journal.
+                if lifecycle.cancelled:
+                    completed_results.append(run_result)
+                    return run_result
                 if not _retry_allowed(category_counts, run_result):
                     break
             if run_result is None:  # pragma: no cover - max attempts is positive
                 raise RuntimeError("benchmark recovery made no attempt")
+            completed_results.append(run_result)
             _log(
                 f"      [{candidate_id}] C={concurrency}: tput={run_result.total_throughput:.0f} "
                 f"(x{run_result.instances}) "
@@ -1220,6 +1600,11 @@ def _make_evaluate(
         return None
 
     evaluate.attempt_failures = attempt_failures  # type: ignore[attr-defined]
+    # Keep a side-channel for lifecycle cancellation: if a signal arrives
+    # between two search probes, ``search_saturation`` raises before returning
+    # its aggregate outcome, but completed typed samples still belong in the
+    # durable report journal.
+    setattr(evaluate, "_completed_results", completed_results)
     return evaluate, warmup
 
 
@@ -1775,6 +2160,8 @@ def _run_batch_parallel(
             replica_ports=replica_ports,
             replica_gpus=replica_gpus,
             lifecycle=lifecycle,
+            observed_engine_versions=ctx_template.observed_engine_versions,
+            engine_version_lock=ctx_template.engine_version_lock,
         )
         containers.append((candidate_id, container, ctx, candidate, gpu_ids_str, port))
 
@@ -1886,7 +2273,7 @@ def _run_batch_parallel(
                 break
             ctx.container_start_failures.append(
                 {
-                    "failed_at": datetime.now(UTC).astimezone().isoformat(),
+                    "failed_at": _utc_now_iso(),
                     "round": failed_round,
                     "concurrency": 0,
                     "num_prompts": 0,
@@ -2019,7 +2406,7 @@ def _run_batch_parallel(
             # as transport merely because it inherits OSError/ConnectionError.
             status = ProbeStatus.RUNTIME_FAILED
             failure = {
-                "failed_at": datetime.now(UTC).astimezone().isoformat(),
+                "failed_at": _utc_now_iso(),
                 "round": failed_round,
                 "concurrency": 0,
                 "num_prompts": 0,
@@ -2512,7 +2899,7 @@ def _run_candidate(
             reason = "server did not become ready"
         startup_failures.append(
             {
-                "failed_at": datetime.now(UTC).astimezone().isoformat(),
+                "failed_at": _utc_now_iso(),
                 "round": failed_round,
                 "concurrency": 0,
                 "num_prompts": 0,
@@ -2579,6 +2966,9 @@ def _run_candidate(
                 if version_result.ok and version_result.stdout.strip()
                 else ""
             )
+            if ctx.engine_version:
+                with ctx.engine_version_lock:
+                    ctx.observed_engine_versions.add(ctx.engine_version)
 
             def _recover_servers(
                 recovery_attempt: int, concurrency: int, repeat: int
@@ -2742,18 +3132,56 @@ def _run_candidate(
                     certainty="unknown",
                 )
             else:
-                outcome = search_saturation(
-                    evaluate,
-                    qualifies,
-                    start=1,
-                    factor=2,
-                    max_cap=config.max_cap,
-                    max_probes=max_probes,
-                    refine=refine,
-                    confirm=confirm,
-                    seeds=seeds,
-                    on_evaluate_exception=on_evaluate_exception,
-                )
+                try:
+                    outcome = search_saturation(
+                        evaluate,
+                        qualifies,
+                        start=1,
+                        factor=2,
+                        max_cap=config.max_cap,
+                        max_probes=max_probes,
+                        refine=refine,
+                        confirm=confirm,
+                        seeds=seeds,
+                        on_evaluate_exception=on_evaluate_exception,
+                        cancelled=lambda: lifecycle.cancelled,
+                    )
+                except LifecycleInterrupted:
+                    # A signal can arrive after a worker has returned a typed
+                    # result but before search_saturation publishes its
+                    # aggregate outcome.  Keep that completed evidence as an
+                    # explicitly incomplete sample group; the surrounding
+                    # defer_interrupt scope will still re-raise after the
+                    # caller journals this outcome.  Without this side
+                    # channel the pool exception leaves the report with zero
+                    # probes, even though the first benchmark was durable.
+                    partial_results = list(
+                        getattr(evaluate, "_completed_results", [])
+                    )
+                    if not partial_results:
+                        raise
+                    partial_samples: dict[int, tuple[RunResult, ...]] = {}
+                    for result in partial_results:
+                        partial_samples[result.concurrency] = (
+                            *partial_samples.get(result.concurrency, ()),
+                            result,
+                        )
+                    outcome = SearchOutcome(
+                        results=partial_results,
+                        c_star=None,
+                        stop_reason="interrupted",
+                        last_pass=None,
+                        first_fail=None,
+                        num_evals=len(partial_results),
+                        newly_probed=list(partial_samples),
+                        log=[
+                            "search interrupted after preserving partial "
+                            "sample evidence"
+                        ],
+                        complete=False,
+                        certainty="unknown",
+                        incomplete_samples=partial_samples,
+                    )
             terminal_infra = [
                 result
                 for result in outcome.results
@@ -2792,7 +3220,7 @@ def _run_candidate(
             outcome.startup_attempts = startup_attempt + len(ctx.container_start_failures)
             probe_failures = [
                 {
-                    "failed_at": datetime.now(UTC).astimezone().isoformat(),
+                    "failed_at": _utc_now_iso(),
                     "round": failed_round,
                     "concurrency": result.concurrency,
                     "num_prompts": result.num_prompts,
@@ -2897,20 +3325,51 @@ def run_executor(
 ) -> dict:
     """Run one invocation under the process-wide lifecycle and signal guard."""
     if lifecycle is not None:
-        return _run_executor_impl(config, remote=remote, lifecycle=lifecycle)
+        if not lifecycle.entered:
+            raise RuntimeError(
+                "an externally supplied ExecutorLifecycle must be entered "
+                "with `with lifecycle:` before run_executor()"
+            )
+        result_holder: dict[str, Any] = {}
+        result = _run_executor_impl(
+            config,
+            remote=remote,
+            lifecycle=lifecycle,
+            result_holder=result_holder,
+        )
+        return result_holder or result
     _prepare_local_results_dir(config.results_dir)
     owned_lifecycle = ExecutorLifecycle(
         config.results_dir, job_id=config.job_path.stem
     )
     result: dict | None = None
+    result_holder: dict[str, Any] = {}
     with owned_lifecycle:
         job = _load_job(config.job_path)
         owned_lifecycle.job_id = job.job_id
         result = _run_executor_impl(
-            config, remote=remote, lifecycle=owned_lifecycle
+            config,
+            remote=remote,
+            lifecycle=owned_lifecycle,
+            result_holder=result_holder,
         )
     if result is None:  # defensive: a lifecycle context must never suppress errors
         raise RuntimeError("executor lifecycle suppressed execution without a result")
+    # The implementation returns a provisional draft while still inside the
+    # lifecycle context.  Once ``with`` has exited successfully, reload the
+    # manifest-selected generation so callers receive the canonical FINAL (or
+    # any fail-closed downgrade) rather than the pre-cleanup draft status.
+    try:
+        committed = load_report_generation(config.results_dir)
+    except (OSError, ValueError):
+        committed = None
+    if committed is not None and committed["manifest"].get("run_id") == result.get("run_id"):
+        result = {
+            **result,
+            **committed["task_status"],
+            "candidate_results": committed["candidate_rows"],
+            "ranking": committed["ranking"],
+        }
     return result
 
 
@@ -2919,6 +3378,7 @@ def _run_executor_impl(
     *,
     remote: RemoteRunner | None = None,
     lifecycle: ExecutorLifecycle,
+    result_holder: dict[str, Any] | None = None,
 ) -> dict:
     """Orchestrate the 8-step executor loop and return a summary dict.
 
@@ -2937,6 +3397,86 @@ def _run_executor_impl(
         job.benchmark_method, project_root=config.project_root
     )
     candidates = _load_candidates(config.configs_path, search=job.search)
+
+    # Capture immutable input identity and install the candidate-aware report
+    # transaction as one deferred-interrupt handoff.  A signal is recorded and
+    # closes the start gate immediately, but control flow is held until the
+    # session knows the expected IDs/provenance and its abort callback is
+    # registered.  That prevents the narrow capture/register windows from
+    # replacing a rich interrupted generation with the lifecycle's empty
+    # early tombstone.
+    run_started_at = datetime.now(UTC)
+    run_id = lifecycle.run_id
+    with lifecycle.defer_interrupt():
+        run_snapshot = capture_run_start(
+            job_bytes=config.job_path.read_bytes(),
+            config_bytes=config.configs_path.read_bytes(),
+            project_root=config.project_root,
+            started_at=run_started_at,
+            run_id=run_id,
+        )
+
+        _prepare_local_results_dir(config.results_dir)
+        report_session = ReportSession(
+            config.results_dir,
+            expected_candidate_ids=[str(candidate["id"]) for candidate in candidates],
+            run_id=run_id,
+            provenance=provisional_provenance(run_snapshot),
+        )
+        report_session.prepare_placeholder(
+            job_id=job.job_id,
+            measurement_mode=str(measurement_mode),
+        )
+
+        def apply_report(report: dict[str, Any] | None) -> None:
+            if report is None or result_holder is None:
+                return
+            status = report.get("task_status", {})
+            result_holder.update(
+                {
+                    "task_status": status.get("task_status"),
+                    "ranking_status": status.get("ranking_status"),
+                    "interrupted": status.get("interrupted"),
+                    "cleanup_failures": status.get("cleanup_failures", []),
+                    "invariant_errors": status.get("invariant_errors", []),
+                    "candidate_results": report.get("candidate_rows", []),
+                    "ranking": report.get("ranking", []),
+                }
+            )
+
+        def on_interrupt(failures: list[str]) -> None:
+            apply_report(
+                report_session.abort(
+                    interrupted=True,
+                    cleanup_failures=failures,
+                    signal_name=lifecycle.signal_name,
+                )
+            )
+
+        def on_failure(failures: list[str], failure: BaseException | None) -> None:
+            apply_report(
+                report_session.abort(
+                    interrupted=False,
+                    cleanup_failures=failures,
+                    reason=str(failure) if failure is not None else None,
+                )
+            )
+
+        def on_finalize() -> None:
+            apply_report(report_session.commit_final())
+
+        lifecycle.register_report_callbacks(
+            on_interrupt=on_interrupt,
+            on_failure=on_failure,
+            on_finalize=on_finalize,
+        )
+        report_session.begin_placeholder(
+            job_id=job.job_id,
+            measurement_mode=str(measurement_mode),
+        )
+    # Hardware validation is still local/read-only, but it must run after the
+    # run-scoped placeholder exists so a mismatch cannot leave a stale report
+    # generation authoritative.
     _check_hardware_match(job, config)
 
     # Everything needed to construct the benchmark is local and deterministic.
@@ -2961,7 +3501,6 @@ def _run_executor_impl(
         exclusive_host=config.exclusive_host,
     )
     validate_local_preflight(local_preflight)
-    _prepare_local_results_dir(config.results_dir)
 
     remote = remote or RemoteRunner(config.ssh_target, ssh_password=config.ssh_password)
     preflight_plan = prepare_remote_host(remote, local_preflight)
@@ -2992,6 +3531,103 @@ def _run_executor_impl(
     candidate_summaries: dict[str, dict[str, Any]] = {}
     search_diagnostics: dict[str, dict[str, Any]] = {}
     round2_measurements: dict[str, CandidateMeasurement] = {}
+    outcomes_by_candidate_round: dict[str, dict[int, SearchOutcome]] = {}
+    round_batches: dict[str, dict[int, str]] = {}
+    evidence_by_candidate_round: dict[
+        tuple[str, int], tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]
+    ] = {}
+
+    def checkpoint_progress() -> None:
+        """Persist the journal after each completed batch.
+
+        Candidate rows remain provisional placeholders, but every probe already
+        observed is linked into its candidate/group so an interrupt in the
+        middle of round 1 or round 2 does not discard evidence.
+        """
+        rows: list[dict[str, Any]] = []
+        for candidate_id in report_session.expected_candidate_ids:
+            complete_groups: list[dict[str, Any]] = []
+            incomplete_groups: list[dict[str, Any]] = []
+            linked_ids: list[str] = []
+            for (evidence_candidate, _round_number), (
+                probe_rows,
+                complete,
+                incomplete,
+            ) in evidence_by_candidate_round.items():
+                if evidence_candidate != candidate_id:
+                    continue
+                complete_groups.extend(complete)
+                incomplete_groups.extend(incomplete)
+                linked_ids.extend(
+                    row["probe_id"]
+                    for row in probe_rows
+                    if isinstance(row.get("probe_id"), str)
+                )
+            rows.append(
+                {
+                    "candidate_id": candidate_id,
+                    "status": "incomplete",
+                    "completion_state": "in_progress",
+                    "measurement_mode": str(measurement_mode),
+                    "measurement_valid": False,
+                    "ranking_eligible": False,
+                    "ranking_eligibility_reason": "candidate is still running",
+                    "rank": None,
+                    "rank_group": None,
+                    "baseline_threshold_status": "unknown",
+                    "beats_baseline_threshold": False,
+                    "requested_params": {},
+                    "effective_params": {},
+                    "requested_command": None,
+                    "round1": None,
+                    "round2": None,
+                    "round1_batch": None,
+                    "round2_batch": None,
+                    "attempts": 0,
+                    "recovery_count": 0,
+                    "failures": [],
+                    "final_failure": None,
+                    "concurrency_points": [],
+                    "sample_groups": complete_groups,
+                    "incomplete_groups": incomplete_groups,
+                    "probe_ids": linked_ids,
+                    "actual_instances": 1,
+                }
+            )
+        report_session.checkpoint(
+            ranking=[],
+            candidate_rows=rows,
+            task_status={
+                "job_id": job.job_id,
+                "task_status": "INCOMPLETE",
+                "ranking_status": "PROVISIONAL",
+                "measurement_mode": str(measurement_mode),
+                "interrupted": False,
+                "cleanup_failures": [],
+            },
+            final=False,
+        )
+
+    def journal_outcome(
+        candidate_id: str,
+        round_number: int,
+        batch: str,
+        outcome: SearchOutcome,
+    ) -> None:
+        probe_rows, complete, incomplete = _report_probe_rows(
+            candidate_id,
+            round_number,
+            batch,
+            outcome,
+            measurement_mode=measurement_mode,
+        )
+        evidence_by_candidate_round[(candidate_id, round_number)] = (
+            probe_rows,
+            complete,
+            incomplete,
+        )
+        report_session.journal.extend(probe_rows)
+        checkpoint_progress()
 
     # Template context (container is None here; each batch creates its own)
     ctx_template = _CandidateContext(
@@ -3018,32 +3654,49 @@ def _run_executor_impl(
         alloc = _alloc_from_preflight_batch(batch, candidate_by_id)
         _log(f"round-1 batch {batch_idx + 1}/{len(batches)}: "
              + _format_alloc(alloc))
-        outcomes = _run_batch_parallel(
-            ctx_template, alloc, remote, outputs_host_dir, outputs_container_path,
-            qualifies=qualifies,
-            output_len=output_len,
-            round_label="r1",
-            max_probes=ROUND1_MAX_PROBES,
-            confirm=ROUND1_CONFIRM,
-            refine=False,
-            numa_groups=numa_groups,
-        )
-        for candidate_id, outcome in outcomes.items():
-            results_by_candidate[candidate_id] = outcome.results
-            round_results.setdefault(candidate_id, {})[1] = list(outcome.results)
-            search_diagnostics[candidate_id] = _outcome_diag(outcome)
-            candidate_summaries[candidate_id] = {
-                "candidate_id": candidate_id,
-                "measurement_mode": str(measurement_mode),
-                "round1": _outcome_diag(outcome),
-                "round1_batch": f"{batch_idx + 1}/{len(batches)}",
-                "round1_attempts": outcome.startup_attempts,
-                "attempts": outcome.startup_attempts,
-                "failures": [
-                    {**failure, "batch": f"{batch_idx + 1}/{len(batches)}"}
-                    for failure in outcome.failures
-                ],
-            }
+        with lifecycle.defer_interrupt():
+            outcomes: dict[str, SearchOutcome] = {}
+            try:
+                outcomes = _run_batch_parallel(
+                    ctx_template, alloc, remote, outputs_host_dir, outputs_container_path,
+                    qualifies=qualifies,
+                    output_len=output_len,
+                    round_label="r1",
+                    max_probes=ROUND1_MAX_PROBES,
+                    confirm=ROUND1_CONFIRM,
+                    refine=False,
+                    numa_groups=numa_groups,
+                )
+            finally:
+                # If a signal lands in the return-to-loop window, preserve any
+                # completed outcomes before the handler unwinds the executor.
+                for candidate_id, outcome in outcomes.items():
+                    journal_outcome(
+                        candidate_id,
+                        1,
+                        f"{batch_idx + 1}/{len(batches)}",
+                        outcome,
+                    )
+            for candidate_id, outcome in outcomes.items():
+                results_by_candidate[candidate_id] = outcome.results
+                round_results.setdefault(candidate_id, {})[1] = list(outcome.results)
+                outcomes_by_candidate_round.setdefault(candidate_id, {})[1] = outcome
+                round_batches.setdefault(candidate_id, {})[1] = (
+                    f"{batch_idx + 1}/{len(batches)}"
+                )
+                search_diagnostics[candidate_id] = _outcome_diag(outcome)
+                candidate_summaries[candidate_id] = {
+                    "candidate_id": candidate_id,
+                    "measurement_mode": str(measurement_mode),
+                    "round1": _outcome_diag(outcome),
+                    "round1_batch": f"{batch_idx + 1}/{len(batches)}",
+                    "round1_attempts": outcome.startup_attempts,
+                    "attempts": outcome.startup_attempts,
+                    "failures": [
+                        {**failure, "batch": f"{batch_idx + 1}/{len(batches)}"}
+                        for failure in outcome.failures
+                    ],
+                }
 
     # Round-1 ranking is diagnostic only. Every candidate enters precise round 2.
     round1_ranking = rank_candidates(
@@ -3072,82 +3725,99 @@ def _run_executor_impl(
         # always remeasures hinted endpoints, so single-instance seed metrics can
         # safely guide full-host ordering without entering authoritative results.
         seeds = results_by_candidate
-        outcomes = _run_batch_parallel(
-            ctx_template, alloc, remote, outputs_host_dir, outputs_container_path,
-            qualifies=qualifies,
-            output_len=output_len,
-            round_label="r2",
-            max_probes=required_sample_budget(
-                config.max_cap,
-                samples_per_concurrency=ROUND2_CONFIRM,
-                seed_hint_endpoints=2,
-            ),
-            confirm=ROUND2_CONFIRM,
-            refine=True,
-            seeds_by_id=seeds,
-            fill_host=fill_host,
-            numa_groups=numa_groups,
-            allow_cross_numa=config.allow_cross_numa,
-            fill_host_placements=planned_fill_host,
-        )
-        for candidate_id, outcome in outcomes.items():
-            results_by_candidate[candidate_id] = outcome.results
-            new_concurrencies = set(outcome.newly_probed)
-            round_results.setdefault(candidate_id, {})[2] = [
-                result for result in outcome.results if result.concurrency in new_concurrencies
-            ]
-            search_diagnostics[candidate_id] = _outcome_diag(outcome)
-            candidate_summaries[candidate_id]["round2"] = _outcome_diag(outcome)
-            candidate_summaries[candidate_id]["round2_batch"] = (
-                f"{batch_idx + 1}/{len(top_batches)}"
-            )
-            candidate_summaries[candidate_id]["round2_attempts"] = outcome.startup_attempts
-            candidate_summaries[candidate_id]["attempts"] += outcome.startup_attempts
-            candidate_summaries[candidate_id]["failures"].extend(
-                {**failure, "batch": f"{batch_idx + 1}/{len(top_batches)}"}
-                for failure in outcome.failures
-            )
-            expected_instances = (
-                len(planned_fill_host[candidate_id].gpu_slices)
-                if fill_host and candidate_id in planned_fill_host
-                else 0
-                if fill_host
-                else 1
-            )
-            measurement = CandidateMeasurement(
-                results=list(outcome.results),
-                sample_groups=dict(outcome.sample_groups),
-                round_number=2,
-                complete=outcome.complete,
-                certainty=outcome.certainty,
-                measurement_mode=measurement_mode,
-                expected_instances=expected_instances,
-            )
-            round2_measurements[candidate_id] = measurement
-            validation_error = measurement_validation_error(
-                candidate_id,
-                measurement,
-                output_len=output_len,
-                gpu_count=job.gpu_count,
-                required_measurement_mode=measurement_mode,
-            )
-            eligibility_reason = measurement_ranking_eligibility_reason(
-                candidate_id,
-                measurement,
-                job.sla,
-                output_len=output_len,
-                gpu_count=job.gpu_count,
-                required_measurement_mode=measurement_mode,
-            )
-            candidate_summaries[candidate_id]["measurement_valid"] = (
-                validation_error is None
-            )
-            candidate_summaries[candidate_id]["ranking_eligible"] = (
-                eligibility_reason is None
-            )
-            candidate_summaries[candidate_id]["ranking_eligibility_reason"] = (
-                eligibility_reason
-            )
+        with lifecycle.defer_interrupt():
+            outcomes: dict[str, SearchOutcome] = {}
+            try:
+                outcomes = _run_batch_parallel(
+                    ctx_template, alloc, remote, outputs_host_dir, outputs_container_path,
+                    qualifies=qualifies,
+                    output_len=output_len,
+                    round_label="r2",
+                    max_probes=required_sample_budget(
+                        config.max_cap,
+                        samples_per_concurrency=ROUND2_CONFIRM,
+                        seed_hint_endpoints=2,
+                    ),
+                    confirm=ROUND2_CONFIRM,
+                    refine=True,
+                    seeds_by_id=seeds,
+                    fill_host=fill_host,
+                    numa_groups=numa_groups,
+                    allow_cross_numa=config.allow_cross_numa,
+                    fill_host_placements=planned_fill_host,
+                )
+            finally:
+                for candidate_id, outcome in outcomes.items():
+                    journal_outcome(
+                        candidate_id,
+                        2,
+                        f"{batch_idx + 1}/{len(top_batches)}",
+                        outcome,
+                    )
+            for candidate_id, outcome in outcomes.items():
+                results_by_candidate[candidate_id] = outcome.results
+                outcomes_by_candidate_round.setdefault(candidate_id, {})[2] = outcome
+                round_batches.setdefault(candidate_id, {})[2] = (
+                    f"{batch_idx + 1}/{len(top_batches)}"
+                )
+                new_concurrencies = set(outcome.newly_probed)
+                round_results.setdefault(candidate_id, {})[2] = [
+                    result
+                    for result in outcome.results
+                    if result.concurrency in new_concurrencies
+                ]
+                search_diagnostics[candidate_id] = _outcome_diag(outcome)
+                candidate_summaries[candidate_id]["round2"] = _outcome_diag(outcome)
+                candidate_summaries[candidate_id]["round2_batch"] = (
+                    f"{batch_idx + 1}/{len(top_batches)}"
+                )
+                candidate_summaries[candidate_id]["round2_attempts"] = outcome.startup_attempts
+                candidate_summaries[candidate_id]["attempts"] += outcome.startup_attempts
+                candidate_summaries[candidate_id]["failures"].extend(
+                    {**failure, "batch": f"{batch_idx + 1}/{len(top_batches)}"}
+                    for failure in outcome.failures
+                )
+                expected_instances = (
+                    len(planned_fill_host[candidate_id].gpu_slices)
+                    if fill_host and candidate_id in planned_fill_host
+                    else 0
+                    if fill_host
+                    else 1
+                )
+                measurement = CandidateMeasurement(
+                    results=list(outcome.results),
+                    sample_groups=dict(outcome.sample_groups),
+                    round_number=2,
+                    complete=outcome.complete,
+                    certainty=outcome.certainty,
+                    measurement_mode=measurement_mode,
+                    expected_instances=expected_instances,
+                )
+                round2_measurements[candidate_id] = measurement
+                validation_error = measurement_validation_error(
+                    candidate_id,
+                    measurement,
+                    output_len=output_len,
+                    gpu_count=job.gpu_count,
+                    required_measurement_mode=measurement_mode,
+                )
+                eligibility_reason = measurement_ranking_eligibility_reason(
+                    candidate_id,
+                    measurement,
+                    job.sla,
+                    output_len=output_len,
+                    gpu_count=job.gpu_count,
+                    required_measurement_mode=measurement_mode,
+                )
+                candidate_summaries[candidate_id]["measurement_valid"] = (
+                    validation_error is None
+                )
+                candidate_summaries[candidate_id]["ranking_eligible"] = (
+                    eligibility_reason is None
+                )
+                candidate_summaries[candidate_id]["ranking_eligibility_reason"] = (
+                    eligibility_reason
+                )
 
     ranking = rank_candidates(
         round2_measurements, job.sla, output_len=output_len,
@@ -3164,39 +3834,151 @@ def _run_executor_impl(
         ranking,
         output_len=output_len,
     )
+
+    # Expand the authoritative fresh SearchOutcome groups into the Task10
+    # evidence hierarchy.  ``round_results`` intentionally contains only the
+    # representative points used by the legacy v1 view; the immutable report
+    # receives every physical replica, aggregate repeat, and sample group.
+    all_probe_rows: list[dict[str, Any]] = []
+    groups_by_candidate: dict[
+        str, tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]
+    ] = {}
+    for candidate in candidates:
+        candidate_id = str(candidate["id"])
+        complete_groups: list[dict[str, Any]] = []
+        incomplete_groups: list[dict[str, Any]] = []
+        linked_probe_ids: list[str] = []
+        for round_number in (1, 2):
+            outcome = outcomes_by_candidate_round.get(candidate_id, {}).get(round_number)
+            if outcome is None:
+                continue
+            batch = round_batches.get(candidate_id, {}).get(round_number, f"r{round_number}")
+            cached_evidence = evidence_by_candidate_round.get(
+                (candidate_id, round_number)
+            )
+            if cached_evidence is None:
+                cached_evidence = _report_probe_rows(
+                    candidate_id,
+                    round_number,
+                    batch,
+                    outcome,
+                    measurement_mode=measurement_mode,
+                )
+            probe_rows, complete, incomplete = cached_evidence
+            all_probe_rows.extend(probe_rows)
+            complete_groups.extend(complete)
+            incomplete_groups.extend(incomplete)
+            linked_probe_ids.extend(
+                row["probe_id"] for row in probe_rows if isinstance(row.get("probe_id"), str)
+            )
+        groups_by_candidate[candidate_id] = (
+            complete_groups,
+            incomplete_groups,
+            linked_probe_ids,
+        )
+
+    expected_instances_by_candidate = {
+        candidate_id: (
+            len(planned_fill_host[candidate_id].gpu_slices)
+            if fill_host and candidate_id in planned_fill_host
+            else 1
+        )
+        for candidate_id in candidate_by_id
+    }
+    for row in candidate_rows:
+        candidate_id = row["candidate_id"]
+        complete_groups, incomplete_groups, linked_probe_ids = groups_by_candidate.get(
+            candidate_id, ([], [], [])
+        )
+        row["sample_groups"] = complete_groups
+        row["incomplete_groups"] = incomplete_groups
+        row["probe_ids"] = linked_probe_ids
+        row["completion_state"] = "completed" if row.get("status") == "completed" else "incomplete"
+        row["final_failure"] = None
+        row["actual_instances"] = expected_instances_by_candidate.get(candidate_id, 1)
+        row["measurement_valid"] = candidate_summaries.get(candidate_id, {}).get(
+            "measurement_valid", False
+        )
+        failed_probes = [
+            probe
+            for probe in all_probe_rows
+            if probe.get("candidate_id") == candidate_id
+            and probe.get("record_type") in {"aggregate_sample", "infrastructure_attempt"}
+            and probe.get("status") not in {str(value) for value in SEARCH_VERDICT_STATUSES}
+        ]
+        assigned_failure_ids: set[str] = set()
+        for failure in row.get("failures", []):
+            if not isinstance(failure, dict):
+                continue
+            matching_probe = next(
+                (
+                    probe
+                    for probe in failed_probes
+                    if isinstance(probe.get("probe_id"), str)
+                    and probe["probe_id"] not in assigned_failure_ids
+                    and probe.get("status") == str(failure.get("status"))
+                    and probe.get("concurrency") == failure.get("concurrency")
+                ),
+                None,
+            )
+            if matching_probe is not None:
+                failure["probe_id"] = matching_probe["probe_id"]
+                failure["resolved"] = row.get("status") == "completed"
+                assigned_failure_ids.add(matching_probe["probe_id"])
+        row["recovery_count"] = sum(
+            1
+            for probe in failed_probes
+        )
     completed_count = sum(row["status"] == "completed" for row in candidate_rows)
     all_completed = completed_count == len(candidate_rows)
+    provenance = build_provenance(
+        run_snapshot,
+        preflight_plan=preflight_plan,
+        engine_versions=tuple(sorted(ctx_template.observed_engine_versions)),
+        ended_at=datetime.now(UTC),
+    )
     task_status = {
-        "report_schema_version": 1,
+        "report_schema_version": 2,
         "job_id": job.job_id,
         "task_status": "COMPLETED" if all_completed else "INCOMPLETE",
         "ranking_status": "FINAL" if all_completed else "PROVISIONAL",
         "measurement_mode": str(measurement_mode),
         "interrupted": False,
+        "expected_candidate_ids": [str(candidate["id"]) for candidate in candidates],
         "total_candidates": len(candidate_rows),
         "completed_candidates": completed_count,
         "failed_candidates": len(candidate_rows) - completed_count,
     }
-    write_reports(
-        config.results_dir,
+    # Stage the authoritative final-intent payload.  ``ExecutorLifecycle``
+    # commits it through ``on_finalize`` only after body and resource cleanup
+    # have both succeeded; until then the immutable generation is provisional.
+    canonical_report = report_session.checkpoint(
         ranking=ranking,
         candidate_rows=candidate_rows,
         task_status=task_status,
+        provenance=provenance,
+        final=False,
     )
+    canonical_status = canonical_report["task_status"]
     _log("candidate result preview (one row per candidate):")
     for line in render_candidate_preview(candidate_rows):
         _log("  " + line)
 
-    return {
+    result = {
         "job_id": job.job_id,
         "output_len": output_len,
         "num_prompts_multiplier": multiplier,
-        **task_status,
+        **canonical_status,
+        "run_id": report_session.run_id,
         "candidates": list(candidate_summaries.values()),
         "candidate_results": candidate_rows,
         "search_diagnostics": search_diagnostics,
-        "ranking": ranking,
+        "ranking": canonical_report["ranking"],
     }
+    if result_holder is not None:
+        result_holder.update(result)
+        return result_holder
+    return result
 
 
 def _write_json(path: Path, payload: Any) -> None:

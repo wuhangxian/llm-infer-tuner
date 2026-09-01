@@ -1,0 +1,14 @@
+{
+  "candidate_id": "replay-valid",
+  "requested_tp": 4,
+  "measurement_mode": "estimated",
+  "round1_concurrency": 4,
+  "round2_last_pass": 4,
+  "round2_first_fail": 5,
+  "metrics": {
+    "total_throughput": 100.0,
+    "mean_ttft_ms": 10.0,
+    "mean_tpot_ms": 2.0,
+    "success_rate": 1.0
+  }
+}

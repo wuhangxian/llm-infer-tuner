@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -13,6 +14,7 @@ import pytest
 
 from runners import executor as executor_module
 from runners.preflight import build_preflight_plan
+from runners.reporting import write_reports
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -158,7 +160,10 @@ def executor_script_project(tmp_path: Path) -> ExecutorScriptProject:
         'if [ "${FAKE_UV_MODE:-}" = "slow-cleanup" ]; then\n'
         '  printf "%s" "$$" > "$FAKE_UV_PID_FILE"\n'
         '  : > "$FAKE_UV_READY_FILE"\n'
-        "  trap 'printf done > \"$FAKE_UV_CLEANUP_MARKER\"; sleep 3.2; exit 143' TERM\n"
+        "  trap 'printf done > \"$FAKE_UV_CLEANUP_MARKER\"; "
+        "if [ -n \"${FAKE_UV_SIGNAL_MANIFEST:-}\" ]; then "
+        "printf '{\"run_id\":\"after-first-signal\",\"ranking_status\":\"PROVISIONAL\"}\\n' "
+        "> \"$FAKE_UV_SIGNAL_MANIFEST\"; fi; sleep 3.2; exit 143' TERM\n"
         "  trap 'printf done > \"$FAKE_UV_CLEANUP_MARKER\"; sleep 3.2; exit 130' INT\n"
         '  while :; do sleep 30; done\n'
         'fi\n'
@@ -524,9 +529,15 @@ def test_wrapper_allows_cleanup_past_three_seconds_and_ignores_second_signal(
     executor_script_project: ExecutorScriptProject,
 ) -> None:
     project = executor_script_project
+    results = project.root / "slow-signal-results"
+    results.mkdir()
+    (results / "report_manifest.json").write_text(
+        '{"run_id":"old-final","ranking_status":"FINAL"}\n', encoding="utf-8"
+    )
     ready = project.root / "uv-slow.ready"
     runner_pid_file = project.root / "uv-slow.pid"
     cleanup_marker = project.root / "uv-slow.cleanup"
+    signal_manifest = results / "report_manifest.json"
     env = project.env.copy()
     env.update(
         {
@@ -534,11 +545,18 @@ def test_wrapper_allows_cleanup_past_three_seconds_and_ignores_second_signal(
             "FAKE_UV_READY_FILE": str(ready),
             "FAKE_UV_PID_FILE": str(runner_pid_file),
             "FAKE_UV_CLEANUP_MARKER": str(cleanup_marker),
+            "FAKE_UV_SIGNAL_MANIFEST": str(signal_manifest),
             "LLM_INFER_TUNER_SHUTDOWN_GRACE_SECONDS": "20",
         }
     )
     process = subprocess.Popen(
-        ["./run_executor.sh", str(project.job), str(project.target), str(project.configs)],
+        [
+            "./run_executor.sh",
+            str(project.job),
+            str(project.target),
+            str(project.configs),
+            str(results),
+        ],
         cwd=project.root,
         env=env,
         stdout=subprocess.PIPE,
@@ -566,6 +584,11 @@ def test_wrapper_allows_cleanup_past_three_seconds_and_ignores_second_signal(
     runner_pid = int(runner_pid_file.read_text())
     with pytest.raises(ProcessLookupError):
         os.kill(runner_pid, 0)
+    # The fake runner publishes a fresh provisional pointer while handling the
+    # first TERM. A repeated signal must not move that current generation.
+    assert signal_manifest.exists()
+    stale = list(results.glob(".report_manifest.stale.wrapper.*"))
+    assert len(stale) == 1
 
 
 def test_wrapper_returns_when_slow_descendant_cleanup_finishes_before_grace(
@@ -652,6 +675,464 @@ def test_early_sigint_before_python_handler_is_not_inherited_as_ignored(
     runner_pid = int(runner_pid_file.read_text())
     with pytest.raises(ProcessLookupError):
         os.kill(runner_pid, 0)
+
+
+def test_early_sigint_revokes_previous_report_manifest(
+    executor_script_project: ExecutorScriptProject,
+) -> None:
+    project = executor_script_project
+    results = project.root / "early-signal-results"
+    results.mkdir()
+    old_manifest = results / "report_manifest.json"
+    old_manifest.write_text(
+        json.dumps(
+            {
+                "report_schema_version": 2,
+                "run_id": "old-final",
+                "ranking_status": "FINAL",
+            }
+        ),
+        encoding="utf-8",
+    )
+    ready = project.root / "uv-early-manifest.ready"
+    runner_pid_file = project.root / "uv-early-manifest.pid"
+    env = project.env.copy()
+    env.update(
+        {
+            "FAKE_UV_MODE": "early-unhandled",
+            "FAKE_UV_READY_FILE": str(ready),
+            "FAKE_UV_PID_FILE": str(runner_pid_file),
+        }
+    )
+    process = subprocess.Popen(
+        [
+            "./run_executor.sh",
+            str(project.job),
+            str(project.target),
+            str(project.configs),
+            str(results),
+        ],
+        cwd=project.root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not ready.exists():
+        time.sleep(0.02)
+    assert ready.exists(), "fake runner did not start"
+
+    os.kill(process.pid, signal.SIGINT)
+    stdout, stderr = process.communicate(timeout=3)
+
+    assert process.returncode == 130, (stdout, stderr)
+    assert not old_manifest.exists()
+    stale = list(results.glob(".report_manifest.stale.wrapper.*"))
+    assert len(stale) == 1
+    assert "old-final" in stale[0].read_text(encoding="utf-8")
+    status = json.loads((results / "task_status.json").read_text(encoding="utf-8"))
+    assert status["task_status"] == "INTERRUPTED"
+    assert status["ranking_status"] == "PROVISIONAL"
+    assert status["interrupted"] is True
+
+
+def test_runner_exits_before_process_group_probe_publishes_incomplete_status(
+    executor_script_project: ExecutorScriptProject,
+) -> None:
+    """A pre-Python crash must not leave the wrapper status at RUNNING."""
+    project = executor_script_project
+    results = project.root / "early-exit-results"
+    results.mkdir()
+    old_manifest = results / "report_manifest.json"
+    old_manifest.write_text(
+        json.dumps(
+            {
+                "report_schema_version": 2,
+                "run_id": "old-final",
+                "ranking_status": "FINAL",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    completed = project.invoke(
+        str(project.job),
+        str(project.target),
+        str(project.configs),
+        str(results),
+        env_overrides={"FAKE_UV_EXIT_CODE": "7"},
+    )
+
+    assert completed.returncode == 7, (completed.stdout, completed.stderr)
+    status = json.loads(
+        (results / "task_status.json").read_text(encoding="utf-8")
+    )
+    assert status["task_status"] == "INCOMPLETE"
+    assert status["ranking_status"] == "PROVISIONAL"
+    assert not old_manifest.exists()
+    assert list(results.glob(".report_manifest.stale.wrapper.*"))
+
+
+def test_nonzero_runner_cannot_leave_child_published_final_manifest(
+    executor_script_project: ExecutorScriptProject,
+) -> None:
+    """A post-report child failure must revoke its newly published FINAL pointer."""
+
+    project = executor_script_project
+    results = project.root / "child-final-results"
+    fake_uv = project.root / "bin" / "uv"
+    fake_uv.write_text(
+        "#!/bin/bash\n"
+        "results=''\n"
+        "previous=''\n"
+        "for arg in \"$@\"; do\n"
+        "  if [ \"$previous\" = \"--results\" ]; then results=\"$arg\"; fi\n"
+        "  previous=\"$arg\"\n"
+        "done\n"
+        "mkdir -p -- \"$results\"\n"
+        "printf '%s\\n' "
+        "'{\"report_schema_version\":2,\"run_id\":\"child-final\","
+        "\"task_status\":\"COMPLETED\",\"ranking_status\":\"FINAL\","
+        "\"interrupted\":false}' > \"$results/task_status.json\"\n"
+        "printf '%s\\n' "
+        "'{\"report_schema_version\":2,\"run_id\":\"child-final\","
+        "\"generation_id\":\"00000000000000000000000000000000\","
+        "\"snapshot_id\":\"00000000000000000000000000000000\","
+        "\"files\":{}}' > \"$results/report_manifest.json\"\n"
+        "exit 7\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o755)
+
+    completed = project.invoke(
+        str(project.job),
+        str(project.target),
+        str(project.configs),
+        str(results),
+    )
+
+    assert completed.returncode == 7, completed.stderr
+    assert not (results / "report_manifest.json").exists()
+    assert list(results.glob(".report_manifest.stale.wrapper.*"))
+    status = json.loads((results / "task_status.json").read_text(encoding="utf-8"))
+    assert status["task_status"] == "INCOMPLETE"
+    assert status["ranking_status"] == "PROVISIONAL"
+
+
+def test_nonzero_runner_uses_manifest_generation_not_loose_status(
+    executor_script_project: ExecutorScriptProject,
+) -> None:
+    """A lagging loose status must not hide a FINAL immutable generation."""
+
+    from tests.test_report_invariants import _valid_final_payloads
+
+    project = executor_script_project
+    source = project.root / "source-final"
+    source.mkdir()
+    ranking, candidates, probes, task_status, provenance = _valid_final_payloads()
+    write_reports(
+        source,
+        ranking=ranking,
+        candidate_rows=candidates,
+        probe_rows=probes,
+        task_status=task_status,
+        provenance=provenance,
+        run_id="source-final",
+    )
+    results = project.root / "child-final-lagging-status-results"
+    fake_uv = project.root / "bin" / "uv"
+    fake_uv.write_text(
+        "#!/bin/bash\n"
+        "results=''\n"
+        "previous=''\n"
+        "for arg in \"$@\"; do\n"
+        "  if [ \"$previous\" = \"--results\" ]; then results=\"$arg\"; fi\n"
+        "  previous=\"$arg\"\n"
+        "done\n"
+        "mkdir -p -- \"$results\"\n"
+        "cp -a -- \"$FAKE_FINAL_SOURCE/.report_generations\" \"$results/\"\n"
+        "cp -- \"$FAKE_FINAL_SOURCE/report_manifest.json\" \"$results/\"\n"
+        "printf '%s\\n' '{\"report_schema_version\":2,\"run_id\":\"source-final\","
+        "\"task_status\":\"INCOMPLETE\",\"ranking_status\":\"PROVISIONAL\","
+        "\"interrupted\":false}' > \"$results/task_status.json\"\n"
+        "exit 7\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o755)
+
+    completed = project.invoke(
+        str(project.job),
+        str(project.target),
+        str(project.configs),
+        str(results),
+        env_overrides={"FAKE_FINAL_SOURCE": str(source)},
+    )
+
+    assert completed.returncode == 7, completed.stderr
+    assert not (results / "report_manifest.json").exists()
+    assert list(results.glob(".report_manifest.stale.wrapper.*"))
+    status = json.loads((results / "task_status.json").read_text(encoding="utf-8"))
+    assert status["task_status"] == "INCOMPLETE"
+    assert status["ranking_status"] == "PROVISIONAL"
+
+
+def test_signal_with_manifest_jq_read_failure_revokes_active_final(
+    executor_script_project: ExecutorScriptProject,
+) -> None:
+    """A jq/manifest read error must fail closed instead of preserving FINAL."""
+
+    from tests.test_report_invariants import _valid_final_payloads
+
+    project = executor_script_project
+    source = project.root / "jq-failure-source"
+    source.mkdir()
+    ranking, candidates, probes, task_status, provenance = _valid_final_payloads()
+    write_reports(
+        source,
+        ranking=ranking,
+        candidate_rows=candidates,
+        probe_rows=probes,
+        task_status=task_status,
+        provenance=provenance,
+        run_id="jq-failure-final",
+    )
+
+    results = project.root / "jq-failure-results"
+    ready = project.root / "jq-failure.ready"
+    fail_marker = project.root / "jq-failure.trigger"
+    # jq is installed in the developer toolchain's user bin on some hosts,
+    # so resolve it from the current PATH rather than only os.defpath.
+    real_jq = shutil.which("jq")
+    assert real_jq is not None
+    fake_jq = project.root / "bin" / "jq"
+    fake_jq.write_text(
+        "#!/bin/bash\n"
+        'if [ -e "$FAKE_JQ_FAIL_MARKER" ]; then\n'
+        '  for arg in "$@"; do\n'
+        '    [ "$arg" = "$FAKE_JQ_MANIFEST" ] && exit 9\n'
+        "  done\n"
+        "fi\n"
+        f"exec {shlex.quote(real_jq)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    fake_jq.chmod(0o755)
+    fake_uv = project.root / "bin" / "uv"
+    fake_uv.write_text(
+        "#!/bin/bash\n"
+        'results=""; previous=""\n'
+        'for arg in "$@"; do\n'
+        '  if [ "$previous" = "--results" ]; then results="$arg"; fi\n'
+        '  previous="$arg"\n'
+        "done\n"
+        'mkdir -p -- "$results"\n'
+        'cp -a -- "$FAKE_FINAL_SOURCE/.report_generations" "$results/"\n'
+        'cp -- "$FAKE_FINAL_SOURCE/report_manifest.json" "$results/"\n'
+        'cp -- "$FAKE_FINAL_SOURCE/task_status.json" "$results/"\n'
+        'touch -- "$FAKE_UV_READY"\n'
+        "while :; do sleep 30; done\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o755)
+    env = project.env.copy()
+    env.update(
+        {
+            "FAKE_FINAL_SOURCE": str(source),
+            "FAKE_UV_READY": str(ready),
+            "FAKE_JQ_FAIL_MARKER": str(fail_marker),
+            "FAKE_JQ_MANIFEST": str(results / "report_manifest.json"),
+            "LLM_INFER_TUNER_SHUTDOWN_GRACE_SECONDS": "0.2",
+        }
+    )
+    process = subprocess.Popen(
+        [
+            "./run_executor.sh",
+            str(project.job),
+            str(project.target),
+            str(project.configs),
+            str(results),
+        ],
+        cwd=project.root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not ready.exists():
+        time.sleep(0.02)
+    assert ready.exists(), "fake runner did not publish a ready marker"
+    fail_marker.touch()
+    os.kill(process.pid, signal.SIGTERM)
+    stdout, stderr = process.communicate(timeout=5)
+
+    assert process.returncode == 143, (stdout, stderr)
+    assert not (results / "report_manifest.json").exists()
+    assert list(results.glob(".report_manifest.stale.wrapper.*"))
+
+
+def test_manifest_move_failure_unlinks_active_pointer_fail_closed(
+    executor_script_project: ExecutorScriptProject,
+) -> None:
+    """A failed ``mv`` must not leave an old active FINAL pointer behind."""
+
+    project = executor_script_project
+    results = project.root / "move-failure-results"
+    results.mkdir()
+    old_manifest = results / "report_manifest.json"
+    old_manifest.write_text(
+        json.dumps(
+            {
+                "report_schema_version": 2,
+                "run_id": "old-final",
+                "generation_id": "a" * 32,
+                "snapshot_id": "a" * 32,
+            }
+        ),
+        encoding="utf-8",
+    )
+    real_mv = shutil.which("mv", path=os.defpath)
+    assert real_mv is not None
+    mv_shim = project.root / "bin" / "mv"
+    mv_shim.write_text(
+        "#!/bin/bash\n"
+        'for arg in "$@"; do\n'
+        '  case "$arg" in *report_manifest.json) exit 1 ;;\n'
+        "  esac\n"
+        "done\n"
+        f"exec {shlex.quote(real_mv)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    mv_shim.chmod(0o755)
+
+    completed = project.invoke(
+        str(project.job),
+        str(project.target),
+        str(project.configs),
+        str(results),
+        env_overrides={"FAKE_UV_EXIT_CODE": "7"},
+    )
+
+    assert completed.returncode == 7, completed.stderr
+    assert not old_manifest.exists()
+    assert list(results.glob(".report_manifest.stale.wrapper.*"))
+
+
+def test_runner_success_without_report_manifest_is_not_left_running(
+    executor_script_project: ExecutorScriptProject,
+) -> None:
+    """A zero exit from a crashed/mocked runner cannot masquerade as RUNNING."""
+    project = executor_script_project
+    results = project.root / "success-without-manifest-results"
+
+    completed = project.invoke(
+        str(project.job),
+        str(project.target),
+        str(project.configs),
+        str(results),
+    )
+
+    # The shell retains the inner process exit code for compatibility, but the
+    # status is fail-closed because no schema-v2 report was published.
+    assert completed.returncode == 0, (completed.stdout, completed.stderr)
+    status = json.loads(
+        (results / "task_status.json").read_text(encoding="utf-8")
+    )
+    assert status["task_status"] == "INCOMPLETE"
+    assert status["ranking_status"] == "PROVISIONAL"
+
+
+def test_malformed_job_revoke_does_not_leave_previous_final_authoritative(
+    executor_script_project: ExecutorScriptProject,
+) -> None:
+    project = executor_script_project
+    results = project.root / "malformed-job-results"
+    results.mkdir()
+    old_manifest = results / "report_manifest.json"
+    old_manifest.write_text(
+        json.dumps(
+            {
+                "report_schema_version": 2,
+                "run_id": "old-final",
+                "ranking_status": "FINAL",
+            }
+        ),
+        encoding="utf-8",
+    )
+    malformed_job = project.root / "malformed-job.json"
+    malformed_job.write_text("{not valid json\n", encoding="utf-8")
+
+    completed = project.invoke(
+        str(malformed_job),
+        str(project.target),
+        str(project.configs),
+        str(results),
+    )
+
+    assert completed.returncode != 0
+    assert not old_manifest.exists()
+    assert list(results.glob(".report_manifest.stale.wrapper.*"))
+    status = json.loads(
+        (results / "task_status.json").read_text(encoding="utf-8")
+    )
+    assert status["task_status"] == "INCOMPLETE"
+    assert status["ranking_status"] == "PROVISIONAL"
+
+
+def test_preparse_job_id_revokes_default_manifest_before_target_validation(
+    executor_script_project: ExecutorScriptProject,
+) -> None:
+    """A job id different from its filename cannot hide an old FINAL report."""
+    project = executor_script_project
+    renamed_job = project.root / "renamed-input.json"
+    payload = json.loads(project.job.read_text(encoding="utf-8"))
+    payload["job_id"] = "preparse-id"
+    renamed_job.write_text(json.dumps(payload), encoding="utf-8")
+    results = project.root / "outputs/preparse-id/results"
+    results.mkdir(parents=True)
+    old_manifest = results / "report_manifest.json"
+    old_manifest.write_text(
+        json.dumps(
+            {
+                "report_schema_version": 2,
+                "run_id": "old-final",
+                "ranking_status": "FINAL",
+            }
+        ),
+        encoding="utf-8",
+    )
+    missing_target = project.root / "missing-target.json"
+
+    completed = project.invoke(str(renamed_job), str(missing_target))
+
+    assert completed.returncode != 0
+    assert not old_manifest.exists()
+    assert list(results.glob(".report_manifest.stale.wrapper.*"))
+    status = json.loads((results / "task_status.json").read_text(encoding="utf-8"))
+    assert status["task_status"] == "INCOMPLETE"
+    assert status["ranking_status"] == "PROVISIONAL"
+
+
+def test_unsafe_job_id_cannot_escape_default_output_directory(
+    executor_script_project: ExecutorScriptProject,
+) -> None:
+    project = executor_script_project
+    unsafe_job = project.root / "unsafe-job.json"
+    payload = json.loads(project.job.read_text(encoding="utf-8"))
+    payload["job_id"] = "../escaped-output"
+    unsafe_job.write_text(json.dumps(payload), encoding="utf-8")
+    escaped_results = project.root / "escaped-output" / "results"
+
+    completed = project.invoke(str(unsafe_job), str(project.target), str(project.configs))
+
+    assert completed.returncode != 0
+    assert not project.runner_called
+    assert not (escaped_results / "report_manifest.json").exists()
+    # The filename-derived safe fallback may receive a provisional wrapper
+    # status, but no path outside ``outputs`` may be created.
+    assert not escaped_results.exists()
 
 
 def test_signal_during_fork_to_process_group_publication_is_deferred_and_cleaned(
@@ -1084,13 +1565,26 @@ def test_executor_rejects_exact_fill_host_port_overflow_before_output_mutation(
 
     assert constructed is True
     assert config.results_dir.is_dir()
-    assert {path.name for path in config.results_dir.iterdir()} == {"task_status.json"}
+    # Task10 publishes a schema-v2 provisional tombstone before local
+    # validation, so an early preflight failure leaves an auditable generation
+    # rather than only the legacy loose status file.
+    assert {
+        path.name for path in config.results_dir.iterdir()
+    } >= {
+        "task_status.json",
+        "ranking.json",
+        "candidate_results.jsonl",
+        "probe_results.jsonl",
+        "provenance.json",
+        "report_manifest.json",
+        ".report_generations",
+    }
     status = json.loads(
         (config.results_dir / "task_status.json").read_text(encoding="utf-8")
     )
     assert status["task_status"] == "INCOMPLETE"
     assert status["ranking_status"] == "PROVISIONAL"
-    assert not (config.results_dir / "ranking.json").exists()
+    assert (config.results_dir / "ranking.json").exists()
 
 
 def test_executor_rejects_impossible_tp_before_constructing_remote_runner(

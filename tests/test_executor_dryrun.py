@@ -44,6 +44,7 @@ from runners.preflight import (
     PreflightPlan,
 )
 from runners.remote import CommandFailureKind
+from runners.reporting import load_report_generation
 
 # --- fakes --------------------------------------------------------------------
 
@@ -1066,6 +1067,22 @@ class _InterruptDuringServerStart(_FakeContainer):
         return super().remove(force=force, timeout=timeout)
 
 
+class _SignalAfterFirstBench(_FakeContainer):
+    """Deliver SIGINT after the first real (non-warmup) bench returns."""
+
+    def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
+        super().__init__(cstar_by_candidate)
+        self._signalled = False
+
+    def _run_bench(self, command: str) -> _FakeResult:
+        result = super()._run_bench(command)
+        output_path = Path(_flag_str(command.split(), "--output-file"))
+        if not self._signalled and output_path.name.startswith("r1_c1_"):
+            self._signalled = True
+            os.kill(os.getpid(), signal.SIGINT)
+        return result
+
+
 class _TrackedContainer(_FakeContainer):
     def __init__(self, cstar_by_candidate: dict[str, int]) -> None:
         super().__init__(cstar_by_candidate)
@@ -1412,6 +1429,16 @@ def test_two_round_dryrun_ranks_by_true_goodput(tmp_path, workloads_output_len):
     for cid in cstar:
         assert (results_dir / cid / "run_result.r1.json").exists()
 
+    # Task10: the normal executor path must publish one immutable schema-v2
+    # generation with the same run identity as the returned summary and retain
+    # fresh probe evidence/provenance.  The legacy loose files above remain a
+    # compatibility view only.
+    generation = load_report_generation(results_dir)
+    assert summary["run_id"] == generation["manifest"]["run_id"]
+    assert generation["manifest"]["report_schema_version"] == 2
+    assert generation["probe_rows"]
+    assert generation["provenance"]["run_id"] == summary["run_id"]
+
 
 def test_hit_cap_candidate_is_incomplete_and_has_no_final_rank(
     tmp_path, workloads_output_len, monkeypatch
@@ -1522,7 +1549,7 @@ def test_full_host_missing_preflight_replica_plan_fails_closed(
     with pytest.raises(ValueError, match="fill-host preflight placement is missing"):
         run_executor(config, remote=_FakeRemote())
 
-    assert not (config.results_dir / "ranking.json").exists()
+    _assert_provisional_generation(config.results_dir)
 
 
 def test_baseline_plus_32_candidates_all_enter_round2_and_keep_one_row(
@@ -2649,6 +2676,17 @@ def _lifecycle_test_config(
     )
 
 
+def _assert_provisional_generation(results_dir: Path) -> None:
+    """Task10 keeps an auditable provisional generation on failed runs."""
+    generation = load_report_generation(results_dir)
+    status = generation["task_status"]
+    assert status["task_status"] == "INCOMPLETE"
+    assert status["ranking_status"] == "PROVISIONAL"
+    assert generation["manifest"]["report_schema_version"] == 2
+    # A failed lifecycle must never publish an authoritative ranking row.
+    assert generation["ranking"] == []
+
+
 def test_batch_stop_failure_still_attempts_remove_and_aborts_final_ranking(
     tmp_path, workloads_output_len
 ):
@@ -2665,7 +2703,7 @@ def test_batch_stop_failure_still_attempts_remove_and_aborts_final_ranking(
         ex.Container = original_container
 
     assert container.remove_calls >= 1
-    assert not (tmp_path / "results" / "ranking.json").exists()
+    _assert_provisional_generation(tmp_path / "results")
 
 
 def test_startup_remove_failure_stops_retry_and_aborts_final_ranking(
@@ -2684,7 +2722,7 @@ def test_startup_remove_failure_stops_retry_and_aborts_final_ranking(
         ex.Container = original_container
 
     assert container.start_calls == 1
-    assert not (tmp_path / "results" / "ranking.json").exists()
+    _assert_provisional_generation(tmp_path / "results")
 
 
 def test_server_pkill_failure_aborts_final_ranking(
@@ -2704,7 +2742,7 @@ def test_server_pkill_failure_aborts_final_ranking(
     finally:
         ex.Container = original_container
 
-    assert not (tmp_path / "results" / "ranking.json").exists()
+    _assert_provisional_generation(tmp_path / "results")
 
 
 def test_server_cleanup_exception_closes_gate_before_next_round_container_start(
@@ -2732,7 +2770,7 @@ def test_server_cleanup_exception_closes_gate_before_next_round_container_start(
 
     assert first.start_calls == 1
     assert later.start_calls == 0
-    assert not (tmp_path / "results" / "ranking.json").exists()
+    _assert_provisional_generation(tmp_path / "results")
 
 
 def test_start_failure_before_container_creation_retries_without_remove(
@@ -2776,7 +2814,7 @@ def test_ambiguous_inspect_after_failed_start_blocks_retry_and_final_ranking(
         ex.Container = original_container
 
     assert container.start_calls == 1
-    assert not (tmp_path / "results" / "ranking.json").exists()
+    _assert_provisional_generation(tmp_path / "results")
 
 
 def test_startup_cleanup_failure_prevents_starting_later_batch_candidates(
@@ -2815,7 +2853,7 @@ def test_startup_cleanup_failure_prevents_starting_later_batch_candidates(
     assert first.start_calls == 1
     assert first.remove_calls >= 2  # initial cleanup plus best-effort batch cleanup
     assert second.start_calls == 0
-    assert not (tmp_path / "results" / "ranking.json").exists()
+    _assert_provisional_generation(tmp_path / "results")
 
 
 def test_interrupt_after_container_start_before_postcheck_still_removes_it(
@@ -2841,6 +2879,29 @@ def test_interrupt_after_container_start_before_postcheck_still_removes_it(
     )
     assert status["task_status"] == "INTERRUPTED"
     assert status["ranking_status"] == "PROVISIONAL"
+
+
+def test_signal_after_first_bench_preserves_partial_probe_hierarchy(
+    tmp_path, workloads_output_len
+):
+    container = _SignalAfterFirstBench({"probe-window": 4})
+    original_container = ex.Container
+    ex.Container = lambda _remote, _cfg: container
+    try:
+        with pytest.raises(LifecycleInterrupted):
+            run_executor(
+                _lifecycle_test_config(tmp_path, "probe-window"),
+                remote=_FakeRemote(),
+            )
+    finally:
+        ex.Container = original_container
+
+    generation = load_report_generation(tmp_path / "results")
+    assert generation["task_status"]["task_status"] == "INTERRUPTED"
+    assert generation["task_status"]["ranking_status"] == "PROVISIONAL"
+    assert {
+        row["record_type"] for row in generation["probe_rows"]
+    } >= {"physical_probe", "aggregate_sample"}
 
 
 def test_interrupt_during_server_start_cleans_server_before_container(

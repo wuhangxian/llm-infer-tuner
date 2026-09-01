@@ -358,7 +358,13 @@ def validate_parameter_value(name: str, value: object, *, location: str) -> Para
         if type(value) is not int:
             raise ValueError(f"{location} must be an integer")
         return value
-    if value is None or type(value) in {str, bool, int}:
+    if value is None:
+        return None
+    if type(value) is str:
+        return value
+    if type(value) is bool:
+        return value
+    if type(value) is int:
         return value
     if type(value) is float and math.isfinite(value):
         return value
@@ -390,6 +396,8 @@ def command_scalar(name: str, value: str | bool) -> ParameterScalar:
     """Parse a shell-token value using the same known-flag type contract."""
     if value is True:
         return validate_parameter_value(name, value, location=f"legacy cmd --{name}")
+    if not isinstance(value, str):
+        raise ValueError(f"legacy cmd --{name} must be a string value")
     if name in INTEGER_PARAMETERS or name == "port":
         if not re.fullmatch(r"[+-]?\d+", value):
             raise ValueError(f"legacy cmd --{name} must be an integer")

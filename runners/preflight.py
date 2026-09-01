@@ -96,13 +96,27 @@ class PreflightPlan:
     fill_host_placements: tuple[FillHostPlacement, ...]
     required_ports: tuple[int, ...]
     outputs_host_dir: str = ""
+    observed_gpus: tuple[ObservedGpu, ...] = ()
+    image: ImageInspection | None = None
+    image_reference: str = ""
 
 
 @dataclass(frozen=True)
-class _GpuFact:
+class ObservedGpu:
     index: int
     name: str
     memory_mib: float
+
+
+@dataclass(frozen=True)
+class ImageInspection:
+    reference: str
+    digest: str | None
+    unavailable_reason: str | None
+
+
+# Private alias retained for type-compatible callers of the old parser helpers.
+_GpuFact = ObservedGpu
 
 
 @dataclass(frozen=True)
@@ -238,6 +252,7 @@ def build_preflight_plan(
         fill_host_placements=fill_host_placements,
         required_ports=required_ports,
         outputs_host_dir=request.remote_outputs_dir,
+        image_reference=request.image_ref,
     )
     _validate_plan(plan, request)
     return plan
@@ -274,7 +289,9 @@ def prepare_remote_host(remote: _Remote, request: PreflightRequest) -> Preflight
     _run_readonly(remote, model_command, label="model directory")
 
     image_command = f"docker image inspect {shlex.quote(request.image_ref)}"
-    image_present = _inspect_image(remote, image_command)
+    image_present, image = _inspect_image_details(
+        remote, image_command, reference=request.image_ref
+    )
 
     usage = _inspect_usage(remote, request)
     _validate_ownership(usage, plan, request)
@@ -291,7 +308,9 @@ def prepare_remote_host(remote: _Remote, request: PreflightRequest) -> Preflight
     if not image_present:
         pull_command = f"docker pull {shlex.quote(request.image_ref)}"
         _run_mutation(remote, pull_command, label="image pull", timeout=600)
-        _run_readonly(remote, image_command, label="post-pull image inspection")
+        _, image = _inspect_image_details(
+            remote, image_command, reference=request.image_ref
+        )
     if request.exclusive_host:
         _cleanup_exclusive_host(remote, usage, plan)
     elif usage.owned_containers:
@@ -302,7 +321,15 @@ def prepare_remote_host(remote: _Remote, request: PreflightRequest) -> Preflight
     # inventory alone cannot safely authorise a later launch.
     after = _inspect_usage(remote, request)
     _validate_cleanup_recheck(after, plan, request)
-    return replace(plan, outputs_host_dir=outputs_host_dir)
+    return replace(
+        plan,
+        outputs_host_dir=outputs_host_dir,
+        observed_gpus=tuple(
+            ObservedGpu(index=gpu.index, name=gpu.name, memory_mib=gpu.memory_mib)
+            for gpu in gpus
+        ),
+        image=image,
+    )
 
 
 def _resolve_outputs_host_dir(remote: _Remote, request: PreflightRequest) -> str:
@@ -328,20 +355,47 @@ def _validate_absolute_remote_path(path: str, *, label: str) -> None:
         raise ValueError(f"{label} must be an absolute POSIX path without '..'")
 
 
-def _inspect_image(remote: _Remote, command: str) -> bool:
+def _image_digest(stdout: str) -> str | None:
+    match = re.search(r"sha256:[0-9a-f]{64}", stdout)
+    return match.group(0) if match is not None else None
+
+
+def _inspect_image_details(
+    remote: _Remote, command: str, *, reference: str
+) -> tuple[bool, ImageInspection]:
     result = remote.run(command)
     if result.ok:
-        return True
+        digest = _image_digest(result.stdout)
+        return True, ImageInspection(
+            reference=reference,
+            digest=digest,
+            unavailable_reason=(
+                None
+                if digest is not None
+                else "image inspection did not expose an immutable digest"
+            ),
+        )
     detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic"
     if result.returncode == 1 and re.search(
         r"\bno such (?:image|object)\b",
         detail,
         flags=re.IGNORECASE,
     ):
-        return False
+        return False, ImageInspection(
+            reference=reference,
+            digest=None,
+            unavailable_reason="image is not present before pull",
+        )
     raise PreflightError(
         f"image inspection failed with rc={result.returncode}: {detail}"
     )
+
+
+def _inspect_image(remote: _Remote, command: str) -> bool:
+    """Backward-compatible presence-only image inspection helper."""
+
+    present, _ = _inspect_image_details(remote, command, reference="unknown")
+    return present
 
 
 def _run_readonly(
@@ -475,7 +529,11 @@ def _container_facts(rows: list[dict[str, Any]]) -> tuple[_ContainerFact, ...]:
         config = row.get("Config") or {}
         state = row.get("State") or {}
         network = row.get("NetworkSettings") or {}
-        if not isinstance(config, dict) or not isinstance(state, dict) or not isinstance(network, dict):
+        if (
+            not isinstance(config, dict)
+            or not isinstance(state, dict)
+            or not isinstance(network, dict)
+        ):
             raise PreflightError(f"container inventory row {row_number} is malformed")
         raw_labels = config.get("Labels") or {}
         if not isinstance(raw_labels, dict) or any(

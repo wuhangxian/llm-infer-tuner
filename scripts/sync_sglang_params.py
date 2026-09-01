@@ -20,17 +20,13 @@ from __future__ import annotations
 
 import argparse
 import ast
-import json
 import re
 import subprocess
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
-
-from datetime import datetime
 
 
 def _update_yaml_meta(data: dict, section_key: str) -> None:
@@ -112,7 +108,11 @@ def extract_valid_flags(server_args_path: Path) -> list[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.AnnAssign):
             ann = node.annotation
-            if isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) and ann.value.id == "A":
+            if (
+                isinstance(ann, ast.Subscript)
+                and isinstance(ann.value, ast.Name)
+                and ann.value.id == "A"
+            ):
                 target_id = getattr(node.target, "id", "")
                 if target_id and not target_id.startswith("_"):
                     flags.append(target_id)
@@ -298,7 +298,7 @@ def process_tag(tag: str, repo_dir: Path, data: dict) -> bool:
             "_auto_generated": True,  # mark for manual review
         }
         print(f"  -> Created new entry {image_key}")
-        print(f"  -> [TODO] Fill cuda_version, digest, startup_floor manually")
+        print("  -> [TODO] Fill cuda_version, digest, startup_floor manually")
         changed = True
     else:
         entry = images[image_key]
@@ -374,9 +374,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if any_changed:
         save_images_yaml(data)
-        print(f"\n  -> sglang-images.yaml updated")
+        print("\n  -> sglang-images.yaml updated")
     else:
-        print(f"\n  -> no changes needed")
+        print("\n  -> no changes needed")
 
     # Summary
     print("\n=== Summary ===")
@@ -385,8 +385,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  existing checked: {len(existing_tags)}")
     print(f"  images_yaml_changed: {any_changed}")
     if new_tags:
-        print(f"  [TODO] New entries need manual fill: cuda_version, digest, startup_floor")
-    print(f"  constraints reports: reports/constraints_*.md")
+        print("  [TODO] New entries need manual fill: cuda_version, digest, startup_floor")
+    print("  constraints reports: reports/constraints_*.md")
     return 0
 
 

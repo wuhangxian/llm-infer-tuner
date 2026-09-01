@@ -11,12 +11,146 @@
 # 压测命令由 JobSpec + workload + benchmark_method 确定性生成,第二阶段不调用 AI。
 set -euo pipefail
 
+# Install a tiny signal guard before any jq/argument validation.  Bash can
+# receive a signal in the few milliseconds before the full lifecycle functions
+# below are defined; without this guard an old FINAL manifest remains visible.
+# The guard uses only shell builtins/basic filesystem operations and is
+# replaced by ``handle_signal`` once normal setup is complete.
+EARLY_RESULTS=""
+EARLY_SIGNAL_HANDLED=0
+RESULTS_LOCK_FD=""
+RESULTS_LOCK_PATH=""
+RESULTS_LOCK_OWNED=0
+RESULTS_LOCK_CONFLICT=0
+if [ "$#" -ge 4 ]; then
+  EARLY_RESULTS="${4:-}"
+elif [ "$#" -ge 1 ]; then
+  EARLY_JOB_NAME="${1##*/}"
+  EARLY_JOB_NAME="${EARLY_JOB_NAME%.*}"
+  [ -n "$EARLY_JOB_NAME" ] || EARLY_JOB_NAME="custom"
+  EARLY_RESULTS="outputs/${EARLY_JOB_NAME}/results"
+fi
+
+acquire_results_lock_for() {
+  # Only one wrapper may own a result directory at a time.  Without this
+  # process lock, an older invocation that exits non-zero can race a newer
+  # invocation and revoke the newer run's immutable FINAL manifest.
+  local target_dir="$1"
+  local lock_path=""
+  local new_fd=""
+  [ -n "$target_dir" ] || return 0
+  lock_path="$target_dir/.run_executor.lock"
+  if [ "$RESULTS_LOCK_OWNED" -eq 1 ] && [ "$RESULTS_LOCK_PATH" = "$lock_path" ]; then
+    return 0
+  fi
+  if ! mkdir -p -- "$target_dir"; then
+    echo "❌ cannot prepare results lock directory: $target_dir" >&2
+    return 1
+  fi
+  if ! exec {new_fd}>"$lock_path"; then
+    echo "❌ cannot open results lock: $lock_path" >&2
+    return 1
+  fi
+  if ! flock -n "$new_fd"; then
+    exec {new_fd}>&-
+    RESULTS_LOCK_CONFLICT=1
+    echo "❌ another executor already owns results directory: $target_dir" >&2
+    return 75
+  fi
+  # Acquire the refined job-id path before releasing the filename-derived
+  # preliminary path, so there is never an ownership-free publication window.
+  if [ "$RESULTS_LOCK_OWNED" -eq 1 ] && [ -n "$RESULTS_LOCK_FD" ]; then
+    flock -u "$RESULTS_LOCK_FD" 2>/dev/null || true
+    exec {RESULTS_LOCK_FD}>&-
+  fi
+  RESULTS_LOCK_FD="$new_fd"
+  RESULTS_LOCK_PATH="$lock_path"
+  RESULTS_LOCK_OWNED=1
+  RESULTS_LOCK_CONFLICT=0
+}
+
+revoke_manifest_file() {
+  # Move the active pointer to a same-directory stale name whenever possible.
+  # If the move itself fails (for example, a deliberately injected I/O error),
+  # unlink the pointer as a last resort.  A stale FINAL pointer is unsafe: an
+  # interrupted/failed invocation must never leave it authoritative merely
+  # because preserving the old copy was impossible.  Callers hold the result
+  # directory lock before reaching this helper.
+  local manifest_path="$1"
+  local stale_path="$2"
+  if mv -f -- "$manifest_path" "$stale_path" 2>/dev/null; then
+    return 0
+  fi
+  # Preserve a best-effort copy before unlinking.  The copy is diagnostic only
+  # (the immutable generation remains in .report_generations); failure here
+  # must not prevent the fail-closed unlink below.
+  cp -p -- "$manifest_path" "$stale_path" 2>/dev/null || true
+  if rm -f -- "$manifest_path" 2>/dev/null && [ ! -e "$manifest_path" ]; then
+    echo "⚠️  manifest move failed; removed active pointer: $manifest_path" >&2
+    return 0
+  fi
+  echo "❌ cannot revoke active report manifest: $manifest_path" >&2
+  return 1
+}
+
+early_revoke_manifest() {
+  local manifest_path=""
+  local stale_path=""
+  [ -n "${EARLY_RESULTS:-}" ] || return 0
+  acquire_results_lock_for "$EARLY_RESULTS" || return $?
+  manifest_path="$EARLY_RESULTS/report_manifest.json"
+  [ -e "$manifest_path" ] || return 0
+  stale_path="$EARLY_RESULTS/.report_manifest.stale.wrapper.$$.${EPOCHREALTIME//[^0-9]/}"
+  revoke_manifest_file "$manifest_path" "$stale_path"
+}
+
+early_signal() {
+  local signal_name="$1"
+  local exit_code="$2"
+  local status_path=""
+  local temporary_path=""
+  if [ "$EARLY_SIGNAL_HANDLED" -eq 1 ]; then
+    return 0
+  fi
+  EARLY_SIGNAL_HANDLED=1
+  # If another invocation owns this results directory, this process must not
+  # revoke or overwrite that run merely because it received a signal.
+  if ! early_revoke_manifest; then
+    exit "$exit_code"
+  fi
+  if [ -n "${EARLY_RESULTS:-}" ]; then
+    mkdir -p -- "$EARLY_RESULTS" 2>/dev/null || true
+    status_path="$EARLY_RESULTS/task_status.json"
+    temporary_path="$status_path.early.$$"
+    # Signal names/codes are constants supplied by the traps, so this is safe
+    # to emit without jq (which may itself be the failed preflight command).
+    if printf '{"report_schema_version":1,"job_id":"","task_status":"INTERRUPTED","ranking_status":"PROVISIONAL","interrupted":true,"signal":"SIG%s","exit_code":%s,"cleanup_failures":[],"failure_type":null,"failure_reason":null,"status_source":"wrapper"}\n' \
+      "$signal_name" "$exit_code" > "$temporary_path" 2>/dev/null; then
+      mv -f -- "$temporary_path" "$status_path" 2>/dev/null || true
+    else
+      rm -f -- "$temporary_path" 2>/dev/null || true
+    fi
+  fi
+  exit "$exit_code"
+}
+
+trap 'early_signal INT 130' INT
+trap 'early_signal TERM 143' TERM
+
 command -v jq >/dev/null || { echo "❌ 需要 jq" >&2; exit 1; }
 command -v setsid >/dev/null || { echo "❌ 需要 setsid" >&2; exit 1; }
+command -v flock >/dev/null || { echo "❌ 需要 flock" >&2; exit 1; }
 
 usage() {
   echo "用法1: ./run_executor.sh <job.json> <target.json> [configs.jsonl] [results_dir]" >&2
   echo "用法2: ./run_executor.sh <bundle.json|bundle.jsonl>  (顶层含 _meta + candidates)" >&2
+}
+
+is_safe_identifier() {
+  # Keep shell-derived output/container paths aligned with schemas.Identifier.
+  # Never interpolate an untrusted job id before this check: ``..`` and path
+  # separators would otherwise escape the outputs directory.
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
 }
 
 if [ "$#" -eq 0 ] || [ "$#" -gt 4 ]; then
@@ -25,7 +159,7 @@ if [ "$#" -eq 0 ] || [ "$#" -gt 4 ]; then
 fi
 
 TMP_DIR=""
-RESULTS=""
+RESULTS="${EARLY_RESULTS:-}"
 JOB_ID=""
 RUNNER_PID=""
 RUNNER_STARTING=0
@@ -35,6 +169,7 @@ PENDING_EXIT_CODE=""
 SHUTDOWN_GRACE_SECONDS=""
 WRAPPER_CLEANUP_FAILURE=""
 WAIT_INTERRUPTED=0
+REPORT_MANIFEST_REVOKED="${REPORT_MANIFEST_REVOKED:-0}"
 
 write_wrapper_status() {
   local task_status="$1"
@@ -45,6 +180,9 @@ write_wrapper_status() {
   local current_status=""
   if [ -z "$RESULTS" ]; then
     return 0
+  fi
+  if [ "$RESULTS_LOCK_CONFLICT" -eq 1 ]; then
+    return 1
   fi
   if ! mkdir -p -- "$RESULTS"; then
     echo "❌ cannot prepare results directory for lifecycle status: $RESULTS" >&2
@@ -67,7 +205,11 @@ write_wrapper_status() {
     mv -f -- "$temporary_path" "$status_path"
     return 0
   fi
-  if [ "$task_status" = "INCOMPLETE" ] && [ "$current_status" != "RUNNING" ]; then
+  # Preserve a richer provisional record written by Python, but replace a
+  # stale/terminal FINAL compatibility record after its manifest was revoked.
+  # The latter is common when jq fails before Python has started.
+  if [ "$task_status" = "INCOMPLETE" ] \
+    && { [ "$current_status" = "INCOMPLETE" ] || [ "$current_status" = "INTERRUPTED" ]; }; then
     return 0
   fi
   if [ "$task_status" = "INTERRUPTED" ]; then
@@ -88,6 +230,117 @@ write_wrapper_status() {
         status_source:"wrapper"}' > "$temporary_path"
   fi
   mv -f -- "$temporary_path" "$status_path"
+}
+
+revoke_report_manifest() {
+  # Each wrapper invocation owns a fresh report generation. Remove the old
+  # active pointer before launching Python so a signal in the pre-handler
+  # window cannot leave a previous FINAL report authoritative. Keep the
+  # immutable generation recoverable under a unique same-directory name.
+  local manifest_path=""
+  local stale_path=""
+  if [ -z "$RESULTS" ]; then
+    return 0
+  fi
+  acquire_results_lock_for "$RESULTS" || return $?
+  manifest_path="$RESULTS/report_manifest.json"
+  if [ ! -e "$manifest_path" ]; then
+    return 0
+  fi
+  stale_path="$RESULTS/.report_manifest.stale.wrapper.$$.${EPOCHREALTIME//[^0-9]/}"
+  if ! revoke_manifest_file "$manifest_path" "$stale_path"; then
+    return 1
+  fi
+  REPORT_MANIFEST_REVOKED=1
+}
+
+active_report_tuple() {
+  # Read the status from the generation selected by the immutable pointer, not
+  # from the loose compatibility task_status.json.  A child can crash between
+  # committing those two views, so the loose copy is not authoritative here.
+  local manifest_path=""
+  local generation_id=""
+  local status_path=""
+  if [ -z "$RESULTS" ]; then
+    return 1
+  fi
+  manifest_path="$RESULTS/report_manifest.json"
+  [ -f "$manifest_path" ] || return 1
+  if ! generation_id="$(jq -er '
+      if type == "object"
+         and (.report_schema_version | type) == "number"
+         and .report_schema_version == 2
+         and (.generation_id | type) == "string"
+         and (.generation_id | test("^[0-9a-f]{32}$"))
+         and .snapshot_id == .generation_id
+      then .generation_id
+      else empty
+      end' "$manifest_path" 2>/dev/null)"; then
+    # An unreadable/malformed manifest is unsafe.  Return an explicit non-zero
+    # code (rather than propagating ``$?`` from a negated command) so callers
+    # revoke the pointer instead of treating an empty tuple as provisional.
+    return 1
+  fi
+  status_path="$RESULTS/.report_generations/$generation_id/task_status.json"
+  [ -f "$status_path" ] || return 1
+  jq -er '
+    if type == "object"
+       and (.report_schema_version | type) == "number"
+       and .report_schema_version == 2
+       and (.task_status | type) == "string"
+       and (.ranking_status | type) == "string"
+       and (.interrupted | type) == "boolean"
+    then [.task_status, .ranking_status, (.interrupted | tostring)] | @tsv
+    else empty
+    end' "$status_path" 2>/dev/null
+}
+
+revoke_unsafe_report_manifest() {
+  # A runner can write a schema-v2 FINAL pointer and then still exit non-zero
+  # (for example, a post-report cleanup hook can fail).  Preserve only a
+  # structurally valid provisional/interrupted generation; every final or
+  # unreadable state is moved aside so it cannot remain authoritative.
+  local manifest_path=""
+  local tuple=""
+  if [ -z "$RESULTS" ]; then
+    return 0
+  fi
+  manifest_path="$RESULTS/report_manifest.json"
+  [ -e "$manifest_path" ] || return 0
+  if ! tuple="$(active_report_tuple 2>/dev/null)"; then
+    revoke_report_manifest
+    return $?
+  fi
+  case "$tuple" in
+    $'INCOMPLETE\tPROVISIONAL\tfalse'|$'INTERRUPTED\tPROVISIONAL\ttrue')
+      return 0
+      ;;
+    *)
+      revoke_report_manifest
+      ;;
+  esac
+}
+
+revoke_final_report_manifest() {
+  # Backward-compatible name used by the post-child failure path.
+  revoke_unsafe_report_manifest
+}
+
+revoke_if_active_final_or_invalid() {
+  local manifest_path=""
+  local tuple=""
+  if [ -z "$RESULTS" ]; then
+    return 0
+  fi
+  manifest_path="$RESULTS/report_manifest.json"
+  [ -e "$manifest_path" ] || return 0
+  if ! tuple="$(active_report_tuple 2>/dev/null)"; then
+    revoke_report_manifest
+    return $?
+  fi
+  if [ "$tuple" = $'COMPLETED\tFINAL\tfalse' ]; then
+    revoke_report_manifest
+  fi
 }
 
 group_state() {
@@ -192,12 +445,54 @@ cleanup() {
   fi
 }
 
+wrapper_exit() {
+  # Preserve the original exit code while making sure a parse/launch failure
+  # cannot leave the compatibility status at RUNNING.  This trap is only
+  # enabled after a result path is known and an older manifest was actually
+  # revoked, so ordinary argument-usage errors do not create output trees.
+  local exit_code="$1"
+  cleanup
+  if [ "$exit_code" -ne 0 ] && [ -n "$RESULTS" ] \
+    && [ "$RESULTS_LOCK_CONFLICT" -eq 0 ]; then
+    write_wrapper_status "INCOMPLETE" || true
+  fi
+  return "$exit_code"
+}
+
 handle_signal() {
   local signal_name="$1"
   local exit_code="$2"
+  local first_signal=0
+  local revoke_on_signal=0
   if [ -z "$PENDING_SIGNAL" ]; then
     PENDING_SIGNAL="$signal_name"
     PENDING_EXIT_CODE="$exit_code"
+    first_signal=1
+  fi
+  # The wrapper can receive a signal before Python has installed its own
+  # lifecycle handler. Revoke the previous immutable report pointer at this
+  # earliest known results path; the operation is idempotent once the pointer
+  # has already been moved by the normal pre-launch guard. Repeated signals
+  # must not move a newer schema-v2 INTERRUPTED/PROVISIONAL generation.
+  if [ "$first_signal" -eq 1 ]; then
+    # During argument/preflight processing RUNNER_PID is still empty, and
+    # during the fork→setsid handshake RUNNER_STARTING remains set.  In either
+    # window an active pointer can only be a stale prior generation.  Once the
+    # runner is established, leave a Python-published PROVISIONAL/INTERRUPTED
+    # generation alone; revoke only an actually old FINAL status.
+    if [ "$RUNNER_STARTING" -eq 1 ] || [ -z "$RUNNER_PID" ]; then
+      revoke_on_signal=1
+    elif [ -e "$RESULTS/report_manifest.json" ]; then
+      # Consult the immutable generation's task status.  The loose status can
+      # lag a final commit (or be overwritten by a wrapper failure), so using
+      # it here could leave a real FINAL pointer visible after SIGTERM.
+      if ! revoke_if_active_final_or_invalid; then
+        WRAPPER_CLEANUP_FAILURE="cannot revoke previous report manifest"
+      fi
+    fi
+  fi
+  if [ "$revoke_on_signal" -eq 1 ] && ! revoke_report_manifest; then
+    WRAPPER_CLEANUP_FAILURE="cannot revoke previous report manifest"
   fi
   if [ "$RUNNER_STARTING" -eq 1 ] || [ "$SHUTTING_DOWN" -eq 1 ]; then
     WAIT_INTERRUPTED=1
@@ -209,9 +504,42 @@ handle_signal() {
   exit "$PENDING_EXIT_CODE"
 }
 
-trap cleanup EXIT
+trap 'wrapper_exit "$?"' EXIT
 trap 'handle_signal INT 130' INT
 trap 'handle_signal TERM 143' TERM
+
+# Establish the best result path we can know before parsing any input.  This
+# matters for malformed job/bundle files: a previous immutable FINAL pointer
+# must not remain authoritative merely because jq failed before the normal
+# argument-resolution block assigned RESULTS.  An explicit fourth argument is
+# authoritative; otherwise use a safe filename-derived fallback and refine it
+# after the job id is parsed below.
+if [ "$#" -ge 4 ]; then
+  RESULTS="$4"
+else
+  PRELIM_JOB_NAME="${1##*/}"
+  PRELIM_JOB_NAME="${PRELIM_JOB_NAME%.*}"
+  if [ -z "$PRELIM_JOB_NAME" ]; then
+    PRELIM_JOB_NAME="custom"
+  fi
+  RESULTS="outputs/${PRELIM_JOB_NAME}/results"
+  # A valid job/bundle may use an id different from its filename, and target
+  # validation can fail before the normal jq block resolves that id.  Read
+  # only the scalar id (guarded so malformed JSON remains on the filename
+  # fallback) and revoke its default output pointer too.  Never turn an
+  # untrusted value into a path unless it satisfies the same safe-id grammar as
+  # the Python schemas.
+  PRELIM_JOB_ID=""
+  if [ "$#" -eq 1 ]; then
+    PRELIM_JOB_ID="$(jq -r 'if type == "object" then (._meta.job_id // empty) else empty end' "$1" 2>/dev/null || true)"
+  elif [ "$#" -ge 2 ]; then
+    PRELIM_JOB_ID="$(jq -r 'if type == "object" then (.job_id // empty) else empty end' "$1" 2>/dev/null || true)"
+  fi
+  if [[ "$PRELIM_JOB_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+    RESULTS="outputs/${PRELIM_JOB_ID}/results"
+  fi
+fi
+revoke_report_manifest || exit 1
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 检测模式:单文件 vs 三参数
@@ -245,8 +573,16 @@ if [ -n "$SINGLE_FILE" ]; then
   TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/llm-infer-tuner.XXXXXXXX")"
   chmod 700 "$TMP_DIR"
   JOB_ID="$(jq -r '._meta.job_id // "custom"' "$SINGLE_FILE")"
+  if ! is_safe_identifier "$JOB_ID"; then
+    echo "❌ job_id 必须是安全标识符 (ASCII 字母/数字/._-，最长128)" >&2
+    exit 2
+  fi
   CONFIGS="$TMP_DIR/configs.jsonl"
   RESULTS="outputs/${JOB_ID}/results"
+  # The preliminary path above is based on the bundle filename.  If the
+  # metadata supplies a different job id, revoke that path as well before any
+  # generated files are published.
+  revoke_report_manifest || exit 1
 
   has_plain_password="$(jq -r '((._meta.ssh_password? // "") | length) > 0' "$SINGLE_FILE")"
   has_password_env="$(jq -r '((._meta.ssh_password_env? // "") | length) > 0' "$SINGLE_FILE")"
@@ -310,8 +646,16 @@ if [ -n "$SINGLE_FILE" ]; then
 else
   # 三参数模式:原来逻辑
   JOB_ID="$(jq -r '.job_id' "$JOB")"
+  if ! is_safe_identifier "$JOB_ID"; then
+    echo "❌ job_id 必须是安全标识符 (ASCII 字母/数字/._-，最长128)" >&2
+    exit 2
+  fi
   CONFIGS="${3:-outputs/${JOB_ID}/configs.jsonl}"
   RESULTS="${4:-outputs/${JOB_ID}/results}"
+  # A malformed job can fail the jq command above; valid-but-different job ids
+  # can also change the default path.  Keep the active pointer fail-closed at
+  # the resolved path before checking configs or doing any more work.
+  revoke_report_manifest || exit 1
   [ -f "$CONFIGS" ] || { echo "❌ configs 不存在: $CONFIGS(先跑 ./gen_configs.sh $JOB)" >&2; exit 1; }
   MAX_CAND="$(jq -r '.search.max_candidates // 1' "$JOB")"
 fi
@@ -396,6 +740,11 @@ if ! [[ "$SHUTDOWN_GRACE_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
   exit 2
 fi
 
+# Revoke any prior immutable generation before the first runner process is
+# spawned. This closes the shell-only signal window where Python has not yet
+# installed its lifecycle handlers or published a schema-v2 tombstone.
+revoke_report_manifest || exit 1
+
 write_wrapper_status "RUNNING"
 RUNNER_STARTING=1
 RUNNER_GROUP_READY=0
@@ -414,7 +763,14 @@ RUNNER_PID=$!
 # setsid(2).  Keep signal handling in the pending state until PGID==PID so a
 # signal cannot observe an unkillable fork→session-creation gap.
 for _ in $(seq 1 500); do
-  RUNNER_PGID="$(ps -o pgid= -p "$RUNNER_PID" 2>/dev/null | tr -d ' ')"
+  # The child may have exited between fork and this observation.  Under
+  # ``set -euo pipefail`` an unguarded ps pipeline would abort the wrapper
+  # before it can reap the child and publish INCOMPLETE.
+  if RUNNER_PGID="$(ps -o pgid= -p "$RUNNER_PID" 2>/dev/null | tr -d ' ')"; then
+    :
+  else
+    RUNNER_PGID=""
+  fi
   if [ "$RUNNER_PGID" = "$RUNNER_PID" ]; then
     RUNNER_GROUP_READY=1
     break
@@ -441,6 +797,16 @@ else
 fi
 RUNNER_PID=""
 if [ "$RUNNER_STATUS" -ne 0 ]; then
+  if ! revoke_final_report_manifest; then
+    WRAPPER_CLEANUP_FAILURE="${WRAPPER_CLEANUP_FAILURE:+$WRAPPER_CLEANUP_FAILURE; }cannot revoke child FINAL report manifest"
+  fi
+  write_wrapper_status "INCOMPLETE" || true
+elif [ -n "$RESULTS" ] && [ ! -e "$RESULTS/report_manifest.json" ]; then
+  # A successful child must publish the schema-v2 report pointer.  Preserve
+  # the historical zero exit code for compatibility, but never leave a
+  # RUNNING status that could be mistaken for a completed report when a
+  # crashed/mocked runner exits early without producing any evidence.
+  echo "❌ runner exited successfully without report manifest" >&2
   write_wrapper_status "INCOMPLETE" || true
 fi
 exit "$RUNNER_STATUS"

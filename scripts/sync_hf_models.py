@@ -22,16 +22,13 @@ import argparse
 import json
 import re
 import subprocess
-import sys
-from datetime import datetime
-import urllib.request
 import urllib.error
+import urllib.request
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
-
-from datetime import datetime
 
 
 def _update_yaml_meta(data: dict, section_key: str) -> None:
@@ -139,7 +136,11 @@ def scan_cookbook_models(sglang_repo: str, since_date: str = "2026-05-01") -> li
             fp = repo / rel
             if fp.exists() and fp not in files_to_scan:
                 files_to_scan.append(fp)
-            alt = rel.replace("docs_new/", "docs/") if "docs_new/" in rel else rel.replace("docs/", "docs_new/")
+            alt = (
+                rel.replace("docs_new/", "docs/")
+                if "docs_new/" in rel
+                else rel.replace("docs/", "docs_new/")
+            )
             alt_p = repo / alt
             if alt_p.exists() and alt_p not in files_to_scan:
                 files_to_scan.append(alt_p)
@@ -192,7 +193,10 @@ def scan_cookbook_models(sglang_repo: str, since_date: str = "2026-05-01") -> li
                 jsx_text = jsx_file.read_text(encoding="utf-8")
             except OSError:
                 continue
-            jsx_matches = re.findall(r'["\']([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+-[A-Za-z0-9]+)["\']', jsx_text)
+            jsx_matches = re.findall(
+                r'["\']([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+-[A-Za-z0-9]+)["\']',
+                jsx_text,
+            )
             for m in jsx_matches:
                 norm = _normalize_model_id(m)
                 if norm:
@@ -225,7 +229,6 @@ def fetch_model_size_gb(hf_model_id: str) -> int | None:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         siblings = data.get("siblings", [])
-        total_bytes = 0
         for sib in siblings:
             rfname = sib.get("rfilename", "")
             if rfname.endswith(".safetensors") or rfname.endswith(".bin"):
@@ -378,7 +381,13 @@ def save_models_yaml(data: dict) -> None:
         lines.append(f"  # ── {key}: {model_name} ({arch}, {prec}){tag} ─" + "─" * 20)
         # Dump this single model entry
         single = {key: val}
-        dumped = yaml.dump(single, default_flow_style=False, allow_unicode=True, sort_keys=False, indent=2)
+        dumped = yaml.dump(
+            single,
+            default_flow_style=False,
+            allow_unicode=True,
+            sort_keys=False,
+            indent=2,
+        )
         for dline in dumped.splitlines():
             if dline:
                 lines.append("  " + dline)
@@ -546,7 +555,13 @@ def generate_new_model_card(hf_id: str, info: dict, sglang_repo: str = "") -> di
     architectures = info.get("architectures", [])
     arch_str = " ".join(architectures).lower() if architectures else model_type.lower()
     has_gdn = info.get("has_gdn", False)
-    if has_gdn or "mamba" in arch_str or "gdn" in arch_str or "deltanet" in arch_str or "linear" in arch_str:
+    if (
+        has_gdn
+        or "mamba" in arch_str
+        or "gdn" in arch_str
+        or "deltanet" in arch_str
+        or "linear" in arch_str
+    ):
         arch = "moe_hybrid_gdn" if is_moe else "dense_hybrid_gdn"
     elif "deepseek" in arch_str or "dsv" in arch_str or "mla" in arch_str:
         arch = "moe"
@@ -586,7 +601,9 @@ def generate_new_model_card(hf_id: str, info: dict, sglang_repo: str = "") -> di
                 mlp_params = 3 * hidden * intermediate  # gate + up + down
                 if num_exp and is_moe:
                     mlp_params = num_exp * mlp_params
-                total_params = num_layers * (attn_params + mlp_params) + hidden * (info.get("vocab_size") or 0)
+                total_params = num_layers * (attn_params + mlp_params) + hidden * (
+                    info.get("vocab_size") or 0
+                )
                 prec = quant_method if quant_method != "none" else "bf16"
                 bytes_per_param = 2 if prec in ("fp8", "fp4", "nvfp4") else 4
                 est_gb = total_params * bytes_per_param / (1024**3)
@@ -595,7 +612,12 @@ def generate_new_model_card(hf_id: str, info: dict, sglang_repo: str = "") -> di
                 card["weight_gb"] = {}
 
     # Modalities
-    has_vision = bool(info.get("architectures")) and any("VL" in a or "Vision" in a or "Conditional" in a for a in info.get("architectures", []))
+    has_vision = bool(info.get("architectures")) and any(
+        "VL" in architecture
+        or "Vision" in architecture
+        or "Conditional" in architecture
+        for architecture in info.get("architectures", [])
+    )
     card["modalities"] = {
         "input": ["text", "image"] if has_vision else ["text"],
         "output": ["text"],
@@ -673,12 +695,13 @@ def generate_new_model_card(hf_id: str, info: dict, sglang_repo: str = "") -> di
         weight_key = "bf16"
     card["deployment"] = {
         "model_format": "huggingface",
-        "weight_size_gb": cookbook_weights.get(weight_key) or card.get("weight_gb", {}).get("estimated"),
+        "weight_size_gb": cookbook_weights.get(weight_key)
+        or card.get("weight_gb", {}).get("estimated"),
         "model_path": None,  # fill after haihub download
     }
 
     card["source_url"] = f"https://huggingface.co/{hf_id}"
-    card["notes"] = f"Auto-synced from HF config.json + SGLang cookbook."
+    card["notes"] = "Auto-synced from HF config.json + SGLang cookbook."
 
     return card
 
@@ -795,7 +818,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if hf_id not in existing_hf_ids:
             # New model — generate card
-            print(f"    [NEW] Generating model card...")
+            print("    [NEW] Generating model card...")
             card = generate_new_model_card(hf_id, hf_info, args.sglang_repo)
             model_index = len(models) + 1
             model_key = make_model_key(hf_id, model_index)
@@ -834,10 +857,12 @@ def main(argv: list[str] | None = None) -> int:
                         is_moe_val = mv.get("architecture",{}).get("is_moe")
                         mv["arch"] = "moe_hybrid_gdn" if is_moe_val else "dense_hybrid_gdn"
                         updated = True
-                        print(f"    [updated] hybrid_mamba=True, arch=" + str(mv.get("arch")))
+                        print("    [updated] hybrid_mamba=True, arch=" + str(mv.get("arch")))
                     # Update default_flags from cookbook if missing
                     ck_flags_obj = mv.get("default_flags", {})
-                    has_real_flags = any(v for v in ck_flags_obj.values() if v is not True and v) or (ck_flags_obj.get("trust-remote-code") == True and len(ck_flags_obj) > 1)
+                    has_real_flags = any(
+                        value for value in ck_flags_obj.values() if value is not True and value
+                    ) or (bool(ck_flags_obj.get("trust-remote-code")) and len(ck_flags_obj) > 1)
                     if not has_real_flags or len(ck_flags_obj) <= 1:
                         if args.sglang_repo:
                             mdx = find_cookbook_mdx(args.sglang_repo, hf_id)
@@ -852,8 +877,14 @@ def main(argv: list[str] | None = None) -> int:
                                     mv["mtp_params"] = ck_mtp
                                     updated = True
                                     print(f"    [updated] mtp_params={ck_mtp}")
-                                ck_weights = extract_weight_gb_from_cookbook(mdx, hf_id.split("/")[-1])
-                                if ck_weights and not any(v for v in mv.get("weight_gb",{}).values() if v):
+                                ck_weights = extract_weight_gb_from_cookbook(
+                                    mdx, hf_id.split("/")[-1]
+                                )
+                                if ck_weights and not any(
+                                    value
+                                    for value in mv.get("weight_gb", {}).values()
+                                    if value
+                                ):
                                     mv["weight_gb"] = ck_weights
                                     updated = True
                                     print(f"    [updated] weight_gb={ck_weights}")
@@ -882,8 +913,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  new models added: {len(new_models_added)}")
     print(f"  diffs found: {sum(len(d) for d in all_diffs.values())}")
     if new_models_added:
-        print(f"  [TODO] New model cards need manual completion:")
-        print(f"         family, weight_gb, default_flags, mtp_params, hybrid_mamba")
+        print("  [TODO] New model cards need manual completion:")
+        print("         family, weight_gb, default_flags, mtp_params, hybrid_mamba")
     return 0
 
 

@@ -1,0 +1,14 @@
+{
+  "candidate_id": "c019",
+  "requested_tp": 8,
+  "failure_statuses": [
+    "startup_failed",
+    "runtime_failed",
+    "benchmark_failed",
+    "transport_failed",
+    "invalid_result",
+    "interrupted"
+  ],
+  "expected_completion_state": "incomplete",
+  "expected_task_status": "INCOMPLETE"
+}
