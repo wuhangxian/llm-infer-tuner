@@ -139,6 +139,31 @@ SSH 到远程机器,起容器 → 起服务 → 自适应并发搜索 → 压测
 
 执行器直接读取 JobSpec 的 `workload` 和 `benchmark_method`,再从 `catalogs/workloads.yaml` 与 `references/benchmark_methods/*.json` 确定性拼出 `sglang.bench_serving` 命令。第二步不调用 `tclaude` 或 `claude`,也不受 AI 超时、限流或额度影响。
 
+### 用 Docker 镜像运行(无需下载项目)
+
+镜像包含执行器代码、Python 运行依赖、`jq` 和 SSH 工具；`input/`、`outputs/` 与 SSH 凭据在运行时挂载，不会被打进镜像。执行器仍会通过 SSH 到目标 GPU 机器，并在目标机启动 JobSpec 中的 SGLang 镜像。
+
+```bash
+# 构建(维护者执行一次)
+docker build -t llm-infer-tuner:0903-dorianwu .
+
+# 使用单文件配置执行压测；宿主机只需准备 config.json 和 SSH key
+docker run --rm \
+  -v "$PWD/config.json:/app/config.json:ro" \
+  -v "$PWD/outputs:/app/outputs" \
+  -v "$HOME/.ssh:/root/.ssh:ro" \
+  llm-infer-tuner:0903-dorianwu \
+  ./run_executor.sh /app/config.json
+
+# 只根据已有结果生成报告
+docker run --rm \
+  -v "$PWD/outputs/<job_id>:/work/result:ro" \
+  llm-infer-tuner:0903-dorianwu \
+  ./gen_report.sh /work/result
+```
+
+如需让其他人直接使用，应将镜像推送到团队 TCR 后把上面的本地标签替换为完整镜像地址。`gen_configs.sh` 的 AI 阶段仍需要在运行时提供已登录的 `tclaude`/`claude`，因此当前镜像定位为执行器和报告生成镜像。
+
 ### 方式 B: 手写配置 + 直接压测(一步)
 
 写一个 JSON 文件(含 _meta + candidates),直接跑:
