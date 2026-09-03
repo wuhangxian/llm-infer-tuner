@@ -51,6 +51,9 @@ COOKBOOK_DIRS = [
     "docs/cookbook/autoregressive",
     "docs_new/cookbook/autoregressive",
 ]
+KNOWN_SPECULATIVE_ALGORITHMS = {
+    "DFLASH", "DSPARK", "EAGLE", "EAGLE3", "FROZEN_KV_MTP", "STANDALONE", "NGRAM", "NONE",
+}
 
 
 def scan_cookbook_models(sglang_repo: str, since_date: str = "2026-05-01") -> list[str]:
@@ -400,10 +403,13 @@ def extract_mtp_params_from_cookbook(mdx_path: Path) -> dict[str, Any]:
     except OSError:
         return {}
     params: dict[str, Any] = {}
-    # speculative-algorithm
-    m = re.search(r'--speculative-algorithm\s+(\S+)', text)
+    # Restrict the value to an identifier. Cookbook prose/code fences often
+    # leave a trailing backtick or colon, which used to pollute models.yaml
+    # with values such as "EAGLE3`:".
+    m = re.search(r'''--speculative-algorithm(?:\s+|=)["']?([A-Za-z0-9_-]+)''', text)
     if m:
-        params["speculative-algorithm"] = m.group(1).strip('\"')
+        algorithm = m.group(1).upper()
+        params["speculative-algorithm"] = algorithm
     # speculative-num-steps
     m = re.search(r'--speculative-num-steps\s+(\d+)', text)
     if m:
@@ -416,6 +422,8 @@ def extract_mtp_params_from_cookbook(mdx_path: Path) -> dict[str, Any]:
     m = re.search(r'--speculative-num-draft-tokens\s+(\d+)', text)
     if m:
         params["speculative-num-draft-tokens"] = int(m.group(1))
+    if params.get("speculative-algorithm") not in KNOWN_SPECULATIVE_ALGORITHMS:
+        params.pop("speculative-algorithm", None)
     return params
 
 
@@ -586,9 +594,16 @@ def generate_new_model_card(hf_id: str, info: dict, sglang_repo: str = "") -> di
         if has_vision or "qwen" in model_name.lower():
             card["default_flags"]["trust-remote-code"] = True
 
-    # mtp_params from cookbook
+    # mtp_params from cookbook (kept for backward compatibility). The
+    # structured speculative_options field is the preferred extensible form.
     if cookbook_mtp:
         card["mtp_params"] = cookbook_mtp
+        algorithm = cookbook_mtp.get("speculative-algorithm")
+        if algorithm:
+            card["speculative_options"] = [{
+                "algorithm": algorithm,
+                "params": dict(cookbook_mtp),
+            }]
 
     # Deployment
     weight_key = card.get("default_precision", "fp8")
@@ -742,28 +757,39 @@ def main(argv: list[str] | None = None) -> int:
                         mv["arch"] = "moe_hybrid_gdn" if is_moe_val else "dense_hybrid_gdn"
                         updated = True
                         print(f"    [updated] hybrid_mamba=True, arch=" + str(mv.get("arch")))
-                    # Update default_flags from cookbook if missing
-                    ck_flags_obj = mv.get("default_flags", {})
-                    has_real_flags = any(v for v in ck_flags_obj.values() if v is not True and v) or (ck_flags_obj.get("trust-remote-code") == True and len(ck_flags_obj) > 1)
-                    if not has_real_flags or len(ck_flags_obj) <= 1:
-                        if args.sglang_repo:
-                            mdx = find_cookbook_mdx(args.sglang_repo, hf_id)
-                            if mdx:
-                                ck_flags = extract_default_flags_from_cookbook(mdx)
-                                if ck_flags and len(ck_flags) > len(ck_flags_obj):
-                                    mv["default_flags"] = ck_flags
-                                    updated = True
-                                    print(f"    [updated] default_flags={ck_flags}")
-                                ck_mtp = extract_mtp_params_from_cookbook(mdx)
-                                if ck_mtp and not mv.get("mtp_params"):
-                                    mv["mtp_params"] = ck_mtp
-                                    updated = True
-                                    print(f"    [updated] mtp_params={ck_mtp}")
-                                ck_weights = extract_weight_gb_from_cookbook(mdx, hf_id.split("/")[-1])
-                                if ck_weights and not any(v for v in mv.get("weight_gb",{}).values() if v):
-                                    mv["weight_gb"] = ck_weights
-                                    updated = True
-                                    print(f"    [updated] weight_gb={ck_weights}")
+                    mdx = find_cookbook_mdx(args.sglang_repo, hf_id) if args.sglang_repo else None
+                    if mdx:
+                        # Update default_flags from cookbook if missing.
+                        ck_flags_obj = mv.get("default_flags", {})
+                        has_real_flags = any(v for v in ck_flags_obj.values() if v is not True and v) or (ck_flags_obj.get("trust-remote-code") == True and len(ck_flags_obj) > 1)
+                        if not has_real_flags or len(ck_flags_obj) <= 1:
+                            ck_flags = extract_default_flags_from_cookbook(mdx)
+                            if ck_flags and len(ck_flags) > len(ck_flags_obj):
+                                mv["default_flags"] = ck_flags
+                                updated = True
+                                print(f"    [updated] default_flags={ck_flags}")
+
+                        # Always inspect MTP metadata. This also repairs old cards
+                        # polluted by cookbook punctuation such as "EAGLE3`:".
+                        ck_mtp = extract_mtp_params_from_cookbook(mdx)
+                        current_mtp = mv.get("mtp_params", {})
+                        current_algorithm = current_mtp.get("speculative-algorithm") if isinstance(current_mtp, dict) else None
+                        cookbook_algorithm = ck_mtp.get("speculative-algorithm")
+                        if ck_mtp and (not current_mtp or current_algorithm not in KNOWN_SPECULATIVE_ALGORITHMS):
+                            mv["mtp_params"] = ck_mtp
+                            if cookbook_algorithm:
+                                mv["speculative_options"] = [{
+                                    "algorithm": cookbook_algorithm,
+                                    "params": dict(ck_mtp),
+                                }]
+                            updated = True
+                            print(f"    [updated] mtp_params={ck_mtp}")
+
+                        ck_weights = extract_weight_gb_from_cookbook(mdx, hf_id.split("/")[-1])
+                        if ck_weights and not any(v for v in mv.get("weight_gb",{}).values() if v):
+                            mv["weight_gb"] = ck_weights
+                            updated = True
+                            print(f"    [updated] weight_gb={ck_weights}")
                     if updated:
                         mv["last_updated"] = datetime.now().strftime("%Y-%m-%d")
                         models_changed = True

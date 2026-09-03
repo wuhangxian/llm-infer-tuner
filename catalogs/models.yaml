@@ -1,3 +1,5 @@
+# 模型事实卡片。speculative_options 是可选的多算法声明；旧卡片的 mtp_params
+# 仍兼容，但新增模型优先使用 [{algorithm, params}]，不要把单一 MTP 配置当成所有投机算法。
 version: 3
 updated: 2026-08-26 22:15:29
 total: 225
@@ -1146,7 +1148,7 @@ models:
       reasoning-parser: qwen3
       tool-call-parser: qwen25
     mtp_params:
-      speculative-algorithm: 'EAGLE3`:'
+      speculative-algorithm: EAGLE3
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
@@ -1193,7 +1195,7 @@ models:
       reasoning-parser: qwen3
       tool-call-parser: qwen25
     mtp_params:
-      speculative-algorithm: 'EAGLE3`:'
+      speculative-algorithm: EAGLE3
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
@@ -1590,7 +1592,7 @@ models:
       reasoning-parser: qwen3
       tool-call-parser: qwen25
     mtp_params:
-      speculative-algorithm: 'EAGLE3`:'
+      speculative-algorithm: EAGLE3
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
@@ -1638,7 +1640,7 @@ models:
       reasoning-parser: qwen3
       tool-call-parser: qwen25
     mtp_params:
-      speculative-algorithm: 'EAGLE3`:'
+      speculative-algorithm: EAGLE3
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
@@ -1689,7 +1691,7 @@ models:
       reasoning-parser: qwen3
       tool-call-parser: qwen25
     mtp_params:
-      speculative-algorithm: 'EAGLE3`:'
+      speculative-algorithm: EAGLE3
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
@@ -1733,7 +1735,7 @@ models:
       reasoning-parser: qwen3
       tool-call-parser: qwen25
     mtp_params:
-      speculative-algorithm: 'EAGLE3`:'
+      speculative-algorithm: EAGLE
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
@@ -1780,7 +1782,7 @@ models:
       reasoning-parser: qwen3
       tool-call-parser: qwen25
     mtp_params:
-      speculative-algorithm: 'EAGLE3`:'
+      speculative-algorithm: EAGLE
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
@@ -1824,7 +1826,7 @@ models:
       reasoning-parser: qwen3
       tool-call-parser: qwen25
     mtp_params:
-      speculative-algorithm: 'EAGLE3`:'
+      speculative-algorithm: EAGLE
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
@@ -1872,7 +1874,7 @@ models:
       reasoning-parser: qwen3
       tool-call-parser: qwen25
     mtp_params:
-      speculative-algorithm: 'EAGLE3`:'
+      speculative-algorithm: EAGLE
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
@@ -1923,7 +1925,7 @@ models:
       reasoning-parser: qwen3
       tool-call-parser: qwen25
     mtp_params:
-      speculative-algorithm: 'EAGLE3`:'
+      speculative-algorithm: EAGLE
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
@@ -1971,7 +1973,7 @@ models:
       reasoning-parser: qwen3
       tool-call-parser: qwen25
     mtp_params:
-      speculative-algorithm: 'EAGLE3`:'
+      speculative-algorithm: EAGLE
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
@@ -2022,7 +2024,7 @@ models:
       reasoning-parser: qwen3
       tool-call-parser: qwen25
     mtp_params:
-      speculative-algorithm: 'EAGLE3`:'
+      speculative-algorithm: EAGLE
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
@@ -2066,7 +2068,7 @@ models:
       reasoning-parser: qwen3
       tool-call-parser: qwen25
     mtp_params:
-      speculative-algorithm: 'EAGLE3`:'
+      speculative-algorithm: EAGLE
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
@@ -2110,7 +2112,7 @@ models:
       reasoning-parser: qwen3
       tool-call-parser: qwen25
     mtp_params:
-      speculative-algorithm: 'EAGLE3`:'
+      speculative-algorithm: EAGLE
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
@@ -3071,7 +3073,7 @@ models:
       reasoning-parser: qwen3
       tool-call-parser: qwen25
     mtp_params:
-      speculative-algorithm: 'EAGLE3`:'
+      speculative-algorithm: EAGLE3
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
@@ -5447,7 +5449,7 @@ models:
       reasoning-parser: qwen3
       tool-call-parser: qwen25
     mtp_params:
-      speculative-algorithm: 'EAGLE3`:'
+      speculative-algorithm: EAGLE3
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
@@ -7240,7 +7242,7 @@ models:
       reasoning-parser: qwen3
       tool-call-parser: qwen25
     mtp_params:
-      speculative-algorithm: 'EAGLE3`:'
+      speculative-algorithm: EAGLE3
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
@@ -9126,7 +9128,7 @@ models:
     default_flags:
       tool-call-parser: llama3`
     mtp_params:
-      speculative-algorithm: 'EAGLE3`:'
+      speculative-algorithm: EAGLE3
       speculative-num-steps: 3
       speculative-eagle-topk: 1
       speculative-num-draft-tokens: 4
@@ -9882,4 +9884,3 @@ models:
     default_flags:
       reasoning-parser: glm45
       tool-call-parser: glm45
-

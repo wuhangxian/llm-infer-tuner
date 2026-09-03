@@ -52,7 +52,7 @@ def _build_prompt(job: JobSpec) -> str:
         "# 生成 SGLang 压测命令(客户端)\n\n"
         f"按 `{CLIENT_SKILL_DIR}/SKILL.md` 的读序与输出契约,为下面这个 JobSpec 生成"
         "每个并发档一条 `python -m sglang.bench_serving` 命令。\n\n"
-        "读:① 该 SKILL.md → ② 同目录 knowledge.md → ③ catalogs/workloads.yaml"
+        "读:① 该 SKILL.md → ② knowledge.md 和 references/rules/fairness.yaml → ③ catalogs/workloads.yaml"
         "(按 JobSpec.workload 取卡)→ ④ references/benchmark_methods/"
         "<JobSpec.benchmark_method>.json。\n\n"
         "host/port/model/输出文件用占位符 ${BENCHMARK_HOST} / ${BENCHMARK_PORT} / "
@@ -140,7 +140,7 @@ def rewrite_bench_command(
 ) -> tuple[str, int]:
     """Rewrite ONE bench command template for a given concurrency.
 
-    The fairness rule (see client knowledge §3): every candidate must be pressed
+    The fairness rule (see references/rules/fairness.yaml): every candidate must be pressed
     with the *same* workload, and per-concurrency num_prompts must scale as a
     constant ratio of C. So we take a single template (generated once per job by
     the client skill) and deterministically rewrite ONLY ``--max-concurrency``

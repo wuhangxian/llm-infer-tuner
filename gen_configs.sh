@@ -31,7 +31,17 @@ command -v jq >/dev/null || { echo "❌ 需要 jq" >&2; exit 1; }
 
 SKILL_DIR=".claude/skills/sglang-server-config-gen"
 [ -f "$SKILL_DIR/SKILL.md" ] || { echo "❌ 找不到 skill: $SKILL_DIR/SKILL.md(请在 repo 根运行)" >&2; exit 1; }
+RULES_DIR="$SKILL_DIR/references/rules"
+[ -f "$RULES_DIR/README.md" ] || { echo "❌ 找不到规则库说明: $RULES_DIR/README.md" >&2; exit 1; }
 command -v claude >/dev/null || { echo "❌ claude 不在 PATH" >&2; exit 1; }
+
+# 只校验知识库本身没有损坏；不校验或拦截 AI 生成的候选命令。
+if [ -f scripts/validate_knowledge.py ]; then
+  python3 scripts/validate_knowledge.py >/dev/null || {
+    echo "❌ 规则库校验失败，请先修复 references/rules/*.yaml" >&2
+    exit 1
+  }
+fi
 
 # 模型路径恒为占位符 —— 第一步机器无关,不绑死任何机器的物理路径。
 MODEL_PATH='${MODEL_PATH}'
@@ -67,11 +77,7 @@ mkdir -p "$(dirname "$OUT")"
 #      — 每条候选含 id + params + cmd + reasons 四个字段
 #      — 第 5 步 jq 再拆成一行一候选的 JSONL
 #
-# prompt 里还告诉 claude 该按顺序读 4 个知识库文件:
-#   ① SKILL.md     — 流程入口:该读什么、推导步骤、输出契约
-#   ② knowledge.md — 全部调优经验(§0-§9)
-#   ③ catalogs/    — gpu.yaml + models.yaml + workloads.yaml(按 job 里的 ID 查表)
-#   ④ catalogs/sglang-images.yaml  — 镜像信息(CUDA 版本、支持的 attention 后端)
+# prompt 里还告诉 claude 该按顺序读 skill、规则索引、主题规则和 catalogs。
 #
 # --model-path 在这里写死为 ${MODEL_PATH} 占位符,不绑定任何机器路径,
 # 第二步由 targets.json 填入实际路径。
@@ -104,9 +110,14 @@ ${JOB_JSON}
 
 ## 执行方式
 
-请按 \`${SKILL_DIR}/SKILL.md\` 的流程执行:读 knowledge.md + catalogs/*.yaml(含 sglang-images.yaml),
-按其中的约束和推导步骤生成候选配置。所有调优判据、硬约束、输出格式
-都在 SKILL.md 和 knowledge.md 里,这里不重复。
+请按 \`${SKILL_DIR}/SKILL.md\` 的流程执行:先读 knowledge.md 和
+references/rules/README.md，再按 JobSpec 读取 attention/parallelism/memory/speculative/
+scheduling/fairness 相关 YAML，最后读取 catalogs/*.yaml(含 sglang-images.yaml)。
+投机解码必须把模型卡的 speculative_options/mtp_params 与镜像卡的
+speculative_algorithms 取交集，NONE 保留为对照，不能只写死 EAGLE。
+所有普通调优判据和输出格式都在 SKILL.md、规则文件和 catalogs 里，这里不重复。
+规则是决策依据和风险说明，不是生成阶段的候选硬闸；experimental 或资料不完整的候选
+可以生成并交给执行器实测。
 
 ## 运行时信息(知识库里没有的)
 
@@ -121,7 +132,7 @@ EOF
 # ─────────────────────────────────────────────────────────────────────────
 # 用 claude -p "$PROMPT" 非交互模式调用 AI。关键参数:
 #   --add-dir .           让 claude 能读项目根下的 catalogs/ 等
-#   --add-dir $SKILL_DIR  让 claude 能读 SKILL.md/knowledge.md
+#   --add-dir $SKILL_DIR  让 claude 能读 SKILL.md/knowledge.md/references/rules
 #   --json-schema         约束 claude 返回 {candidates:[...]} 结构
 #   --output-format json  让 claude 输出 JSON(而非纯文本)
 # AI 读知识库 → 查表(gpu/model/workload/image)→ 推导 TP/attention/mem-fraction
@@ -129,7 +140,7 @@ EOF
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo "ℹ️  模型路径在命令里保留占位符 \${MODEL_PATH}(机器无关);第二步由 targets.json 填入实际路径。" >&2
 echo "ℹ️  输出 → $OUT" >&2
-echo "▶ 调 claude 生成配置(读 skill+knowledge+catalogs,几分钟)…" >&2
+echo "▶ 调 claude 生成配置(读 skill+rules+catalogs,几分钟)…" >&2
 RAW="$(claude -p "$PROMPT" \
   --output-format json \
   --json-schema "$SCHEMA" \

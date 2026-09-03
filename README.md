@@ -40,7 +40,29 @@ chmod 600 .env
 ./gen_configs.sh input/jobs/<job>.json
 ```
 
-AI 读 knowledge.md + catalogs(gpu/models/workloads/images),推导 TP/attention/mem-fraction/投机解码等参数,生成候选配置到 `outputs/<job_id>/configs.json`。
+AI 读规则索引、按主题拆分的 rules/*.yaml 和 catalogs(gpu/models/workloads/images),推导 TP/attention/mem-fraction/投机解码等参数,生成候选配置到 `outputs/<job_id>/configs.json`。投机解码会按模型声明与镜像能力取交集，不再写死 EAGLE。
+
+### 知识库如何扩展
+
+规则按主题放在 `.claude/skills/sglang-server-config-gen/references/rules/`：
+
+```text
+references/rules/
+├── attention.yaml
+├── parallelism.yaml
+├── memory.yaml
+├── speculative.yaml
+├── scheduling.yaml
+└── fairness.yaml
+```
+
+以后新增经验只需在对应文件 `rules` 数组末尾追加一条，填写唯一 `id`、适用条件、建议、证据和版本；`knowledge.md` 只做索引。提交前运行：
+
+```bash
+uv run python scripts/validate_knowledge.py
+```
+
+这个校验只保护规则库格式，不会把实验候选提前拦掉；`experimental` 规则仍会交给远程执行器实测。
 
 **第二步:远程压测 + 排名**
 
@@ -229,14 +251,22 @@ llm-infer-tuner/
 │
 ├── catalogs/                   # 引擎无关的共享事实
 │   ├── gpu.yaml                #   显卡信息(G01-G32, 含 sm_major/nvlink)
-│   ├── models.yaml             #   模型信息(M01-M225, 含架构/量化/MoE/parser/mtp)
+│   ├── models.yaml             #   模型信息(M01-M225, 含架构/量化/MoE/parser/mtp/speculative_options)
 │   ├── workloads.yaml          #   负载场景(W01-W10, 输入/输出长度)
-│   └── sglang-images.yaml      #   SGLang 镜像信息(I01-I03, 含 attention_backends/valid_flags)
+│   └── sglang-images.yaml      #   SGLang 镜像信息(I01-I03, 含 attention/speculative/valid_flags)
 │
 ├── .claude/skills/             # AI 读的知识库
 │   └── sglang-server-config-gen/
 │       ├── SKILL.md            #   流程入口
-│       ├── knowledge.md        #   全部调优经验(§0-§12)
+│       ├── knowledge.md        #   规则索引和新增流程
+│       └── references/rules/    #   按主题逐条追加的规则 YAML
+│           ├── README.md
+│           ├── attention.yaml
+│           ├── parallelism.yaml
+│           ├── memory.yaml
+│           ├── speculative.yaml
+│           ├── scheduling.yaml
+│           └── fairness.yaml
 │       └── (images.yaml 已移到 catalogs/)
 │
 ├── runners/                    # 第二步执行器(全确定性,无 AI)

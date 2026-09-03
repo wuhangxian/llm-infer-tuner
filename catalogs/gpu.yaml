@@ -1,6 +1,6 @@
 # GPU 目录(引擎无关)。key = JobSpec.gpu_model。
 # 字段:compute_cap/sm_major/nvlink/source。显存不在这里,在 job.json 的 gpu_memory_gb。
-# attention 后端选择见 knowledge.md §1,不在这里。
+# attention 后端选择见 .claude/skills/sglang-server-config-gen/references/rules/attention.yaml,不在这里。
 
 version: 1
 updated: 2026-08-25 16:09:57
@@ -150,7 +150,7 @@ gpu_catalog:
 
   # ========== Blackwell 工作站/消费 (SM120) ==========
   # ⚠️ 这一代是 SM120 ≠ SM100。大量 sglang Blackwell 优化 gate 写在 is_sm100_supported(),
-  #    SM120 静默不生效 —— 照抄 B200 配方会起不来。trtllm_mha 在 SM120 的分侧结论见 knowledge.md §1。
+  #    SM120 静默不生效 —— 照抄 B200 配方会起不来。trtllm_mha 在 SM120 的分侧结论见 rules/attention.yaml。
   # ── Blackwell (SM120) ──────────────────────────────────────
   G24_pro5000:
     aliases: [rtx pro 5000, rtx5000, pro 5000]

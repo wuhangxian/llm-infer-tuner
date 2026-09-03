@@ -5,7 +5,8 @@ sglang-images.yaml, and updates existing entries when parameters change.
 
 For each tag:
   - Clones (or updates) the SGLang repo at that tag
-  - Parses server_args.py with AST to extract valid_flags + attention_backends
+  - Parses server_args.py/spec_info.py to extract valid_flags, attention_backends,
+    and built-in speculative algorithm names
   - Extracts assert/raise constraints for a human-review report
   - Updates sglang-images.yaml if changed, or creates a new entry for new versions
 
@@ -45,6 +46,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 IMAGES_YAML = PROJECT_ROOT / "catalogs" / "sglang-images.yaml"
 SGLANG_REPO = "https://github.com/sgl-project/sglang.git"
 SERVER_ARGS_REL = "python/sglang/srt/server_args.py"
+SPEC_INFO_REL = "python/sglang/srt/speculative/spec_info.py"
 
 
 def list_all_tags() -> list[str]:
@@ -69,6 +71,19 @@ def get_existing_image_keys() -> list[str]:
     with open(IMAGES_YAML, encoding="utf-8") as f:
         data = yaml.safe_load(f)
     return list(data.get("images", {}).keys())
+
+
+def resolve_image_key(data: dict[str, Any], tag: str) -> str:
+    """Reuse an existing catalog key for a tag, including legacy Ixx keys."""
+    version = tag.lstrip("v")
+    images = data.get("images", {})
+    for key, entry in images.items():
+        if str(entry.get("sglang_version", "")) == version:
+            return key
+        image_ref = str(entry.get("image_ref", ""))
+        if re.search(rf":v?{re.escape(version)}(?:[-:]|$)", image_ref):
+            return key
+    return f"sglang-{version}"
 
 
 def clone_or_update(tag: str, repo_dir: Path) -> Path:
@@ -162,6 +177,7 @@ def extract_attention_backends(server_args_path: Path) -> list[str]:
                         )
         return sorted(backends)
 
+
     def _extract_from_arg_call(call_node: ast.Call) -> list[str] | None:
         """Extract choices from an Arg() or add_argument() call."""
         for kw in call_node.keywords:
@@ -210,6 +226,33 @@ def extract_attention_backends(server_args_path: Path) -> list[str]:
     return []
 
 
+def extract_speculative_algorithms(server_args_path: Path) -> list[str]:
+    """Extract built-in speculative algorithm names from spec_info.py.
+
+    The image catalog records names recognized by the engine. Model-specific
+    draft weights and parameters remain in models.yaml and are intersected at
+    generation time.
+    """
+    repo_root = server_args_path.parents[3]
+    spec_info_path = repo_root / SPEC_INFO_REL
+    if not spec_info_path.exists():
+        return []
+    source = spec_info_path.read_text(encoding="utf-8")
+    match = re.search(
+        r"class\s+SpeculativeAlgorithm\b(?P<body>.*?)(?=^class\s|\Z)",
+        source,
+        flags=re.DOTALL | re.MULTILINE,
+    )
+    if not match:
+        return []
+    names = re.findall(
+        r"^\s{4}([A-Z][A-Z0-9_]*)\s*=\s*auto\(\)",
+        match.group("body"),
+        re.MULTILINE,
+    )
+    return list(dict.fromkeys(names))
+
+
 
 def extract_constraints(server_args_path: Path) -> list[dict[str, str]]:
     """Extract assert/raise statements for constraint report."""
@@ -245,7 +288,8 @@ def save_constraints_report(constraints: list[dict], tag: str) -> None:
     report_path = reports_dir / f"constraints_{tag}.md"
     lines = [f"# SGLang {tag} Constraints Report\n",
              f"Auto-extracted from server_args.py ({len(constraints)} assert/raise)\n",
-             "Review and update knowledge.md section 5 if new constraints found.\n\n"]
+             "Review and update .claude/skills/sglang-server-config-gen/references/rules/\n"
+             "attention.yaml or speculative.yaml if new constraints are found.\n\n"]
     for i, c in enumerate(constraints, 1):
         lines.append("## " + str(i) + ". [" + c["type"] + "]\n```\n" + c["text"] + "\n```\n")
     report_path.write_text("\n".join(lines), encoding="utf-8")
@@ -253,7 +297,7 @@ def save_constraints_report(constraints: list[dict], tag: str) -> None:
 
 def process_tag(tag: str, repo_dir: Path, data: dict) -> bool:
     """Process a single tag. Returns True if sglang-images.yaml was changed."""
-    image_key = f"sglang-{tag.lstrip('v')}"
+    image_key = resolve_image_key(data, tag)
     is_new = image_key not in data.get("images", {})
 
     if is_new:
@@ -269,10 +313,12 @@ def process_tag(tag: str, repo_dir: Path, data: dict) -> bool:
 
     valid_flags = extract_valid_flags(server_args_path)
     attention_backends = extract_attention_backends(server_args_path)
+    speculative_algorithms = extract_speculative_algorithms(server_args_path)
     constraints = extract_constraints(server_args_path)
 
     print(f"    valid_flags: {len(valid_flags)}")
     print(f"    attention_backends: {len(attention_backends)} -> {attention_backends}")
+    print(f"    speculative_algorithms: {len(speculative_algorithms)} -> {speculative_algorithms}")
     print(f"    constraints: {len(constraints)}")
 
     save_constraints_report(constraints, tag)
@@ -289,6 +335,7 @@ def process_tag(tag: str, repo_dir: Path, data: dict) -> bool:
             "cuda_version": None,  # needs manual fill or Dockerfile inspection
             "digest": None,
             "attention_backends": attention_backends,
+            "speculative_algorithms": speculative_algorithms,
             "startup_floor": {
                 "verified": None,
                 "source": None,
@@ -324,6 +371,18 @@ def process_tag(tag: str, repo_dir: Path, data: dict) -> bool:
             if removed:
                 print(f"  [backends] -{sorted(removed)}")
             entry["attention_backends"] = sorted(new_backends)
+            changed = True
+
+        current_algorithms = set(entry.get("speculative_algorithms", []))
+        new_algorithms = set(speculative_algorithms)
+        if new_algorithms and current_algorithms != new_algorithms:
+            added = new_algorithms - current_algorithms
+            removed = current_algorithms - new_algorithms
+            if added:
+                print(f"  [speculative] +{sorted(added)}")
+            if removed:
+                print(f"  [speculative] -{sorted(removed)}")
+            entry["speculative_algorithms"] = sorted(new_algorithms)
             changed = True
 
         if changed:
