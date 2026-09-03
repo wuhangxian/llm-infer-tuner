@@ -1,213 +1,387 @@
 # llm-infer-tuner
 
-大模型推理参数寻优 Agent — 在指定模型 / 卡型 / 工作负载 / SLA 下,自动生成一批 SGLang 启动配置候选,拿到目标机器上真机压测,在 SLA 约束内按 goodput(有效吞吐)排名,输出可复现的最佳部署配置。
+大模型推理服务参数寻优工具：给定模型、GPU、SGLang 镜像、输入/输出长度和 SLA，先生成一组可执行的服务端配置，再到真实 GPU 机器上启动服务、压测、搜索可用并发度并排名，最后输出可复现的部署报告。
 
-核心理念:**AI 定考什么题,确定性代码当阅卷老师。**
+它把“让 AI 提出候选”和“用确定性程序做实验”拆开：AI 只负责配置推导，执行器不再二次调用 AI，而是按固定规则完成校验、部署、压测和排名。
 
----
+## 工作流
 
-## 先看这里(拿到手第一步)
+```text
+JobSpec(job.json)
+      │
+      ├─ gen_configs.sh
+      │    └─ tclaude 或 claude 读取 SKILL.md + knowledge.md + catalogs
+      │         → outputs/<job_id>/configs.jsonl
+      │
+      └─ run_executor.sh
+           └─ SSH 到目标 GPU 机 → Docker 启动 SGLang → /health 检查
+                → 预热 → 多并发压测 → SLA 过滤 → goodput 排名
+                     → outputs/<job_id>/results/*
+                              │
+                              └─ gen_report.sh → best_config.md
+```
 
-这个项目分三层能力,**门槛依次升高**。你不必有 GPU 机器也能验证核心逻辑。先确认你在哪一层:
+三个入口分别负责：
 
-| 层级 | 你能做什么 | 前置条件 | 大约耗时 |
-|------|-----------|---------|---------|
-| **L0 装环境 + 跑测试** | 装依赖,跑全套单测,确认代码是活的 | 只需 Python 3.11+ / uv / jq | ~1 分钟 |
-| **L1 AI 生成配置** | 让 AI 读知识库生成一批 SGLang 启动候选 | 额外需 `tclaude` 或公开 `claude` CLI 已登录 | 每次调用 ~1-10 分钟 |
-| **L2 真机压测 + 排名** | SSH 到 GPU 机器,起服务、压测、出排名 | 额外需一台可 SSH 的 GPU 机器(装 docker、有模型权重和镜像) | 每个 job 十几分钟起 |
+| 入口 | 作用 | 需要 AI 登录 | 需要目标 GPU 机 |
+| --- | --- | --- | --- |
+| `gen_configs.sh` | 根据 JobSpec 生成候选启动配置 | 是 | 否 |
+| `run_executor.sh` | 远程启动、压测、搜索并排名 | 否 | 是 |
+| `gen_report.sh` | 根据已有结果生成 Markdown 报告 | 否 | 否 |
 
-### L0 —— 30 秒验证代码可用(无需 GPU、无需 tclaude)
+## 功能总览
+
+### AI 配置规划
+
+- 默认使用腾讯内网 `tclaude`，也支持公开 `claude` CLI。
+- AI 按顺序读取调优规范、经验库、GPU/模型/负载/镜像目录，生成结构化候选。
+- 候选覆盖并行度、attention 后端、显存比例、KV cache、chunked prefill、调度策略和投机解码等参数。
+- `--agent` 切换 `tclaude`/`claude`，`--model` 覆盖模型；公开 `claude` 未指定模型时使用其默认模型。
+- 默认流式显示读取和产出事件，并把完整原始返回保存到 `claude-raw-outputs/`。
+- AI 调用带单次超时、TERM→KILL 宽限和有限重试；失败或中断不会覆盖已有正式配置。
+
+### 生成后的硬校验
+
+候选生成后，代码会拒绝确定无法启动的配置：
+
+- attention 后端必须同时满足 GPU、CUDA 和目标 SGLang 镜像的支持范围。
+- TP/EP、MoE 专家数、块量化切分等整除关系必须合法；dense 模型不会错误生成 EP 轴。
+- 启动命令中的参数必须属于目标镜像有效参数白名单，别名会按镜像版本翻译。
+
+### 远程真机执行
+
+`run_executor.sh` 通过 SSH 连接目标机器，并在目标机器上完成：
+
+- SSH、GPU 数量/显存、模型目录、SGLang 镜像和端口的 preflight 校验。
+- 清理同名旧容器、占用 GPU 的进程和冲突端口。
+- 为每个候选启动独立服务，轮询 `/health`，记录启动失败原因并按配置重试。
+- 自动发现 NUMA 分组，让同一个 TP 实例尽量落在同一 NUMA 节点。
+- 多候选并行执行，每个候选使用独立 GPU 和端口；也可用 `FILL_HOST=1` 做整机满载第二轮实测。
+- 先 warmup 再正式压测，避免预热数据污染正式结果。
+- 自适应搜索并发度，按 SLA 过滤延迟、成功率和输出完整性，再按 goodput 排名。
+- 压测命令由 `workload` 和 `benchmark_method` 确定性拼装，执行阶段不调用 AI，结果可重复审计。
+
+### 公平性和特殊模型约束
+
+- 所有候选最终都会强制带且只带一个 `--disable-radix-cache`，避免固定测试请求命中前缀缓存，污染候选对比。
+- Mamba/GDN 模型只使用与关闭 radix cache 兼容的 `no_buffer`；依赖 radix cache 的 `extra_buffer` 不会生成。
+- 投机解码是可搜索轴，但是否生成由模型卡片的 `mtp_params` 和硬约束决定。自带 MTP 权重的 EAGLE/NEXTN 类方案可以直接候选；需要外挂 draft 模型的算法必须同时提供 `speculative_draft_model_path`，否则会被排除。
+- 不会把 workload 的输入/输出长度错误写成 `--context-length`；服务上下文长度由模型和 SGLang 自身配置决定。
+
+### 可读报告
+
+`gen_report.sh` 只读取已有的排名、候选和结果文件，不重新压测。报告展示：
+
+- 任务、模型、镜像、GPU、负载和 SLA。
+- 最佳候选的生效参数与完整启动命令。
+- 最佳并发度、TTFT、TPOT、吞吐、成功率和输出完整性。
+- 基线对比、候选差异、失败原因和结果文件位置。
+
+### 知识库自动同步
+
+`update.sh` 会同步 SGLang 参数、attention 后端、模型架构/量化/MoE/MTP 信息和标准 workload，并生成待审核的约束 diff。新增模型、GPU、镜像或经验，优先修改 `catalogs/` 和 `knowledge.md`，不需要改主执行流程。
+
+## 推荐用法：直接使用 Docker 镜像
+
+镜像已包含 Python/uv、Node.js、`tclaude`、公开 `claude`、`jq`、SSH 和 `sshpass`。模型权重、目标 GPU 机和登录态不打进镜像，而是在运行时提供。
+
+镜像地址：
 
 ```bash
-cd llm-infer-tuner
-uv sync                                  # 装依赖(pydantic/pyyaml/typer 等)
-uv run python -m pytest tests/ -q        # 跑全套单测
+ghcr.io/wuhangxian/llm-infer-tuner:0903-dorianwu
 ```
 
-预期看到:
+GHCR 包已关联到本项目：[查看镜像包](https://github.com/users/wuhangxian/packages/container/package/llm-infer-tuner)。该包目前为 private，拉取前需要有权限的 GitHub 登录态。
 
-```
-122 passed in ~30s
-```
+本文件也会被复制到镜像内的 `/app/README.md`，因此在线项目 README 和容器内说明保持一致。
 
-**这一步不碰任何 GPU、不发任何网络请求**,纯确定性逻辑(配置拼装、并发搜索、goodput 排名、schema 校验)全部覆盖。想快速确认"代码是不是能跑",跑这一条就够了。
-
-L1 / L2 的完整跑法见下面「快速开始」和「两种使用方式」。**没有 GPU 机器时,L2 无法本地演示**(执行器必须连真机 SSH,没有 dry-run 模式)——这是设计如此,不是缺陷。
-
----
-
-## 快速开始
-
-### 0. 前置(按层级递增)
-
-- **L0(跑测试)**:Python 3.11+ + [uv](https://github.com/astral-sh/uv) + `jq`
-- **L1(AI 生成)**:额外需一个已配置好的 Claude Code CLI——`tclaude`(腾讯内网)**或**原版 `claude`。用 `--agent` 选,详见下文。
-- **L2(真机压测)**:额外需一台目标 GPU 机器 —— SSH 可达、已装 docker、已备好模型权重和 sglang 镜像
+### 1. 拉取镜像和准备目录
 
 ```bash
-uv sync
+docker login ghcr.io
+docker pull ghcr.io/wuhangxian/llm-infer-tuner:0903-dorianwu
+
+export TUNER_IMAGE=ghcr.io/wuhangxian/llm-infer-tuner:0903-dorianwu
+
+mkdir -p input/jobs input/targets input/configs outputs claude-raw-outputs
+mkdir -p "$HOME/.tclaude" "$HOME/.claude"
 ```
 
-### 1. 登录 AI CLI(仅 L1 需要;只跑 L0/L2 可跳过)
+宿主机的 `input/`、`outputs/`、`claude-raw-outputs/` 是运行时挂载目录；镜像内已经有代码和知识库，不需要把项目源码复制进容器。
 
-项目支持两个命令行契约完全一致的 Claude Code CLI,用 `--agent` 选:
+### 2. 首次登录 AI CLI
 
-```bash
-# 腾讯内网(默认,仅腾讯员工):
-npm install -g @tencent/tclaude --engine-strict --registry=https://mirrors.tencent.com/npm
-tclaude login && tclaude --version
+登录态必须持久化挂载；只在临时容器里登录而不挂载目录，容器删除后登录态也会消失。
 
-# 或原版 Claude Code(默认用户已完成账号或网关认证配置):
-curl -fsSL https://claude.ai/install.sh | bash
-export PATH="$HOME/.local/bin:$PATH" && claude --version
-```
-
-默认用户已经配置好所选 CLI 的登录态或网关环境变量；本项目只负责选择 CLI 和模型，不负责管理认证信息。
-
----
-
-## 两种使用方式
-
-### 方式 A: AI 生成 + 自动压测(两步)
-
-**第一步:AI 生成候选配置**
+腾讯内网账号使用 `tclaude`：
 
 ```bash
-# 默认 agent=tclaude,默认模型 claude-hy3(腾讯内网)
-./gen_configs.sh input/jobs/<job>.json
-
-# 仍用 tclaude,临时选择其他网关模型
-./gen_configs.sh --model claude-opus-4-8 input/jobs/<job>.json
-./gen_configs.sh --model 'claude-glm-5.2[1m]' input/jobs/<job>.json
-
-# 用公开 claude CLI(非腾讯员工):不指定 --model 时用 claude 自身默认模型
-./gen_configs.sh --agent claude input/jobs/<job>.json
-./gen_configs.sh --agent claude --model claude-opus-4-8 input/jobs/<job>.json
-```
-
-> `--agent tclaude|claude` 选用哪个 CLI(默认 `tclaude`)。两者命令行契约一致
-> (tclaude 内嵌 `@anthropic-ai/claude-code`),故只切 binary 与默认模型。
-> AI CLI 只用于 L1 生成候选。L2 不调用 AI,不需要登录态、Token 或模型额度。
-
-AI 读 knowledge.md + catalogs(gpu/models/workloads/images),推导 TP/attention/mem-fraction/投机解码等参数,生成候选配置到 `outputs/<job_id>/configs.jsonl`。
-
-#### 超时与重试防护(tclaude / claude 都生效)
-
-这层防护由通用守护器 `runners/tclaude_guard.py` 实现,它包住的是 `--agent` 选中的 CLI 命令本身,**不区分 tclaude 还是公开 claude**——两者享受完全相同的超时、重试与信号清理(文件名叫 tclaude_guard 只是历史命名)。所以 `--agent claude` 的调用同样受保护:
-
-```bash
-# 公开 claude 也有超时重试;把单次软超时调到 15 分钟
-GEN_TIMEOUT_SECONDS=900 ./gen_configs.sh --agent claude input/jobs/<job>.json
-```
-
-`gen_configs.sh` 默认给每次 CLI 调用设置 600 秒软超时。超时后先终止本次 CLI 进程组,再使用**同一个 agent、同一个模型、完全相同的参数重试 1 次**;不会自动切换到 Opus 或其他模型、也不会在 tclaude 与 claude 之间切换。第二次仍超时会以退出码 `124` 结束,按 `Ctrl-C` 会清理子进程并以 `130` 结束。
-
-```bash
-# 单次软超时改为 15 分钟
-GEN_TIMEOUT_SECONDS=900 ./gen_configs.sh input/jobs/<job>.json
-
-# TERM 后最多等 15 秒再强制 KILL
-GEN_TIMEOUT_GRACE_SECONDS=15 ./gen_configs.sh input/jobs/<job>.json
-
-# 禁止自动重试
-GEN_MAX_RETRIES=0 ./gen_configs.sh input/jobs/<job>.json
-```
-
-默认值及范围：
-
-- `GEN_TIMEOUT_SECONDS=600`，可设为 `1..86400`。
-- `GEN_TIMEOUT_GRACE_SECONDS=10`，可设为 `1..300`。
-- `GEN_MAX_RETRIES=1`，可设为 `0..10`。
-
-每次运行、每次尝试的 stdout/stderr 都分别保存在 `claude-raw-outputs/`，文件名包含运行 ID 和 `attempt-N`。失败或中断不会覆盖已有的正式 `configs.jsonl`；新候选只有在完整解析成功后才原子替换正式输出。
-
-**第二步:远程压测 + 排名**
-
-```bash
-./run_executor.sh input/jobs/<job>.json input/targets/<target>.json
-```
-
-SSH 到远程机器,起容器 → 起服务 → 自适应并发搜索 → 压测 → 排名 → 输出 `outputs/<job_id>/results/ranking.json`。
-
-压测完成后可单独生成一份便于人工阅读的最佳参数报告（不会重新压测，也不会修改排名文件）：
-
-```bash
-./gen_report.sh outputs/<job_id>
-```
-
-也可以直接传入 `outputs/<job_id>/results`。脚本会在传入的目录中生成 `best_config.md`，报告包含最佳候选的生效参数、启动命令、SLA 指标、与其他候选/baseline 的差异，以及候选生成时记录的配置依据。
-
-执行器直接读取 JobSpec 的 `workload` 和 `benchmark_method`,再从 `catalogs/workloads.yaml` 与 `references/benchmark_methods/*.json` 确定性拼出 `sglang.bench_serving` 命令。第二步不调用 `tclaude` 或 `claude`,也不受 AI 超时、限流或额度影响。
-
-### 用 Docker 镜像运行(无需下载项目)
-
-镜像包含执行器代码、Python 运行依赖、Node.js、`tclaude`、公开 `claude`、`jq` 和 SSH 工具；`input/`、`outputs/`、SSH key 与 AI CLI 登录态在运行时挂载，不会被打进镜像。执行器仍会通过 SSH 到目标 GPU 机器，并在目标机启动 JobSpec 中的 SGLang 镜像。
-
-```bash
-# 构建(维护者执行一次)
-docker build -t llm-infer-tuner:0903-dorianwu .
-
-# 首次使用时登录 AI CLI(二选一或都登录；登录目录建议持久化)
-docker run -it --rm \
-  -v "$HOME/.claude:/home/runner/.claude" \
+docker run --rm -it \
   -v "$HOME/.tclaude:/home/runner/.tclaude" \
-  llm-infer-tuner:0903-dorianwu \
-  tclaude login
+  "$TUNER_IMAGE" tclaude login
+```
 
-# AI 生成候选配置(也可把 tclaude 换成 claude)
+如果终端提示浏览器没有自动打开，就复制它打印的 URL 到浏览器完成登录，再回到终端等待完成。
+
+公开 Claude 账号使用 `claude`：
+
+```bash
+docker run --rm -it \
+  -v "$HOME/.claude:/home/runner/.claude" \
+  "$TUNER_IMAGE" claude login
+```
+
+可以同时挂载并登录两个 CLI；脚本通过 `--agent tclaude` 或 `--agent claude` 选择实际使用的一个。登录信息只在运行时挂载，不会固化进镜像。
+
+### 3. 第一步：生成候选配置
+
+准备一个 `input/jobs/<job>.json`，格式见后文。然后运行：
+
+```bash
 docker run --rm \
   -v "$PWD/input:/app/input:ro" \
   -v "$PWD/outputs:/app/outputs" \
-  -v "$HOME/.claude:/home/runner/.claude" \
+  -v "$PWD/claude-raw-outputs:/app/claude-raw-outputs" \
   -v "$HOME/.tclaude:/home/runner/.tclaude" \
-  llm-infer-tuner:0903-dorianwu \
-  ./gen_configs.sh input/jobs/<job>.json
-
-# 使用单文件配置执行压测；宿主机只需准备 config.json 和 SSH key
-docker run --rm \
-  -v "$PWD/config.json:/app/config.json:ro" \
-  -v "$PWD/outputs:/app/outputs" \
-  -v "$HOME/.ssh:/home/runner/.ssh:ro" \
-  llm-infer-tuner:0903-dorianwu \
-  ./run_executor.sh /app/config.json
-
-# 只根据已有结果生成报告
-docker run --rm \
-  -v "$PWD/outputs/<job_id>:/work/result:ro" \
-  llm-infer-tuner:0903-dorianwu \
-  ./gen_report.sh /work/result
+  "$TUNER_IMAGE" \
+  ./gen_configs.sh input/jobs/qwen35-27-input8k-output1k-cand16.json
 ```
 
-如需让其他人直接使用，应将镜像推送到团队 TCR 后把上面的本地标签替换为完整镜像地址。镜像内虽然包含两个 AI CLI，但登录态始终在运行时提供，不会固化到镜像中。
+默认输出：
 
-### 方式 B: 手写配置 + 直接压测(一步)
+```text
+outputs/<job_id>/configs.jsonl
+claude-raw-outputs/<run-id>.stdout.jsonl
+claude-raw-outputs/<run-id>.stderr.log
+```
 
-写一个 JSON 文件(含 _meta + candidates),直接跑:
+切换公开 Claude 或调整模型：
+
+```bash
+docker run --rm \
+  -v "$PWD/input:/app/input:ro" \
+  -v "$PWD/outputs:/app/outputs" \
+  -v "$PWD/claude-raw-outputs:/app/claude-raw-outputs" \
+  -v "$HOME/.claude:/home/runner/.claude" \
+  "$TUNER_IMAGE" \
+  ./gen_configs.sh --agent claude --model claude-opus-4-8 \
+  input/jobs/qwen35-27-input8k-output1k-cand16.json
+```
+
+常用环境变量：
+
+```bash
+# 默认单次 600 秒、超时后再重试 1 次；下面示例改为 900 秒且不重试
+docker run --rm -e GEN_TIMEOUT_SECONDS=900 -e GEN_MAX_RETRIES=0 \
+  -v "$PWD/input:/app/input:ro" \
+  -v "$PWD/outputs:/app/outputs" \
+  -v "$PWD/claude-raw-outputs:/app/claude-raw-outputs" \
+  -v "$HOME/.tclaude:/home/runner/.tclaude" \
+  "$TUNER_IMAGE" ./gen_configs.sh input/jobs/<job>.json
+
+# GEN_STREAM=0 使用一次性 JSON 返回，默认 GEN_STREAM=1
+```
+
+### 4. 第二步：远程启动、压测和排名
+
+准备 `input/targets/<target>.json`。目标机器必须有 Docker、NVIDIA 容器运行时、模型权重和 JobSpec 指定的 SGLang 镜像；运行此工具的机器不需要 GPU。
+
+```bash
+docker run --rm \
+  -v "$PWD/input:/app/input:ro" \
+  -v "$PWD/outputs:/app/outputs" \
+  -v "$HOME/.ssh:/home/runner/.ssh:ro" \
+  "$TUNER_IMAGE" \
+  ./run_executor.sh \
+  input/jobs/qwen35-27-input8k-output1k-cand16.json \
+  input/targets/qwen35-27-input8k-output1k-cand16-100-67-146-43.json
+```
+
+默认结果目录：
+
+```text
+outputs/<job_id>/results/
+├── task_status.json
+├── candidate_results.jsonl
+├── ranking.json
+└── <candidate-id>/              # server、bench、启动尝试日志和原始结果
+```
+
+整机满载第二轮实测：
+
+```bash
+docker run --rm \
+  -e FILL_HOST=1 \
+  -e MAX_PARALLEL=8 \
+  -v "$PWD/input:/app/input:ro" \
+  -v "$PWD/outputs:/app/outputs" \
+  -v "$HOME/.ssh:/home/runner/.ssh:ro" \
+  "$TUNER_IMAGE" \
+  ./run_executor.sh input/jobs/<job>.json input/targets/<target>.json
+```
+
+`FILL_HOST=1` 会把候选复制成 `floor(gpu_count / tp_size)` 个实例，在整机上真实并发求和；不设置时只做默认的候选级搜索。
+
+服务启动防护也可以按机器情况调整：
+
+```bash
+STARTUP_STALL_TIMEOUT_SECONDS=600 \
+STARTUP_HARD_TIMEOUT_SECONDS=1800 \
+STARTUP_MAX_ATTEMPTS=3 \
+./run_executor.sh input/jobs/<job>.json input/targets/<target>.json
+```
+
+### 5. 第三步：生成报告
+
+```bash
+docker run --rm \
+  -v "$PWD/outputs:/app/outputs:rw" \
+  "$TUNER_IMAGE" \
+  ./gen_report.sh outputs/<job_id>
+```
+
+报告写入 `outputs/<job_id>/best_config.md`。它不会启动服务，也不会重新消耗 GPU 机器上的压测时间。
+
+### Docker 常见问题
+
+- `permission denied`：镜像默认用 UID/GID `1000:1000` 的 `runner` 用户运行。确保宿主机的 `outputs/` 和 `claude-raw-outputs/` 可由 UID 1000 写入，例如 `sudo chown -R 1000:1000 outputs claude-raw-outputs`。
+- `docker.sock permission denied`：这是宿主机用户没有 Docker 权限，不是镜像内程序错误；把用户加入 `docker` 组后重新登录，或按机器规范使用 Docker。
+- `tclaude` 每次都要求登录：通常是没有挂载 `$HOME/.tclaude`，或者挂载到了错误的容器路径。镜像中的对应路径是 `/home/runner/.tclaude`。
+- `gen_configs.sh` 有原始日志但没有正式 `configs.jsonl`：先检查 `outputs/` 写权限；脚本只有在结构化返回完整解析成功后才原子替换正式文件。
+- 远程 `/health` 不通过：优先查看 `outputs/<job_id>/results/<candidate-id>/server*.log`，常见原因是模型路径、目标镜像、TP/EP 整除关系、显存比例或模型专属参数不匹配。
+- 本地没有 GPU：可以生成配置和报告；真实压测必须能 SSH 到一台有目标 GPU、模型和 SGLang 镜像的机器，本项目没有“本地无 GPU 的假压测”模式。
+
+## 使用源码运行
+
+如果希望修改脚本或知识库，可以直接使用 GitHub 或工蜂上的代码：
+
+```bash
+git clone -b main https://github.com/wuhangxian/llm-infer-tuner.git
+cd llm-infer-tuner
+uv sync
+```
+
+生成候选和执行器的命令与镜像内完全相同：
+
+```bash
+./gen_configs.sh input/jobs/<job>.json
+./run_executor.sh input/jobs/<job>.json input/targets/<target>.json
+./gen_report.sh outputs/<job_id>
+```
+
+开发依赖包含 pytest、ruff 和 pyright；需要自检时可运行：
+
+```bash
+uv run python -m pytest tests/ -q
+```
+
+## 两种执行模式
+
+### 模式 A：JobSpec + TargetSpec（推荐）
+
+这是完整的两阶段流程：JobSpec 描述“要测什么”，TargetSpec 描述“去哪台机器测”。候选配置默认放在 `outputs/<job_id>/configs.jsonl`，也可以把第三个参数显式指定为其他路径。
+
+```bash
+./run_executor.sh <job.json> <target.json> [configs.jsonl] [results_dir]
+```
+
+### 模式 B：单文件手写配置
+
+适合不调用 AI、直接复现一组已知配置。单文件使用 `.json` 后缀，包含 `_meta` 和 `candidates`：
 
 ```bash
 ./run_executor.sh input/configs/<config>.json
 ```
 
-JSON 格式:
+这种模式仍然经过相同的远程启动、健康检查、压测、SLA 过滤和排名流程。
+
+## 输入文件
+
+### JobSpec：`input/jobs/<job>.json`
+
+```json
+{
+  "job_id": "qwen35-27b-fp8_pro5000_8x72g_input8k-output1k-cand16",
+  "engine": "sglang",
+  "gpu_model": "G24_pro5000",
+  "gpu_count": 8,
+  "gpu_memory_gb": 72,
+  "model": "M41_qwen3-5-27b",
+  "image": "I03_sglang-v0.5.16",
+  "workload": "W10_input-8k-output-1k",
+  "benchmark_method": "sglang-bench-serving",
+  "sla": {
+    "max_avg_ttft_ms": 2000,
+    "max_avg_tpot_ms": 80,
+    "min_success_rate": 0.99
+  },
+  "search": {
+    "max_candidates": 16,
+    "max_runtime_minutes": 180,
+    "baseline": {
+      "tp_size": 1,
+      "attention_backend": "flashinfer",
+      "mem_fraction_static": 0.80
+    },
+    "baseline_threshold_pct": 5
+  }
+}
+```
+
+字段含义：
+
+| 字段 | 含义 |
+| --- | --- |
+| `gpu_model` | `catalogs/gpu.yaml` 中的 GPU 卡型 ID |
+| `gpu_count` / `gpu_memory_gb` | 目标 GPU 数量和单卡显存 |
+| `model` | `catalogs/models.yaml` 中的模型 ID |
+| `image` | `catalogs/sglang-images.yaml` 中的 SGLang 镜像 ID |
+| `workload` | `catalogs/workloads.yaml` 中的输入/输出长度和采样配置 |
+| `sla` | 平均 TTFT、平均 TPOT、最低成功率约束 |
+| `search.max_candidates` | 非 baseline 候选上限 |
+| `search.baseline` | 可选的用户基线；存在时不占 `max_candidates` 名额 |
+| `search.baseline_threshold_pct` | 相对 baseline 的 goodput 门槛，用于比较标记 |
+
+填写 `search.baseline` 后，基线会作为第一条候选用于复现和对比；其余候选才消耗 `max_candidates` 名额。无论 AI 是否忘记填写，执行器都会把所有实际测试的候选统一置为 radix off。
+
+### TargetSpec：`input/targets/<target>.json`
+
+```json
+{
+  "gpu_model": "G24_pro5000",
+  "gpu_count": 8,
+  "gpu_memory_gb": 72,
+  "ssh_target": "ubuntu@100.67.146.43",
+  "ssh_password": "",
+  "model_host_dir": "/data/autotune/models/Qwen3.5-27B",
+  "model_container_path": "/data/autotune/models/Qwen3.5-27B",
+  "image_ref": "hai-beijing.tencentcloudcr.com/ai/sglang:v0.5.16-cu129",
+  "port": 30000,
+  "remote_outputs_dir": ""
+}
+```
+
+`image_ref` 是目标 GPU 机上运行的 SGLang 服务镜像，不是本项目的 tuner 镜像。优先使用 SSH key；如确实需要密码，可填写 `ssh_password`，但不要把含密码的文件提交到 Git。
+
+### 单文件配置：`input/configs/<config>.json`
 
 ```json
 {
   "_meta": {
-    "job_id": "qwen38-27b-test",
+    "job_id": "qwen35-manual-test",
     "gpu_model": "G24_pro5000",
     "gpu_count": 8,
     "gpu_memory_gb": 72,
-    "workload": "W04_input-4k-output-1k",
+    "workload": "W10_input-8k-output-1k",
     "benchmark_method": "sglang-bench-serving",
     "sla": {
       "max_avg_ttft_ms": 2000,
       "max_avg_tpot_ms": 80,
       "min_success_rate": 0.99
     },
-    "ssh_target": "ubuntu@122.51.115.16",
-    "ssh_password": "",
-    "model_host_dir": "/data/models/your-model/",
-    "model_container_path": "/data/models/your-model/",
+    "ssh_target": "ubuntu@100.67.146.43",
+    "model_host_dir": "/data/autotune/models/Qwen3.5-27B",
+    "model_container_path": "/data/autotune/models/Qwen3.5-27B",
     "image_ref": "hai-beijing.tencentcloudcr.com/ai/sglang:v0.5.16-cu129",
     "port": 30000
   },
@@ -218,239 +392,112 @@ JSON 格式:
         "tp_size": 4,
         "attention_backend": "flashinfer",
         "mem_fraction_static": 0.88,
-        "trust_remote_code": true,
-        "disable_radix_cache": true
+        "trust_remote_code": true
       },
-      "reasons": ["TP4+flashinfer+mf0.88"]
+      "reasons": ["TP4 + flashinfer + 显存比例 0.88"]
     }
   ]
 }
 ```
 
-**只需填 `params`,执行器自动拼成完整启动命令。** 字段名 `tp_size` → flag `--tp-size`(下划线转连字符),布尔 `true` → 裸 flag,`false` → 不写。`--model-path`、`--host`、`--port` 自动补全。
+`params` 中的下划线会自动转换为 SGLang 的连字符参数，`true` 会变成裸 flag；`--model-path`、`--host`、`--port` 和强制的 `--disable-radix-cache` 由执行器补齐或校正。
 
-可填的参数包括但不限于:
-- 基础:`tp_size`/`pp_size`/`ep_size`/`attention_backend`/`mem_fraction_static`/`kv_cache_dtype`/`chunked_prefill_size`/`schedule_conservativeness`/`page_size`/`disable_radix_cache`
-- 投机解码:`speculative_algorithm`/`speculative_num_steps`/`speculative_eagle_topk`/`speculative_num_draft_tokens`/`speculative_draft_model_path`
-- Mamba/GDN:`mamba_radix_cache_strategy`/`mamba_full_memory_ratio`/`mamba_ssm_dtype`
-- 模型专属:`trust_remote_code`/`reasoning_parser`/`tool_call_parser`
-- 任何 SGLang launch_server 认的参数
+## 可搜索的参数轴
 
----
+具体候选由模型、GPU、镜像和知识库共同决定，不是把所有参数盲目做笛卡尔积。常见参数包括：
 
-## 功能特性
+- 并行：`tp_size`、`pp_size`、MoE 的 `ep_size`。
+- Attention：`attention_backend`、`page_size`。
+- 显存和调度：`mem_fraction_static`、`chunked_prefill_size`、`max_running_requests`、`schedule_conservativeness`、`kv_cache_dtype`。
+- 投机解码：`speculative_algorithm`、`speculative_num_steps`、`speculative_eagle_topk`、`speculative_num_draft_tokens`、`speculative_draft_model_path`。
+- 模型专属：`trust_remote_code`、`reasoning_parser`、`tool_call_parser` 以及模型卡声明的其他 flag。
+- 混合 Mamba/GDN：`mamba_radix_cache_strategy` 等字段用于审计，但在本项目公平性口径下最终使用 `no_buffer`/radix off。
 
-### 基线配置 (Baseline)
+## 排名口径和结果文件
 
-在 job.json 的 `search` 里加 `baseline` 字段(可选):
+执行器只把同时满足以下条件的并发档位用于排名：有完成请求、成功率满足 SLA、平均 TTFT/TPOT 满足 SLA，且平均输出长度没有明显截断。
 
-```json
-"search": {
-  "max_candidates": 16,
-  "max_runtime_minutes": 180,
-  "baseline": {
-    "tp_size": 4,
-    "attention_backend": "flashinfer",
-    "mem_fraction_static": 0.88
-  },
-  "baseline_threshold_pct": 5
-}
+核心归一化指标是：
+
+```text
+goodput_per_host = total_throughput × (gpu_count / tp_size)
 ```
 
-- `baseline` 里填任意参数,AI 补全其余,生成基线候选(id="baseline")放在第一条
-- 基线不算在 max_candidates 名额里(总数 = N+1)
-- `baseline_threshold_pct: 5` → 只保留比基线 goodput 高 5% 以上的候选
-- 不写 baseline 时行为不变
+这样 TP2 的多实例总吞吐可以和 TP8 的单实例吞吐公平比较。每个候选的详细结果会写入：
 
-### NUMA 感知 GPU 分配
-
-执行器自动读 `nvidia-smi topo -m` 检测 NUMA 分组,同一个候选的 GPU 必须在同一 NUMA 节点内,避免跨 NUMA 通信导致性能下降。
-
-例如 8 卡双 NUMA(GPU 0-3 = NUMA 0,GPU 4-7 = NUMA 1):
-- TP1 × 4 → GPU 0,1,2,3(NUMA 0)
-- TP1 × 4 → GPU 4,5,6,7(NUMA 1)
-- TP2 × 2 → GPU 0,1 + GPU 2,3(NUMA 0)
-- TP4 × 1 → GPU 0,1,2,3(整个 NUMA 0)
-
-### 并行压测
-
-多个候选可以同时跑在不同 GPU 上(每个候选独立容器,独立端口),不浪费空闲卡。
-
-### 关闭 Radix Cache
-
-默认所有候选 pin `--disable-radix-cache`,测纯推理性能。投机解码 + `no_buffer` + `--disable-radix-cache` 是合法组合。
-
-### Goodput 归一化排名
-
-排名按 `goodput_per_host = total_throughput × (gpu_count / tp_size)`,不是单实例吞吐。TP2 跑 300 tok/s × 4 实例 = 1200 > TP8 跑 1000 tok/s × 1 实例 = 1000。
-
-### SSH 密码支持
-
-target.json 里可选填 `ssh_password`,有密码用 sshpass,留空走 key 免密。
-
-### 服务启动失败分析
-
-服务起不来时自动提取 server.log 里的错误信息(ValueError/AssertionError 等)打印到 stderr。
-
-### Preflight 校验
-
-启动前检查:SSH 连通性、模型目录存在、镜像可用(没有就自动 pull)、清理同名旧容器。
-
----
-
-## 自动同步(每日更新)
-
-### 一键更新
-
-```bash
-./update.sh
+```text
+outputs/<job_id>/
+├── configs.jsonl                  # 候选配置
+├── best_config.md                 # gen_report.sh 生成
+└── results/
+    ├── task_status.json           # 完成/失败/中断状态
+    ├── candidate_results.jsonl    # 每个候选的汇总和所有并发点
+    ├── ranking.json               # 最终或 provisional 排名
+    └── <candidate-id>/            # server、bench、启动尝试日志
 ```
-
-等价于:
-```bash
-./scripts/run_daily_sync.sh
-```
-
-### 同步内容
-
-1. **SGLang 参数同步**(`scripts/sync_sglang_params.py`)
-   - 自动扫描 SGLang 所有 git tag(≥ v0.5.13)
-   - 发现新版本 → clone → AST 解析 server_args.py → 更新 `catalogs/sglang-images.yaml` 的 `valid_flags` 和 `attention_backends`
-   - 已有版本检查参数是否有变化
-   - 生成 `reports/constraints_*.md` 约束报告供人工审核
-
-2. **模型信息同步**(`scripts/sync_hf_models.py`)
-   - 扫描 SGLang cookbook(2026-05-01 之后的新模型)发现新模型
-   - 从 HuggingFace API 拉 config.json → 提取架构/量化/MoE 信息
-   - 从 cookbook mdx 提取 default_flags(parser 名)和 mtp_params(投机解码参数)
-   - 从 HuggingFace API 估算权重大小
-   - 已有模型检查 config.json 是否有变化并自动补全缺失字段
-   - 写入 `catalogs/models.yaml`,自动更新 version/updated/total
-
-3. **SGLang 仓库自动更新**
-   - 同步前自动 `git pull` SGLang 仓库到最新,确保 cookbook 不过期
-
-### 设置定时任务
-
-```bash
-crontab -e
-# 每天早上 9 点自动跑
-0 9 * * * cd /data/home/dorianwu/aaawhx-study/llm-infer-tuner && ./update.sh >> logs/sync.log 2>&1
-```
-
-有变化时打印 diff 摘要,你手动 `git push`。
-
----
 
 ## 目录结构
 
-```
+```text
 llm-infer-tuner/
-├── gen_configs.sh              # 第一步入口:AI 生成候选配置
-├── run_executor.sh             # 第二步入口:远程压测 + 排名(支持单文件模式)
-├── update.sh                   # 一键更新脚本(同步 SGLang 参数 + 模型信息)
-│
+├── gen_configs.sh                 # L1：AI 生成候选
+├── run_executor.sh                # L2：远程压测和排名
+├── gen_report.sh                  # 从已有结果生成 Markdown 报告
+├── Dockerfile                     # 包含 Python/uv、Node、tclaude、claude 的镜像
+├── docker/entrypoint.sh           # 镜像入口，默认进入 /app
 ├── input/
-│   ├── jobs/                   # AI 模式输入(job.json + target.json)
-│   ├── targets/
-│   └── configs/                # 手写模式输入(单文件 JSON,含 _meta + candidates)
-│
-├── catalogs/                   # 引擎无关的共享事实
-│   ├── gpu.yaml                #   显卡信息(G01-G32, 含 sm_major/nvlink)
-│   ├── models.yaml             #   模型信息(M01-M225, 含架构/量化/MoE/parser/mtp)
-│   ├── workloads.yaml          #   负载场景(W01-W10, 输入/输出长度)
-│   └── sglang-images.yaml      #   SGLang 镜像信息(I01-I03, 含 attention_backends/valid_flags)
-│
-├── .claude/skills/             # L1 AI 读的知识库
+│   ├── jobs/                      # JobSpec
+│   ├── targets/                   # TargetSpec
+│   └── configs/                   # 单文件手写配置
+├── catalogs/
+│   ├── gpu.yaml                   # GPU 能力和 NUMA/互联事实
+│   ├── models.yaml                # 架构、量化、MoE、parser、MTP 信息
+│   ├── workloads.yaml             # 输入/输出长度和压测梯度
+│   └── sglang-images.yaml         # 镜像、CUDA、后端和有效 flag
+├── .claude/skills/
 │   └── sglang-server-config-gen/
-│       ├── SKILL.md            #   流程入口
-│       ├── knowledge.md        #   全部调优经验(§0-§12)
-│       └── (images.yaml 已移到 catalogs/)
-│
-├── runners/                    # 第二步执行器(全确定性,无 AI)
-│   ├── executor.py             #   主编排
-│   ├── remote.py               #   SSH + sshpass
-│   ├── container.py            #   docker 生命周期
-│   ├── readiness.py            #   /health 轮询
-│   ├── bench_runner.py         #   从 workload/method 确定性生成压测命令
-│   ├── concurrency_search.py   #   自适应并发搜索
-│   ├── metrics.py              #   压测结果解析
-│   └── ranker.py               #   goodput 排名
-│
-├── schemas/
-│   └── job_spec.py             # JobSpec 校验(含 baseline 字段)
-│
-├── scripts/                    # 自动同步脚本
-│   ├── sync_sglang_params.py   #   SGLang 源码参数提取(AST)
-│   ├── sync_hf_models.py       #   HuggingFace 模型信息同步
-│   └── run_daily_sync.sh       #   定时同步入口
-│
-├── references/
-│   └── benchmark_methods/      # 压测方法契约
-│
-├── outputs/                    # 产物(gitignore)
-├── claude-raw-outputs/         # claude 原始返回(gitignore)
-├── reports/                    # 同步报告(gitignore)
-└── logs/                       # 日志(gitignore)
+│       ├── SKILL.md               # 配置生成流程和输出契约
+│       └── knowledge.md            # 调优经验、硬约束和排除项
+├── runners/                       # SSH、Docker、压测、搜索、排名和报告编排
+├── schemas/                       # JobSpec 等 Pydantic 契约
+├── scripts/                       # 目录同步和报告脚本
+├── outputs/                       # 本地运行产物
+└── claude-raw-outputs/            # AI 原始返回
 ```
 
----
-
-## 输入文件说明
-
-### job.json(AI 模式)
-
-```json
-{
-  "job_id": "qwen38-27b_pro5000_8x72g_input-4k-output-1k_cand16",
-  "engine": "sglang",
-  "gpu_model": "G24_pro5000",
-  "gpu_count": 8,
-  "gpu_memory_gb": 72,
-  "model": "M55_qwen3-8-27b-fp8",
-  "image": "I03_sglang-v0.5.16",
-  "workload": "W04_input-4k-output-1k",
-  "benchmark_method": "sglang-bench-serving",
-  "sla": {
-    "max_avg_ttft_ms": 2000,
-    "max_avg_tpot_ms": 80,
-    "min_success_rate": 0.99
-  },
-  "search": {
-    "max_candidates": 16,
-    "max_runtime_minutes": 180
-  }
-}
-```
-
-### target.json
-
-```json
-{
-  "gpu_model": "G24_pro5000",
-  "gpu_count": 8,
-  "gpu_memory_gb": 72,
-  "ssh_target": "ubuntu@122.51.115.16",
-  "ssh_password": "",
-  "model_host_dir": "/data/models/Qwen3.8-27B-FP8/",
-  "model_container_path": "/data/models/Qwen3.8-27B-FP8/",
-  "image_ref": "hai-beijing.tencentcloudcr.com/ai/sglang:v0.5.16-cu129",
-  "port": 30000
-}
-```
-
-### 手写配置 JSON(单文件模式)
-
-文件名格式:`{模型}_{显卡}_{数量}x{规格}_{日期}_{序号}.json`
-
-示例:`qwen38-27b_pro5000_8x72g_20260826_01.json`
-
-见上方「方式 B」的格式说明。
-
----
-
-## 测试
+## 自动同步目录和参数知识
 
 ```bash
-uv run python -m pytest tests/ -q
+./update.sh
+# 等价于
+./scripts/run_daily_sync.sh
 ```
+
+同步内容包括：
+
+1. 从 SGLang tag 的源码中提取 `launch_server` 有效参数和 attention 后端，更新 `catalogs/sglang-images.yaml`。
+2. 从 SGLang cookbook 和 HuggingFace 配置同步模型架构、量化、MoE、默认 parser、MTP 参数和权重估算，更新 `catalogs/models.yaml`。
+3. 维护标准输入/输出 workload 和 GPU 目录，生成 `reports/` 下的变化摘要供人工审核。
+
+有变化时检查 diff 后再提交和推送；如果需要定时同步，可以用 cron：
+
+```cron
+0 9 * * * cd /path/to/llm-infer-tuner && ./update.sh >> logs/sync.log 2>&1
+```
+
+## 镜像维护者说明
+
+重新构建并运行本地镜像：
+
+```bash
+docker build -t llm-infer-tuner:dev .
+docker run --rm -it llm-infer-tuner:dev bash
+```
+
+发布镜像时需要保留项目来源标签，否则 GHCR 只会把它识别成独立的用户镜像包：
+
+```dockerfile
+LABEL org.opencontainers.image.source="https://github.com/wuhangxian/llm-infer-tuner"
+```
+
+镜像不包含模型权重、SSH 私钥或任何 AI 登录 token。发布新镜像后，使用者仍需在运行时挂载自己的登录态和 SSH key。
