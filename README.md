@@ -56,16 +56,17 @@ job.json
 镜像地址：
 
 ```text
-ghcr.io/wuhangxian/llm-infer-tuner:0903-dorianwu
+ghcr.nju.edu.cn/wuhangxian/llm-infer-tuner:0903-dorianwu
 ```
+
+这是公开镜像，国内机器优先使用南京大学 GHCR 镜像源；如果该镜像站临时不可用，也可以把地址中的 `ghcr.nju.edu.cn` 换回 `ghcr.io`。
 
 镜像包含 Python/uv、Node.js、`tclaude`、公开 `claude`、Git、nano、jq、SSH 和 sshpass。镜像内的 `/app/README.md` 就是本说明。
 
 ### 1. 第一次只做一次：拉镜像并创建容器
 
 ```bash
-docker login ghcr.io
-docker pull ghcr.io/wuhangxian/llm-infer-tuner:0903-dorianwu
+docker pull ghcr.nju.edu.cn/wuhangxian/llm-infer-tuner:0903-dorianwu
 
 mkdir -p ~/llm-tuner-work/{input/jobs,input/targets,input/configs,outputs,claude-raw-outputs}
 mkdir -p "$HOME/.tclaude" "$HOME/.claude"
@@ -80,7 +81,7 @@ docker run -dit \
   -v "$HOME/.tclaude:/home/runner/.tclaude" \
   -v "$HOME/.claude:/home/runner/.claude" \
   -v "$HOME/.ssh:/home/runner/.ssh:ro" \
-  ghcr.io/wuhangxian/llm-infer-tuner:0903-dorianwu \
+  ghcr.nju.edu.cn/wuhangxian/llm-infer-tuner:0903-dorianwu \
   bash
 ```
 
