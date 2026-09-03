@@ -1,5 +1,17 @@
 FROM ghcr.io/astral-sh/uv:0.8.17 AS uv-bin
 
+# 两个 AI CLI 都放进镜像；登录态在运行时挂载，不进入镜像层。
+FROM node:22-slim AS ai-cli
+ARG TCLAUDE_VERSION=0.1.5
+ARG CLAUDE_CODE_VERSION=2.1.259
+RUN npm install --global \
+        "@tencent/tclaude@${TCLAUDE_VERSION}" \
+        --engine-strict \
+        --registry=https://mirrors.tencent.com/npm \
+    && npm install --global \
+        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+        --registry=https://registry.npmjs.org
+
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -17,6 +29,15 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=uv-bin /uv /uvx /bin/
+COPY --from=ai-cli /usr/local/bin/node /usr/local/bin/node
+COPY --from=ai-cli /usr/local/lib/node_modules /usr/local/lib/node_modules
+
+# COPY 会解引用上游的相对软链接；在最终镜像中显式恢复入口，确保 npm、
+# tclaude 和 claude 的相对依赖都指向已复制的 node_modules。
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && ln -s /usr/local/lib/node_modules/@tencent/tclaude/bin/tclaude.js /usr/local/bin/tclaude \
+    && ln -s /usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe /usr/local/bin/claude
 
 WORKDIR /app
 COPY . /app
