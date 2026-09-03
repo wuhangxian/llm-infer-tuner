@@ -129,7 +129,56 @@ GEN_MAX_RETRIES=0 ./gen_configs.sh input/jobs/<job>.json
 
 SSH 到远程机器,起容器 → 起服务 → 自适应并发搜索 → 压测 → 排名 → 输出 `outputs/<job_id>/results/ranking.json`。
 
+压测完成后可单独生成一份便于人工阅读的最佳参数报告（不会重新压测，也不会修改排名文件）：
+
+```bash
+./gen_report.sh outputs/<job_id>
+```
+
+也可以直接传入 `outputs/<job_id>/results`。脚本会在传入的目录中生成 `best_config.md`，报告包含最佳候选的生效参数、启动命令、SLA 指标、与其他候选/baseline 的差异，以及候选生成时记录的配置依据。
+
 执行器直接读取 JobSpec 的 `workload` 和 `benchmark_method`,再从 `catalogs/workloads.yaml` 与 `references/benchmark_methods/*.json` 确定性拼出 `sglang.bench_serving` 命令。第二步不调用 `tclaude` 或 `claude`,也不受 AI 超时、限流或额度影响。
+
+### 用 Docker 镜像运行(无需下载项目)
+
+镜像包含执行器代码、Python 运行依赖、Node.js、`tclaude`、公开 `claude`、`jq` 和 SSH 工具；`input/`、`outputs/`、SSH key 与 AI CLI 登录态在运行时挂载，不会被打进镜像。执行器仍会通过 SSH 到目标 GPU 机器，并在目标机启动 JobSpec 中的 SGLang 镜像。
+
+```bash
+# 构建(维护者执行一次)
+docker build -t llm-infer-tuner:0903-dorianwu .
+
+# 首次使用时登录 AI CLI(二选一或都登录；登录目录建议持久化)
+docker run -it --rm \
+  -v "$HOME/.claude:/home/runner/.claude" \
+  -v "$HOME/.tclaude:/home/runner/.tclaude" \
+  llm-infer-tuner:0903-dorianwu \
+  tclaude login
+
+# AI 生成候选配置(也可把 tclaude 换成 claude)
+docker run --rm \
+  -v "$PWD/input:/app/input:ro" \
+  -v "$PWD/outputs:/app/outputs" \
+  -v "$HOME/.claude:/home/runner/.claude" \
+  -v "$HOME/.tclaude:/home/runner/.tclaude" \
+  llm-infer-tuner:0903-dorianwu \
+  ./gen_configs.sh input/jobs/<job>.json
+
+# 使用单文件配置执行压测；宿主机只需准备 config.json 和 SSH key
+docker run --rm \
+  -v "$PWD/config.json:/app/config.json:ro" \
+  -v "$PWD/outputs:/app/outputs" \
+  -v "$HOME/.ssh:/home/runner/.ssh:ro" \
+  llm-infer-tuner:0903-dorianwu \
+  ./run_executor.sh /app/config.json
+
+# 只根据已有结果生成报告
+docker run --rm \
+  -v "$PWD/outputs/<job_id>:/work/result:ro" \
+  llm-infer-tuner:0903-dorianwu \
+  ./gen_report.sh /work/result
+```
+
+如需让其他人直接使用，应将镜像推送到团队 TCR 后把上面的本地标签替换为完整镜像地址。镜像内虽然包含两个 AI CLI，但登录态始终在运行时提供，不会固化到镜像中。
 
 ### 方式 B: 手写配置 + 直接压测(一步)
 

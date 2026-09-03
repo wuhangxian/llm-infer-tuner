@@ -230,8 +230,8 @@ ${JOB_JSON}
 
 ## 公平性硬约束
 
-- 所有候选(含 baseline)实际执行时统一关闭 Radix/Prefix Cache；executor 会覆盖用户输入并确保启动命令带且仅带一个 `--disable-radix-cache`。
-- `mamba_radix_cache_strategy` 可保留为用户请求值用于审计，但在 Radix Cache 关闭时记为 effective=inactive，不作为候选间有效调优轴。
+- 所有候选(含 baseline)实际执行时统一关闭 Radix/Prefix Cache；executor 会覆盖用户输入并确保启动命令带且仅带一个 \`--disable-radix-cache\`。
+- \`mamba_radix_cache_strategy\` 可保留为用户请求值用于审计，但在 Radix Cache 关闭时记为 effective=inactive，不作为候选间有效调优轴。
 
 ## 执行方式
 

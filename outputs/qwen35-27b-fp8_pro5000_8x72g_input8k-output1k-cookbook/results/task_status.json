@@ -1,0 +1,10 @@
+{
+  "report_schema_version": 1,
+  "job_id": "qwen35-27b-fp8_pro5000_8x72g_input8k-output1k-cookbook",
+  "task_status": "COMPLETED",
+  "ranking_status": "FINAL",
+  "interrupted": false,
+  "total_candidates": 1,
+  "completed_candidates": 1,
+  "failed_candidates": 0
+}

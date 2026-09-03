@@ -1,0 +1,16 @@
+.git
+.worktrees
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# 运行时数据通过 volume 挂载，不打进镜像。
+input
+outputs
+claude-raw-outputs
+
+# 本地迁移备份不属于发布物。
+*-backup-*
