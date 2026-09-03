@@ -148,7 +148,6 @@ command -v python3 >/dev/null || { echo "❌ 需要 python3" >&2; exit 1; }
 SKILL_DIR=".claude/skills/sglang-server-config-gen"
 [ -f "$SKILL_DIR/SKILL.md" ] || { echo "❌ 找不到 skill: $SKILL_DIR/SKILL.md(请在 repo 根运行)" >&2; exit 1; }
 RULES_DIR="$SKILL_DIR/references/rules"
-[ -f "$RULES_DIR/README.md" ] || { echo "❌ 找不到规则库说明: $RULES_DIR/README.md" >&2; exit 1; }
 command -v "$AGENT" >/dev/null || { echo "❌ $AGENT 不在 PATH" >&2; exit 1; }
 TCLAUDE_GUARD="runners/tclaude_guard.py"
 [ -f "$TCLAUDE_GUARD" ] || { echo "❌ 找不到 guard: $TCLAUDE_GUARD" >&2; exit 1; }
