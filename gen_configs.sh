@@ -147,9 +147,19 @@ command -v python3 >/dev/null || { echo "❌ 需要 python3" >&2; exit 1; }
 
 SKILL_DIR=".claude/skills/sglang-server-config-gen"
 [ -f "$SKILL_DIR/SKILL.md" ] || { echo "❌ 找不到 skill: $SKILL_DIR/SKILL.md(请在 repo 根运行)" >&2; exit 1; }
+RULES_DIR="$SKILL_DIR/references/rules"
+[ -f "$RULES_DIR/README.md" ] || { echo "❌ 找不到规则库说明: $RULES_DIR/README.md" >&2; exit 1; }
 command -v "$AGENT" >/dev/null || { echo "❌ $AGENT 不在 PATH" >&2; exit 1; }
 TCLAUDE_GUARD="runners/tclaude_guard.py"
 [ -f "$TCLAUDE_GUARD" ] || { echo "❌ 找不到 guard: $TCLAUDE_GUARD" >&2; exit 1; }
+
+# 只校验知识库本身没有损坏；不校验或拦截 AI 生成的候选命令。
+if [ -f scripts/validate_knowledge.py ]; then
+  python3 scripts/validate_knowledge.py >/dev/null || {
+    echo "❌ 规则库校验失败，请先修复 references/rules/*.yaml" >&2
+    exit 1
+  }
+fi
 
 # 模型路径恒为占位符 —— 第一步机器无关,不绑死任何机器的物理路径。
 MODEL_PATH='${MODEL_PATH}'
@@ -176,11 +186,10 @@ mkdir -p "$(dirname "$OUT")"
 #   1. job.json 的完整内容
 #      — 模型/卡型/负载/SLA/镜像等,让 AI 知道这次要调什么
 #
-#   2. 调优硬约束
-#      — 块量化×TP 必须整除,超出 tp_max 的 tp 不生成
-#      — 绝不写 --context-length(§0 红线)
+#   2. 调优规则提示
+#      — 规则文件说明如何排序、组合和标注风险；不要把经验判断变成生成阶段硬闸
+#      — 绝不写 --context-length(规则库红线)
 #      — 模型专属 flag(reasoning-parser 等)从 models.yaml 原样取,不自己编
-#      — attention 后端必须在 SM 短名单内
 #      — 候选数 ≤ max_candidates
 #
 #   3. 输出 JSON Schema
@@ -188,11 +197,7 @@ mkdir -p "$(dirname "$OUT")"
 #      — 每条候选含 id + params + cmd + reasons 四个字段
 #      — 第 5 步 jq 再拆成一行一候选的 JSONL
 #
-# prompt 里还告诉 tclaude 该按顺序读 4 个知识库文件:
-#   ① SKILL.md     — 流程入口:该读什么、推导步骤、输出契约
-#   ② knowledge.md — 全部调优经验(§0-§9)
-#   ③ catalogs/    — gpu.yaml + models.yaml + workloads.yaml(按 job 里的 ID 查表)
-#   ④ catalogs/sglang-images.yaml  — 镜像信息(CUDA 版本、支持的 attention 后端)
+# prompt 里还告诉 tclaude 该按顺序读 skill、规则索引、主题规则和 catalogs。
 #
 # --model-path 在这里写死为 ${MODEL_PATH} 占位符,不绑定任何机器路径,
 # 第二步由 targets.json 填入实际路径。
@@ -217,14 +222,14 @@ ${JOB_JSON}
 如果 JobSpec 里有 \`baseline\` 字段(在 search.baseline 下):
 - 你必须在 candidates 数组**最前面**插入一条基线候选,id 为 "baseline",params 里加 \`"is_baseline": true\`
 - **严格模式(重要)**:基线是"用户基线复现",不是调优候选。params **只放** baseline 字段里用户显式写的参数,原样保留、不增不改(\`is_baseline\` 标记除外)。
-  用户没写的参数**一律不补**——不补 §4 pin(含 --schedule-policy 等)、不补 §3 各轴搜索默认档、不补 §4 default_flags 里的 parser 类 flag。让 SGLang 用它自己的内部默认(即命令里根本不出现该 flag)。
+  用户没写的参数**一律不补**——不补规则库中的普通 pin、搜索轴默认档和 parser 类 flag。让 SGLang 用它自己的内部默认(即命令里根本不出现该 flag)。
 - **唯一例外(硬启动依赖,不补则 server 直接崩,故必须补)**:
   1. 若 catalogs/models.yaml 该模型 \`default_flags\` 含 \`trust-remote-code: true\`,即使用户没写也必须补 \`--trust-remote-code\`(CLI 安全开关,模型默认无法翻成 true)。
   2. 若用户写了 \`mamba_radix_cache_strategy: extra_buffer\` 但没写 \`page_size\`,必须补 \`--page-size 64\`(\`FLA_CHUNK_SIZE(64) % page_size == 0\` 硬约束,否则启动报错)。
   这两个例外若要补,必须同时写进 baseline 的 params(不能只写进 cmd),使 executor 兜底路径也一致。除此之外不补任何默认 flag。
 - 基线的 cmd 严格 = {用户在 baseline 里列的 flag} + {上面必要的硬启动依赖例外} + {运行时占位符:\`--model-path \${MODEL_PATH}\` \`--host 0.0.0.0\` \`--port 30000\`}。用户写的某 flag 值恰好等于模型默认时,仍照写(尊重显式意图)。
 - **基线不算在 max_candidates 名额里**,总候选数 = max_candidates + 1
-- 你正常生成 max_candidates 条候选,排在基线后面(**这 max_candidates 条是正常调优候选,仍按 §3/§4 正常补全 pin 和 default_flags,严格模式只约束 baseline 那一条**)
+- 你正常生成 max_candidates 条候选,排在基线后面(**这 max_candidates 条是正常调优候选,按主题规则补全 pin 和 default_flags,严格模式只约束 baseline 那一条**)
 
 如果没有 baseline 字段:正常生成 max_candidates 条候选(第一条是基线锚点),不额外插基线。
 
@@ -235,14 +240,19 @@ ${JOB_JSON}
 
 ## 执行方式
 
-请按 \`${SKILL_DIR}/SKILL.md\` 的流程执行:读 knowledge.md + catalogs/*.yaml(含 sglang-images.yaml),
-按其中的约束和推导步骤生成候选配置。所有调优判据、硬约束、输出格式
-都在 SKILL.md 和 knowledge.md 里,这里不重复。
+请按 \`${SKILL_DIR}/SKILL.md\` 的流程执行:先读 knowledge.md 和
+references/rules/README.md，再按 JobSpec 读取 attention/parallelism/memory/speculative/
+scheduling/fairness 相关 YAML，最后读取 catalogs/*.yaml(含 sglang-images.yaml)。
+投机解码必须把模型卡的 speculative_options/mtp_params 与镜像卡的
+speculative_algorithms 取交集，NONE 保留为对照，不能只写死 EAGLE。
+所有普通调优判据和输出格式都在 SKILL.md、规则文件和 catalogs 里，这里不重复。
+规则是决策依据和风险说明，不是生成阶段的候选硬闸；experimental 或资料不完整的候选
+可以生成并交给执行器实测。
 
 ## 探索边界(必须遵守,直接影响耗时)
 
 - **输出格式的唯一权威是本 prompt 末尾的 JSON Schema 和 SKILL.md**。禁止为"对齐格式"去读 \`outputs/\`、\`claude-raw-outputs/\` 里任何历史生成结果(configs.json/configs.jsonl/ranking.json/*.jsonl raw)。那些是过往产物、可能过时或来自不同 job,不是格式标准,参照它们只会拖慢并引入不一致。
-- **只读你推导所必需的输入**:SKILL.md、knowledge.md、catalogs/*.yaml(按 job 里的 ID 查表)。不要浏览 sibling job、不要翻别的 job 的 job.json/结果、不要 git log。本 job 的 JobSpec 已在上文给全。
+- **只读你推导所必需的输入**:SKILL.md、knowledge.md、references/rules/*.yaml、catalogs/*.yaml(按 job 里的 ID 查表)。不要浏览 sibling job、不要翻别的 job 的 job.json/结果、不要 git log。本 job 的 JobSpec 已在上文给全。
 - **不要参考任何"之前跑过的类似 job"的候选或压测排名来做本次决策**。每个 job 独立按知识库推导;历史结果不构成本次判据。
 - 拿到查表所需事实后**尽快进入推导与产出**,不要做超出上述范围的探索性文件浏览。
 
@@ -259,7 +269,7 @@ EOF
 # ─────────────────────────────────────────────────────────────────────────
 # 用 tclaude -p "$PROMPT" 非交互模式调用 AI。关键参数:
 #   --add-dir .           让 tclaude 能读项目根下的 catalogs/ 等
-#   --add-dir $SKILL_DIR  让 tclaude 能读 SKILL.md/knowledge.md
+#   --add-dir $SKILL_DIR  让 tclaude 能读 SKILL.md/knowledge.md/references/rules
 #   --json-schema         约束 tclaude 返回 {candidates:[...]} 结构
 #   --output-format json  让 tclaude 输出 JSON(而非纯文本)
 # AI 读知识库 → 查表(gpu/model/workload/image)→ 推导 TP/attention/mem-fraction
@@ -331,7 +341,7 @@ GUARD_ARGS=(
 
 if [ "$GEN_STREAM" != "0" ]; then
   # ── 默认:真流式 ─────────────────────────────────────────────────────
-  echo "▶ 调 $AGENT 生成配置(流式,实时显示读库+推导过程,通常 2-6 分钟)…" >&2
+  echo "▶ 调 $AGENT 生成配置(流式,实时显示读 rules+catalogs+推导过程,通常 2-6 分钟)…" >&2
   echo "────────────────────────────────────────────────────────────" >&2
 
   TCLAUDE_COMMAND=(
@@ -398,7 +408,7 @@ if [ "$GEN_STREAM" != "0" ]; then
   fi
 else
   # ── 回退:旧的单 JSON 对象行为(GEN_STREAM=0)────────────────────────
-  echo "▶ 调 $AGENT 生成配置(非流式,读 skill+knowledge+catalogs,几分钟)…" >&2
+  echo "▶ 调 $AGENT 生成配置(非流式,读 skill+rules+catalogs,几分钟)…" >&2
   TCLAUDE_COMMAND=(
     "$AGENT" -p "$PROMPT" "${AGENT_MODEL_ARGS[@]}"
     --output-format json

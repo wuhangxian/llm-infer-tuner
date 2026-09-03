@@ -10,10 +10,10 @@ description: 输入一个固定 JSON(JobSpec:机型/模型/镜像/负载/SLA/预
 ```
 你给 1 个 JSON            本 skill(AI 读规则生成)        下游(不在本 skill)
 ┌──────────────┐        ┌──────────────────┐        ┌──────────────┐
-│ JobSpec      │        │ AI 读 catalogs +  │        │ 执行器        │
-│ (机型/模型/  │───────▶│ knowledge + images │───────▶│ 拉镜像/起服务 │
+│ JobSpec      │        │ AI 读 rules +     │        │ 执行器        │
+│ (机型/模型/  │───────▶│ catalogs + images │───────▶│ 拉镜像/起服务 │
 │  镜像/负载/  │        │ → 十几条候选配置    │        │ 压测/剪枝     │
-│  SLA/预算)   │        │ (代码过 3 道硬闸)  │        │ 出报告/回最优 │
+│  SLA/预算)   │        │ (按规则生成候选)  │        │ 出报告/回最优 │
 └──────────────┘        └──────────────────┘        └──────────────┘
 ```
 
@@ -21,7 +21,7 @@ description: 输入一个固定 JSON(JobSpec:机型/模型/镜像/负载/SLA/预
 
 **不干**:起服务、压测、剪枝、入库、出报告(下游第二阶段的事)。
 
-**核心原则:加新经验 = 只改 `knowledge.md` / `catalogs/*.yaml`(含 `sglang-images.yaml`)的文本,不改生成器代码。**
+**核心原则:加新经验 = 在 `references/rules/` 对应主题 YAML 的 `rules` 末尾追加一条；加模型/镜像事实才改 `catalogs/*.yaml`。普通规则不需要改生成器代码。**
 
 ---
 
@@ -49,36 +49,36 @@ description: 输入一个固定 JSON(JobSpec:机型/模型/镜像/负载/SLA/预
  | `gpu_model` | `catalogs/gpu.yaml` | 算力(sm_major) / NVLink |
  | `gpu_count` / `gpu_memory_gb` | inline (JobSpec) | 卡数(TP/EP 上限) / 单卡显存(TP 准入判据) |
 | `model` | `catalogs/models.yaml` | 架构 / 是否 MoE / 权重大小 / parser 名 / KV 粗估 |
-| `image` | `catalogs/sglang-images.yaml` | CUDA 版本 / attention 菜单 / flag 别名 / valid_flags 白名单 |
+| `image` | `catalogs/sglang-images.yaml` | CUDA 版本 / attention 菜单 / speculative_algorithms / flag 别名 / valid_flags 白名单 |
 | `workload` | `catalogs/workloads.yaml` | 输入/输出长度 / 并发梯度 / 采样参数 |
 | `sla` / `search` | inline | SLA 阈值 / 候选数与时间预算 |
 
-**⚠️ 输入里没有、也永远不该有 `context_length` 字段**(见 knowledge.md §0)。
+**⚠️ 输入里没有、也永远不该有 `context_length` 字段**(见 `references/rules/memory.yaml`)。
 
 ---
 
 ## AI 生成时读哪些文件、按什么步骤
 
-**读(按序,路径均相对项目根)**:① 本 `SKILL.md` → ② `.claude/skills/sglang-server-config-gen/knowledge.md`(全部经验判据)→ ③ 三张 `catalogs/*.yaml`(按 JobSpec 里的 ID 取对应卡片)→ ④ `catalogs/sglang-images.yaml`(按 image ID 取镜像卡片)。
+**读(按序,路径均相对项目根)**:① 本 `SKILL.md` → ② `.claude/skills/sglang-server-config-gen/knowledge.md`(规则索引) → ③ `references/rules/README.md`(规则格式) → ④ 按 JobSpec 读取相关主题 YAML → ⑤ `catalogs/*.yaml`(按 ID 取 GPU/model/workload/image 卡片)。
 
 > 路径说明:`knowledge.md` 与本 SKILL.md 同目录(`.claude/skills/sglang-server-config-gen/`);`catalogs/`(含 `sglang-images.yaml`)、`schemas/` 在项目根下。`claude` 从项目根运行,按上述相对路径即可读到。
 
 **步骤**:
 
 1. **解析 JobSpec** → 取出 5 张卡片(gpu / model / workload / image + inline sla/search)。
-2. **定 attention 轴**:`knowledge.md §1` 短名单[gpu_model 查表得 sm_major] ∩ image.attention_backends ∩ CUDA 达标。
+2. **定 attention 轴**:按 `references/rules/attention.yaml` 取 GPU 短名单 ∩ image.attention_backends ∩ CUDA 达标。
    - SM120 → 只有 `flashinfer / triton`;**prefill 永不用 trtllm_mha**(会 raise);fa3 排除。
-3. **定并行度**(`knowledge.md §2`):
+3. **定并行度**:按 `references/rules/parallelism.yaml`:
    - TP 候选 = 权重放得下的 2 的幂(≤ gpu_count);默认全保留。长输入把 TP1 排末尾。
    - PP 恒 1(单机排除 pp>1)。
    - EP:仅 MoE 生成;dense 模型(如 qwen36-27b)**不生成 ep 轴**。
-4. **铺搜索轴**(`knowledge.md §3`):mem-fraction / chunked-prefill / max-running-requests / kv-cache-dtype / schedule-conservativeness,按默认档;按算力/CUDA 过滤搜不了的值。
-5. **pin 与排除**(`knowledge.md §4-5`):**每个候选无条件 pin `disable_radix_cache: true`**(任何 workload、任何时候都关 radix/prefix cache,没有例外——测纯推理性能,防复测缓存命中污染对比);模型 default_flags 原样取;lpm 仅共享前缀场景;排除项不生成。
-   - **无条件连带**:`--mamba-radix-cache-strategy extra_buffer` 硬依赖 radix cache 存 Mamba 状态,与钉死关 radix 冲突 → **彻底排除、永不生成**;mamba 策略恒用 `no_buffer`(见 §5/§7)。
-   - **本 case workload=qa-chat 请求独立 → 用默认 fcfs,不 pin lpm;pin `disable_radix_cache: true`。**
-6. **混合架构**(`knowledge.md §3a/§7`):qwen3.6 `hybrid_mamba` → mamba 策略**恒 no_buffer 不搜**(extra_buffer 已排除);mem-fraction 上界压到 **0.86**、chunked-prefill 上界 **8192**(SSM 状态池在 mem-fraction 池外,沿用 dense 的 0.92/16384 会 capture 期崩)。
-7. **绝不写 `--context-length`**(`knowledge.md §0`)。
-8. **组装候选**:笛卡尔积后按 `search.max_candidates` 截断(基线优先:先出低风险基线,再铺高风险轴);每条给 server_command + 分并发 benchmark_commands + reasons + expected_risk。
+4. **铺搜索轴**:按 `references/rules/memory.yaml` 和 `scheduling.yaml` 的默认档铺 mem-fraction / chunked-prefill / max-running-requests / kv-cache-dtype / schedule-conservativeness，并按算力/CUDA 过滤搜不了的值。
+5. **pin 与排除**:读取相关主题规则；模型 default_flags 原样取，lpm 仅共享前缀场景。实验规则可以生成并标风险，不把经验判断误当成候选硬闸。
+   - **本 case workload=qa-chat 请求独立 → 用默认 fcfs,不 pin lpm。**
+6. **投机解码**:按 `references/rules/speculative.yaml` 把模型卡 `speculative_options`/`mtp_params` 与镜像卡 `speculative_algorithms` 取交集；NONE 保留为对照，不能只写死 EAGLE。
+7. **混合架构**:按 `references/rules/memory.yaml` 的 hybrid mamba 规则生成缓存策略。
+8. **绝不写 `--context-length`**:遵守 `memory.yaml` 的 context 规则。
+9. **组装候选**:笛卡尔积后按 `search.max_candidates` 截断(基线优先:先出低风险基线,再铺高风险轴);每条给 server_command + 分并发 benchmark_commands + reasons + expected_risk。
 
 ---
 
@@ -92,22 +92,23 @@ description: 输入一个固定 JSON(JobSpec:机型/模型/镜像/负载/SLA/预
 | `params` | 这条改了哪些轴的结构化字典(如 `{attention_backend, chunked_prefill_size, ep_size, mem_fraction_static}`) |
 | `server_command` | 完整 `python -m sglang.launch_server ...`(**不带 `--context-length`**) |
 | `benchmark_commands` | 分并发压测命令已拆出到姊妹 skill `sglang-client-config-gen`,本 skill 输出可留空 `[]` 或仅给占位;真正的压测命令由客户端 skill 依据同一 JobSpec 的 workload+benchmark_method 生成(字段仍保留,向后兼容) |
-| `reasons` | AI 为什么给这条(可追溯到 knowledge.md 哪条经验) |
+| `reasons` | AI 为什么给这条(引用命中的 rule id、模型/镜像事实和风险) |
 | `expected_risk` | `low` / `medium` / `high` |
 
 下游:执行器逐条起服务、分并发压测、二分找 SLA 下最大吞吐(goodput),回 3 条最优。
 
 ---
 
-## 代码只做的 3 道硬校验闸(不是生成器,是验证器)
+## 生成和验证边界
 
-AI 负责分类+派生候选;代码在生成后只拦「一定起不来」的:
+AI 根据规则和 catalogs 生成候选，生成阶段只保证 JSON 结构完整、候选数量不超过
+`max_candidates`，并尽量在 `reasons` 中说明适用条件和风险。不会把知识规则做成一个
+“候选硬闸”：`experimental` 或资料不完整的候选仍可交给执行器，能否启动和性能如何以
+目标机器实测为准。这符合参数寻优的探索目的，也避免规则写错时整批候选被提前吞掉。
 
-1. **plan 期**:每条 attention 后端 ∈ image 菜单 ∩ sm 短名单;`tp % ep == 0` 且 `num_experts % ep == 0`;dense 禁 ep;SM120 禁 prefill=trtllm_mha。
-2. **schema 期**:`gpu_count == tp_size × pp_size`(Pydantic 校验)。
-3. **render 期**:每条命令的 flag 按 image.flag_aliases 翻译成本版真名后,∈ image.valid_flags 白名单;不在即拒绝。
-
-**边界(如实)**:加轴/加档/加卡/加镜像/加模型 = 零代码改动;但全新一类硬约束(如将来上 SM100 要拦 cutlass)仍需改 rule_checker。
+确定性校验只用于两件事：`scripts/validate_knowledge.py` 检查 YAML 规则库没有坏格式、
+重复 ID 或缺证据；输出 JSON Schema 检查 AI 返回能被下游读取。新增普通规则不需要改
+生成器代码，新增模型/镜像事实才更新对应 catalogs。
 
 ---
 
@@ -119,8 +120,16 @@ catalogs/                          # 共享、引擎无关(vllm skill 也复用)
 schemas/                           # Pydantic 契约,在项目根
   job_spec.py
 .claude/skills/sglang-server-config-gen/  # 本 skill(claude 从这里加载)
-  SKILL.md        # 本文件:入口(读什么、步骤、输出、闸)
-  knowledge.md    # 全部调优经验+判据(改经验改这里)
+  SKILL.md        # 本文件:入口(读什么、步骤、输出)
+  knowledge.md    # 规则索引和新增流程
+  references/rules/  # 按主题逐条追加的 YAML 规则
+    README.md
+    attention.yaml
+    parallelism.yaml
+    memory.yaml
+    speculative.yaml
+    scheduling.yaml
+    fairness.yaml
   # sglang-images.yaml 在 catalogs/ 下(引擎相关镜像事实)
 ```
 

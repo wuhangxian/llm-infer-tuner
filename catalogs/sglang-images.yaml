@@ -1,5 +1,5 @@
 # SGLang 镜像目录(一版 sglang = 一条)。key = JobSpec.image。
-# 字段:image_ref/attention_backends/flag_aliases/valid_flags。
+# 字段:image_ref/attention_backends/speculative_algorithms/flag_aliases/valid_flags。
 # valid_flags 由 scripts/sync_sglang_params.py 从源码 AST 自动提取。
 
 version: 2
@@ -10,6 +10,8 @@ images:
   # -- I01_sglang-v0.5.10: lmsysorg/sglang:v0.5.10 --------------------------------
   I01_sglang-v0.5.10:
     image_ref: lmsysorg/sglang:v0.5.10
+    # 引擎内置名称；不代表任意模型都有对应 draft 权重。
+    speculative_algorithms: [EAGLE, EAGLE3, STANDALONE, NGRAM, NONE]
     attention_backends:
     - aiter
     - ascend
@@ -516,6 +518,7 @@ images:
   # -- I02_sglang-v0.5.13: lmsysorg/sglang:v0.5.13 --------------------------------
   I02_sglang-v0.5.13:
     image_ref: lmsysorg/sglang:v0.5.13
+    speculative_algorithms: [DFLASH, EAGLE, EAGLE3, FROZEN_KV_MTP, STANDALONE, NGRAM, NONE]
     attention_backends:
     - aiter
     - ascend
@@ -1022,6 +1025,7 @@ images:
   # -- I03_sglang-v0.5.16: hai-beijing.tencentcloudcr.com/ai/sglang:v0.5.16-cu129 --------------------------------
   I03_sglang-v0.5.16:
     image_ref: hai-beijing.tencentcloudcr.com/ai/sglang:v0.5.16-cu129
+    speculative_algorithms: [DFLASH, DSPARK, EAGLE, EAGLE3, FROZEN_KV_MTP, STANDALONE, NGRAM, NONE]
     attention_backends:
     - aiter
     - ascend
@@ -1524,4 +1528,3 @@ images:
     - weight_loader_prefetch_checkpoints
     - weight_loader_prefetch_num_threads
     - weight_version
-

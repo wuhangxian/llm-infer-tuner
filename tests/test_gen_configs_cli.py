@@ -93,6 +93,10 @@ def script_project(tmp_path: Path) -> ScriptProject:
     skill_dir = tmp_path / ".claude/skills/sglang-server-config-gen"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("# test skill\n")
+    shutil.copytree(
+        REPO_ROOT / ".claude/skills/sglang-server-config-gen/references",
+        skill_dir / "references",
+    )
 
     job = tmp_path / "job.json"
     job.write_text(json.dumps({"job_id": "tclaude-cli-test"}))

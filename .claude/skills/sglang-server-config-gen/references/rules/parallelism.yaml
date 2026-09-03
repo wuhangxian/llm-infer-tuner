@@ -1,0 +1,87 @@
+schema_version: 1
+topic: parallelism
+description: 推导 TP、PP、EP 和量化精度的并行准入与排序规则。
+rules:
+  - id: parallelism.tp.weight_fit
+    title: TP 先看权重能否放进单卡
+    status: active
+    confidence: medium
+    applies_when:
+      engine: sglang
+    guidance: |
+      TP 候选是满足 weight_gb[precision] / tp <= gpu_memory_gb 的 2 的幂，不能因为
+      KV 余量估算小就直接删除；KV 余量只用于排序和提示，真实上限交给启动日志与压测。
+      不要因为机器有 N 张卡就默认 tp=N。
+    evidence:
+      kind: judgment
+      ref: "参数寻优设计：权重准入与 KV 实测分离"
+      verified_with: "project-rule-v1"
+    tags: [tp, memory, ranking]
+
+  - id: parallelism.tp.block_quantization_divisibility
+    title: 块/组量化必须检查 TP 整除
+    status: active
+    confidence: high
+    applies_when:
+      quantization_scheme: [fine-grained, block, group]
+    guidance: |
+      细粒度 FP8、AWQ/GPTQ 等块或组量化，切分后的 intermediate 或
+      moe_intermediate_size 必须仍是完整 block_size；可用
+      tp_max=floor(intermediate_size/block_size)，并保留满足整除的 2 的幂。
+      小专家 MoE 最容易撞墙。卡片缺少 intermediate/block_size 时，不要假设能切满
+      全部 GPU；可以生成带风险说明的实验候选，但要把“未核对整除性”写进 reasons。
+    evidence:
+      kind: measured
+      ref: "SGLang 量化权重加载 ValueError: output_size not divisible by block_n"
+      verified_with: "sglang-v0.5.10"
+    tags: [tp, quantization, moe, startup]
+
+  - id: parallelism.pp.single_node_disabled
+    title: 单机默认不搜索 PP
+    status: active
+    confidence: medium
+    applies_when:
+      deployment: single-node
+    guidance: |
+      单机服务把 pipeline-parallel-size 固定为 1；候选 GPU 数主要由 TP/EP 组合解释。
+      只有用户明确要求跨节点或验证 PP 时，才把 PP 作为实验轴。
+    evidence:
+      kind: judgment
+      ref: "单机流水线气泡与候选可比性设计"
+      verified_with: "project-rule-v1"
+    tags: [pp, tp, single-node]
+
+  - id: parallelism.ep.moe_only
+    title: EP 只对 MoE 生成且必须满足整除
+    status: active
+    confidence: high
+    applies_when:
+      engine: sglang
+    guidance: |
+      只有模型卡 is_moe/num_experts 表明是 MoE 时才生成 EP；dense 模型不生成 ep 轴。
+      保留 ep=1 基线，其他 ep 取 tp 的 2 的幂因子，并同时满足 tp_size % ep_size == 0
+      和 num_experts % ep_size == 0。吞吐、OOM 与通信收益交给实测，不在知识规则里假定。
+    evidence:
+      kind: source
+      ref: "SGLang parallel_state.py 和 expert_location.py"
+      verified_with: "sglang-v0.5.10"
+    tags: [ep, moe, tp]
+
+  - id: parallelism.precision.admission
+    title: 精度按目标环境诚实处理
+    status: active
+    confidence: medium
+    applies_when:
+      engine: sglang
+    guidance: |
+      当前已验证的端到端精度优先为 none/bf16/fp8；nvfp4 需要模型卡的
+      nvfp4_requires_sm 门槛。未验证格式不要假装已经支持：如果用户允许探索，可以
+      降级到模型已有 fp8/bf16 并在 reasons 明确写出原精度和降级原因；否则保留为
+      experimental 候选并让执行器实测。
+    evidence:
+      kind: judgment
+      ref: "目标 NVIDIA + SGLang 环境的端到端精度边界"
+      verified_with: "project-rule-v1"
+    tags: [precision, quantization, gpu]
+
+
