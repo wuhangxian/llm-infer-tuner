@@ -8,15 +8,8 @@
 #   ./run_executor.sh <configs.jsonl>
 #   configs.jsonl 第一行是 _meta(SLA/workload/target 信息),后面每行一条候选
 #
-# 脚本分 5 步确定性操作,不涉及 AI 决策。
+# 压测命令由 JobSpec + workload + benchmark_method 确定性生成,第二阶段不调用 AI。
 set -euo pipefail
-
-# Load .env for claude API credentials
-if [ -f .env ]; then
-  set -a
-  . ./.env
-  set +a
-fi
 
 command -v jq >/dev/null || { echo "❌ 需要 jq" >&2; exit 1; }
 
@@ -91,12 +84,40 @@ CONTAINER_NAME="llm-infer-tuner-${JOB_ID}"
 
 echo "▶ 执行器参数一览:" >&2
 echo "    job_id=$JOB_ID  max_candidates=$MAX_CAND" >&2
+echo "    bench_command=deterministic(no AI)" >&2
 echo "    ssh=$SSH_TARGET" >&2
   echo "    image=$IMAGE_REF  container=$CONTAINER_NAME  port=$PORT" >&2
 echo "    model(host)=$MODEL_HOST_DIR" >&2
 echo "    model(container)=$MODEL_CONTAINER_PATH" >&2
 echo "    configs=$CONFIGS  results=$RESULTS" >&2
 echo >&2
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 可选:整机满载(round2)。用环境变量开,默认关,不影响原有单参数用法。
+#   FILL_HOST=1 ./run_executor.sh <configs.json>   # round2 把 top-K 各复制成
+#     floor(gpu/tp) 个实例整机满载、多端口并发实测求和(而非单实例纸面外推)。
+#   MAX_PARALLEL=N  批内候选并发上限(满载下每候选独占整机,通常不用改)。
+# ─────────────────────────────────────────────────────────────────────────
+EXTRA_ARGS=()
+if [ "${FILL_HOST:-0}" = "1" ] || [ "${FILL_HOST:-}" = "true" ]; then
+  EXTRA_ARGS+=(--fill-host)
+  echo "    ⚡ fill_host=ON:round2 整机满载实测(floor(gpu/tp) 实例并发求和)" >&2
+fi
+if [ -n "${MAX_PARALLEL:-}" ]; then
+  EXTRA_ARGS+=(--max-parallel "$MAX_PARALLEL")
+  echo "    max_parallel=$MAX_PARALLEL" >&2
+fi
+
+# 只限制服务拉起，不限制整个任务运行时间。可按机器/模型覆盖。
+STARTUP_STALL_TIMEOUT_SECONDS="${STARTUP_STALL_TIMEOUT_SECONDS:-300}"
+STARTUP_HARD_TIMEOUT_SECONDS="${STARTUP_HARD_TIMEOUT_SECONDS:-900}"
+STARTUP_MAX_ATTEMPTS="${STARTUP_MAX_ATTEMPTS:-3}"
+EXTRA_ARGS+=(
+  --startup-stall-timeout "$STARTUP_STALL_TIMEOUT_SECONDS"
+  --startup-hard-timeout "$STARTUP_HARD_TIMEOUT_SECONDS"
+  --startup-max-attempts "$STARTUP_MAX_ATTEMPTS"
+)
+echo "    startup: stall=${STARTUP_STALL_TIMEOUT_SECONDS}s hard=${STARTUP_HARD_TIMEOUT_SECONDS}s attempts=${STARTUP_MAX_ATTEMPTS}; job_timeout=none" >&2
 
 exec uv run python -m runners.executor \
   --job "$JOB" \
@@ -113,4 +134,5 @@ exec uv run python -m runners.executor \
   --remote-outputs-dir "$REMOTE_OUTPUTS_DIR" \
   --target-gpu-model "$TARGET_GPU_MODEL" \
   --target-gpu-count "$TARGET_GPU_COUNT" \
-  --target-gpu-memory-gb "$TARGET_GPU_MEM"
+  --target-gpu-memory-gb "$TARGET_GPU_MEM" \
+  "${EXTRA_ARGS[@]}"

@@ -22,7 +22,7 @@
     {
       "id": "c001",
       "params": {
-        "tp_size": 2,
+        "tp_size": 1,
         "trust_remote_code": true,
         "kv_cache_dtype": "fp8_e4m3",
         "mem_fraction_static": 0.85,

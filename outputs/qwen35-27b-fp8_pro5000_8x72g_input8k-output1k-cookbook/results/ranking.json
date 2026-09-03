@@ -1,0 +1,25 @@
+[
+  {
+    "candidate_id": "baseline",
+    "tp_size": 1,
+    "instances_per_host": 8.0,
+    "goodput_raw": 0.0,
+    "goodput_per_host": 0.0,
+    "best_concurrency": null,
+    "request_throughput": 0.0,
+    "output_throughput": 0.0,
+    "total_throughput": 0.0,
+    "mean_ttft_ms": 0.0,
+    "p99_ttft_ms": 0.0,
+    "mean_tpot_ms": 0.0,
+    "p99_tpot_ms": 0.0,
+    "success_rate": 0.0,
+    "avg_output_tokens": 0.0,
+    "rank": 1,
+    "baseline_goodput_per_host": 0.0,
+    "threshold_goodput_per_host": 0.0,
+    "goodput_delta": 0.0,
+    "goodput_delta_pct": null,
+    "beats_baseline_threshold": false
+  }
+]

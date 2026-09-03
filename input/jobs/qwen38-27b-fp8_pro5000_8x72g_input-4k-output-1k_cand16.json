@@ -15,6 +15,21 @@
   },
   "search": {
     "max_candidates": 16,
-    "max_runtime_minutes": 180
+    "max_runtime_minutes": 180,
+    "baseline": {
+      "trust_remote_code": true,
+      "kv_cache_dtype": "fp8_e4m3",
+      "mem_fraction_static": 0.85,
+      "attention_backend": "flashinfer",
+      "chunked_prefill_size": 2048,
+      "reasoning_parser": "qwen3",
+      "tool_call_parser": "qwen3_coder",
+      "mamba_full_memory_ratio": 4.59,
+      "mamba_radix_cache_strategy": "extra_buffer",
+      "mamba_ssm_dtype": "float32",
+      "page_size": 64,
+      "tp_size": 1
+    },
+    "baseline_threshold_pct": 0
   }
 }

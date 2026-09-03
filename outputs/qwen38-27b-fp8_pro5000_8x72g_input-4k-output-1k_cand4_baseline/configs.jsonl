@@ -1,0 +1,115 @@
+{
+  "candidates": [
+    {
+      "id": "baseline",
+      "params": {
+        "is_baseline": true,
+        "trust_remote_code": true,
+        "kv_cache_dtype": "fp8_e4m3",
+        "mem_fraction_static": 0.85,
+        "attention_backend": "flashinfer",
+        "chunked_prefill_size": 2048,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "mamba_full_memory_ratio": 4.59,
+        "mamba_radix_cache_strategy": "extra_buffer",
+        "mamba_ssm_dtype": "float32",
+        "page_size": 64,
+        "tp_size": 1
+      },
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --trust-remote-code --kv-cache-dtype fp8_e4m3 --mem-fraction-static 0.85 --attention-backend flashinfer --chunked-prefill-size 2048 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --mamba-full-memory-ratio 4.59 --mamba-radix-cache-strategy extra_buffer --mamba-ssm-dtype float32 --page-size 64 --tp-size 1",
+      "reasons": [
+        "Strict-mode baseline reproduction: params hold exactly the user's explicit baseline fields, no pin/default_flag added (is_baseline marker excepted).",
+        "models.yaml M55 default_flags=trust-remote-code:true is already present in user's baseline, so the hard-startup exception is satisfied; nothing auto-added.",
+        "mamba_radix_cache_strategy=extra_buffer is reproduced as the user wrote it for audit, but per fairness rule executor forces --disable-radix-cache, so extra_buffer is recorded effective=inactive (no_buffer-equivalent) and is NOT a valid tuning axis between candidates.",
+        "reasoning_parser=qwen3 / tool_call_parser=qwen3_coder / mamba_full_memory_ratio=4.59 / mamba_ssm_dtype=float32 are user-explicit values, reproduced verbatim; M55 itself declares supports_reasoning:false/supports_tool_call:false with no parsers in default_flags, but strict mode preserves user intent.",
+        "Radix/Prefix cache disabled by executor (not written here) so all candidates are compared on pure inference, no cache-hit contamination."
+      ]
+    },
+    {
+      "id": "c001",
+      "params": {
+        "tp_size": 2,
+        "attention_backend": "flashinfer",
+        "mem_fraction_static": 0.86,
+        "kv_cache_dtype": "fp8_e4m3",
+        "chunked_prefill_size": 8192,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "trust_remote_code": true,
+        "disable_radix_cache": true
+      },
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --trust-remote-code --kv-cache-dtype fp8_e4m3 --mem-fraction-static 0.86 --attention-backend flashinfer --chunked-prefill-size 8192 --mamba-radix-cache-strategy no_buffer --page-size 1 --tp-size 2",
+      "reasons": [
+        "High-impact TP sweep: tp=2 on 8x72G Pro5000 (SM120). TP must divide the 4 KV heads and 17408 intermediate (÷128) => valid set {1,2,4}; tp=8 invalid (4 KV heads can't split across 8).",
+        "attention=flashinfer (SM120 shortlist [flashinfer,triton]); mamba_radix_cache_strategy=no_buffer (extra_buffer excluded per §5/§7, conflicts with pinned radix-off).",
+        "Mem-fraction 0.86 = hybrid_mamba upper bound (SSM state pool ~17GB sits outside the mem-fraction pool; ≥0.88 crashes at capture, §3a). kv=fp8_e4m3 halves KV/token, chunk=8192 hybrid cap.",
+        "page_size=1 forced by no_buffer+radix-off (§5); trust-remote-code from M55 default_flags; disable_radix_cache pinned on every candidate.",
+        "Holds mf/kv/chunk constant vs baseline so the TP lever is isolated for clean comparison."
+      ]
+    },
+    {
+      "id": "c002",
+      "params": {
+        "tp_size": 4,
+        "attention_backend": "flashinfer",
+        "mem_fraction_static": 0.86,
+        "kv_cache_dtype": "fp8_e4m3",
+        "chunked_prefill_size": 8192,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "trust_remote_code": true,
+        "disable_radix_cache": true
+      },
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --trust-remote-code --kv-cache-dtype fp8_e4m3 --mem-fraction-static 0.86 --attention-backend flashinfer --chunked-prefill-size 8192 --mamba-radix-cache-strategy no_buffer --page-size 1 --tp-size 4",
+      "reasons": [
+        "High-impact TP sweep to tp=4: knowledge §2 notes tp=4 is the throughput-optimal point for this model family (tp=8 even if it started would be slower due to heavier all-reduce, and is invalid here anyway).",
+        "Valid on SM120: 4 KV heads / tp4 = 1, 24 q-heads / 4 = 6, 48 value-heads / 4 = 12, 17408 intermediate ÷ (128×4) integer — all clean.",
+        "Same hybrid-safe envelope as c001 (mf 0.86, kv fp8, chunk 8192, no_buffer, page 1, trust-remote-code, radix-off) so only TP differs from c001.",
+        "EP not searched: M55 has 65 experts (odd) => no power-of-2 >1 divides it, EP collapses to 1 (§2)."
+      ]
+    },
+    {
+      "id": "c003",
+      "params": {
+        "tp_size": 1,
+        "attention_backend": "triton",
+        "mem_fraction_static": 0.86,
+        "kv_cache_dtype": "fp8_e4m3",
+        "chunked_prefill_size": 8192,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "trust_remote_code": true,
+        "disable_radix_cache": true
+      },
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --trust-remote-code --kv-cache-dtype fp8_e4m3 --mem-fraction-static 0.86 --attention-backend triton --chunked-prefill-size 8192 --mamba-radix-cache-strategy no_buffer --page-size 1 --tp-size 1",
+      "reasons": [
+        "High-impact attention sweep: triton backend (SM120 shortlist [flashinfer,triton]; fa3 excluded on SM120, prefill trtllm_mha excluded).",
+        "tp=1 keeps all 8 GPUs free for KV/SSM headroom; with input only 4k (W04) TP1 is not penalized by the >32k long-input rule.",
+        "Same hybrid-safe envelope (mf 0.86, kv fp8, chunk 8192, no_buffer, page 1, trust-remote-code, radix-off) as c001/c002 so only the backend differs from the tp=1 flashinfer baseline-equivalent.",
+        "No --context-length written (§0 red line); KV auto-sizes from remaining memory."
+      ]
+    },
+    {
+      "id": "c004",
+      "params": {
+        "tp_size": 2,
+        "attention_backend": "triton",
+        "mem_fraction_static": 0.86,
+        "kv_cache_dtype": "fp8_e4m3",
+        "chunked_prefill_size": 8192,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "trust_remote_code": true,
+        "disable_radix_cache": true
+      },
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --trust-remote-code --kv-cache-dtype fp8_e4m3 --mem-fraction-static 0.86 --attention-backend triton --chunked-prefill-size 8192 --mamba-radix-cache-strategy no_buffer --page-size 1 --tp-size 2",
+      "reasons": [
+        "Cross point of the two high-impact axes: tp=2 x triton, completing the TP{1,2,4}xattention{flashinfer,triton} matrix (baseline=c001-equivalent tp1 flashinfer, c001 tp2 flashinfer, c002 tp4 flashinfer, c003 tp1 triton).",
+        "Valid on SM120 (4 KV heads / tp2 = 2). Same hybrid-safe envelope so the tp×backend interaction is isolated.",
+        "mamba_radix_cache_strategy=no_buffer + page_size=1 (forced by radix-off); trust-remote-code from M55 default_flags; disable_radix_cache pinned.",
+        "Speculative decoding intentionally omitted: M55 mtp_params=DSPARK with no speculative-draft-model-path => would crash on start (§5); only EAGLE/NEXTN may be issued bare, and M55 is not one of those."
+      ]
+    }
+  ]
+}

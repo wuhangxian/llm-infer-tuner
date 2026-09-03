@@ -158,7 +158,7 @@
   <section>
     <p class="eyebrow">系统全景</p>
     <h2>两阶段流水线:一次生成,一次实测</h2>
-    <p class="sub">AI 只在两处被调用(下图<span class="ink-ai">琥珀</span>环节);其余起服务、压测、判定、排名全是<span class="ink-code">确定性代码</span>——可复现、可审计、换机器不必重跑 AI。</p>
+    <p class="sub">AI 只在阶段一生成候选时调用;阶段二的压测命令、起服务、压测、判定和排名全是<span class="ink-code">确定性代码</span>——可复现、可审计,也不受 AI 额度影响。</p>
 
     <figure>
       <div class="figcard">
@@ -223,7 +223,7 @@
           <text x="686" y="152" text-anchor="middle" font-size="11.5" font-family="IBM Plex Sans" fill="currentColor">自适应并发 sweep</text>
           <text x="686" y="172" text-anchor="middle" font-size="11.5" font-family="IBM Plex Sans" fill="currentColor">采指标 · 算 goodput</text>
           <text x="686" y="196" text-anchor="middle" font-size="11" font-family="IBM Plex Mono,monospace" fill="var(--code)">逐候选循环</text>
-          <text x="686" y="222" text-anchor="middle" font-size="11" font-family="IBM Plex Mono,monospace" fill="var(--ai)">◆ AI 调用 ② 出压测命令</text>
+          <text x="686" y="222" text-anchor="middle" font-size="10.5" font-family="IBM Plex Mono,monospace" fill="var(--code)">workload + method 拼命令</text>
 
           <!-- ranking output -->
           <rect x="812" y="98" width="164" height="104" rx="10" fill="var(--surface)" stroke="var(--good)" stroke-width="1.8"/>
@@ -265,7 +265,7 @@
   <section>
     <p class="eyebrow">为什么可信</p>
     <h2>AI 灵活出题,代码严格阅卷</h2>
-    <p class="sub">全流程 AI 只被调用两次,且产物都要过确定性校验;所有「谁快谁慢」的判定不含任何 AI 主观打分。</p>
+    <p class="sub">全流程 AI 只在阶段一调用一次;阶段二直接读取结构化配置生成压测命令,所有「谁快谁慢」的判定不含任何 AI 主观打分。</p>
 
     <div class="calls">
       <div class="call">
@@ -274,9 +274,9 @@
         <p>读 skill 知识库(调优判据)+ catalogs 事实表(卡算力/模型架构/负载),推导张量并行度、注意力后端、显存占比等,拼出一批候选启动命令,并给出每条选择的理由。</p>
       </div>
       <div class="call">
-        <div class="n">AI 调用 ② — 阶段二启动时</div>
-        <h3>生成压测命令模板</h3>
-        <p>按工作负载出 bench_serving 分并发压测命令模板;随后环境变量替换、真机执行、指标解析、SLA 判定、goodput 排名——全部由确定性代码完成。</p>
+        <div class="n">确定性代码 — 阶段二启动时</div>
+        <h3>本地拼压测命令模板</h3>
+        <p>读取 workload 与 benchmark method,本地拼出 bench_serving 命令;随后环境变量替换、真机执行、指标解析、SLA 判定、goodput 排名——全程不调用 AI。</p>
       </div>
     </div>
 
@@ -308,7 +308,7 @@
         <div class="k">SLA 饱和并发点</div>
       </div>
       <div class="stat">
-        <div class="v">2 次</div>
+        <div class="v">1 次</div>
         <div class="k">全流程 AI 调用总数</div>
       </div>
     </div>

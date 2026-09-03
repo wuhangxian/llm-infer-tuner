@@ -26,6 +26,10 @@ class RunResult:
     avg_output_tokens: float
     duration: float
     tp_size: int = 1
+    # 本条 total_throughput 是几个并发实例求和得来的。round1 单实例粗筛 = 1;
+    # round2 整机满载 = floor(gpu_count/tp_size) 个副本的实测求和。ranker 用它
+    # 把外推乘数除回去,使满载实测不被二次外推(详见 ranker._best_qualifying)。
+    instances: int = 1
     status: str = "ok"
     failure_reason: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
@@ -48,10 +52,12 @@ def _as_int(value: Any) -> int:
             return 0
 
 
-def _empty_result(candidate_id: str, concurrency: int, num_prompts: int) -> RunResult:
+def _empty_result(
+    candidate_id: str, concurrency: int, num_prompts: int, tp_size: int = 1
+) -> RunResult:
     return RunResult(
         candidate_id=candidate_id,
-        tp_size=1,
+        tp_size=tp_size,
         concurrency=concurrency,
         num_prompts=num_prompts,
         completed=0,
@@ -96,7 +102,7 @@ def parse_bench_text(
 ) -> RunResult:
     record = _select_record(text or "", concurrency)
     if record is None:
-        return _empty_result(candidate_id, concurrency, num_prompts)
+        return _empty_result(candidate_id, concurrency, num_prompts, tp_size)
 
     completed = _as_int(record.get("completed"))
     total_output_tokens = _as_int(record.get("total_output_tokens"))
@@ -105,7 +111,7 @@ def parse_bench_text(
 
     return RunResult(
         candidate_id=candidate_id,
-        tp_size=1,
+        tp_size=tp_size,
         concurrency=concurrency,
         num_prompts=num_prompts,
         completed=completed,
@@ -133,7 +139,7 @@ def parse_bench_file(
     try:
         text = Path(path).read_text(encoding="utf-8")
     except OSError:
-        return _empty_result(candidate_id, concurrency, num_prompts)
+        return _empty_result(candidate_id, concurrency, num_prompts, tp_size)
     return parse_bench_text(
         text, candidate_id=candidate_id, concurrency=concurrency,
         num_prompts=num_prompts, tp_size=tp_size

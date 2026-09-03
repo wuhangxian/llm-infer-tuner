@@ -1,0 +1,309 @@
+{
+  "candidates": [
+    {
+      "id": "baseline",
+      "params": {
+        "tp_size": 1,
+        "attention_backend": "flashinfer",
+        "mem_fraction_static": 0.92,
+        "disable_radix_cache": true,
+        "is_baseline": true
+      },
+      "cmd": "python -m sglang.launch_server --tp-size 1 --attention-backend flashinfer --mem-fraction-static 0.92 --disable-radix-cache --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000",
+      "reasons": [
+        "用户基线复现(严格模式):仅原样保留 search.baseline 显式字段{tp_size:1, attention_backend:flashinfer, mem_fraction_static:0.92, disable_radix_cache:true},不补任何 §3/§4 默认 flag",
+        "硬启动例外#1(trust-remote-code)不适用——M41 default_flags 无 trust-remote-code;例外#2(mamba+page-size)不适用——未写 mamba 策略",
+        "⚠️ 风险:hybrid_mamba=true,SSM 状态池分配在 mem-fraction 池外,§3a 规定上界 0.86,≥0.88 会在 CUDA graph capture 阶段崩。基线 0.92 大概率启动即崩,属用户显式意图复现,标记 high 风险"
+      ]
+    },
+    {
+      "id": "c001",
+      "params": {
+        "tp_size": 1,
+        "attention_backend": "flashinfer",
+        "chunked_prefill_size": 4096,
+        "mem_fraction_static": 0.86,
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen25"
+      },
+      "cmd": "python -m sglang.launch_server --tp-size 1 --attention-backend flashinfer --chunked-prefill-size 4096 --mem-fraction-static 0.86 --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen25 --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000",
+      "reasons": [
+        "TP 锚点1/4: dense_hybrid_gdn + per-tensor 量化,无块量化整除约束,52G(est)权重在 72G 卡上任一切分度都放得下(§2),故 TP∈{1,2,4,8} 全保留",
+        "input=8192<32768,TP1 不降序(§2 排序提示);mem=0.86 取 hybrid_mamba 安全上界(§3a);attention=flashinfer(SM120 首选)",
+        "reasoning/tool parser 自模型 default_flags(§4)"
+      ]
+    },
+    {
+      "id": "c002",
+      "params": {
+        "tp_size": 2,
+        "attention_backend": "flashinfer",
+        "chunked_prefill_size": 4096,
+        "mem_fraction_static": 0.86,
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen25"
+      },
+      "cmd": "python -m sglang.launch_server --tp-size 2 --attention-backend flashinfer --chunked-prefill-size 4096 --mem-fraction-static 0.86 --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen25 --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000",
+      "reasons": [
+        "TP 锚点2/4: TP2 权重 26G/卡,余量充足",
+        "高影响轴 TP 扫描首条(§6.1)"
+      ]
+    },
+    {
+      "id": "c003",
+      "params": {
+        "tp_size": 4,
+        "attention_backend": "flashinfer",
+        "chunked_prefill_size": 4096,
+        "mem_fraction_static": 0.86,
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen25"
+      },
+      "cmd": "python -m sglang.launch_server --tp-size 4 --attention-backend flashinfer --chunked-prefill-size 4096 --mem-fraction-static 0.86 --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen25 --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000",
+      "reasons": [
+        "TP 锚点3/4: TP4 权重 13G/卡",
+        "作为后续注意/内存/投机交叉的基准 TP"
+      ]
+    },
+    {
+      "id": "c004",
+      "params": {
+        "tp_size": 8,
+        "attention_backend": "flashinfer",
+        "chunked_prefill_size": 4096,
+        "mem_fraction_static": 0.86,
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen25"
+      },
+      "cmd": "python -m sglang.launch_server --tp-size 8 --attention-backend flashinfer --chunked-prefill-size 4096 --mem-fraction-static 0.86 --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen25 --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000",
+      "reasons": [
+        "TP 锚点4/4: TP8 权重仅 6.5G/卡,SSM 池+KV 余量极大",
+        "dense 无块量化约束故 TP8 合法(per-tensor 不受限);用于对比通信开销对 27B dense 的影响"
+      ]
+    },
+    {
+      "id": "c005",
+      "params": {
+        "tp_size": 1,
+        "attention_backend": "flashinfer",
+        "chunked_prefill_size": 4096,
+        "mem_fraction_static": 0.86,
+        "speculative_algorithm": "EAGLE3",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen25"
+      },
+      "cmd": "python -m sglang.launch_server --tp-size 1 --attention-backend flashinfer --chunked-prefill-size 4096 --mem-fraction-static 0.86 --speculative-algorithm EAGLE3 --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen25 --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000",
+      "reasons": [
+        "高影响 TP×投机 交叉: TP1 + EAGLE3。M41 supports_mtp=true,投机轴=[无,EAGLE3],算法名与配套值取自 mtp_params(§3)",
+        "EAGLE3 + no_buffer(默认) + disable_radix_cache 合法(§7);TP1 通信最轻,投机收益最易被观察"
+      ]
+    },
+    {
+      "id": "c006",
+      "params": {
+        "tp_size": 2,
+        "attention_backend": "flashinfer",
+        "chunked_prefill_size": 4096,
+        "mem_fraction_static": 0.86,
+        "speculative_algorithm": "EAGLE3",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen25"
+      },
+      "cmd": "python -m sglang.launch_server --tp-size 2 --attention-backend flashinfer --chunked-prefill-size 4096 --mem-fraction-static 0.86 --speculative-algorithm EAGLE3 --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen25 --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000",
+      "reasons": [
+        "高影响 TP×投机 交叉: TP2 + EAGLE3",
+        "中通信度下验证投机解码接受率与吞吐增益"
+      ]
+    },
+    {
+      "id": "c007",
+      "params": {
+        "tp_size": 4,
+        "attention_backend": "flashinfer",
+        "chunked_prefill_size": 4096,
+        "mem_fraction_static": 0.86,
+        "speculative_algorithm": "EAGLE3",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen25"
+      },
+      "cmd": "python -m sglang.launch_server --tp-size 4 --attention-backend flashinfer --chunked-prefill-size 4096 --mem-fraction-static 0.86 --speculative-algorithm EAGLE3 --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen25 --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000",
+      "reasons": [
+        "高影响 TP×投机 交叉: TP4 + EAGLE3",
+        "高通信度下投机是否仍能摊薄 decode 延迟"
+      ]
+    },
+    {
+      "id": "c008",
+      "params": {
+        "tp_size": 2,
+        "attention_backend": "triton",
+        "chunked_prefill_size": 4096,
+        "mem_fraction_static": 0.86,
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen25"
+      },
+      "cmd": "python -m sglang.launch_server --tp-size 2 --attention-backend triton --chunked-prefill-size 4096 --mem-fraction-static 0.86 --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen25 --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000",
+      "reasons": [
+        "高影响 attention 轴: TP2 + triton(SM120 次选后端,§1)",
+        "与 flashinfer 对照看吞吐/延迟差异(通常 10-30%,§6.1)"
+      ]
+    },
+    {
+      "id": "c009",
+      "params": {
+        "tp_size": 4,
+        "attention_backend": "triton",
+        "chunked_prefill_size": 4096,
+        "mem_fraction_static": 0.86,
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen25"
+      },
+      "cmd": "python -m sglang.launch_server --tp-size 4 --attention-backend triton --chunked-prefill-size 4096 --mem-fraction-static 0.86 --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen25 --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000",
+      "reasons": [
+        "高影响 attention 轴: TP4 + triton",
+        "triton 在 8k prefill 下的表现对照"
+      ]
+    },
+    {
+      "id": "c010",
+      "params": {
+        "tp_size": 4,
+        "attention_backend": "flashinfer",
+        "chunked_prefill_size": 4096,
+        "mem_fraction_static": 0.82,
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen25"
+      },
+      "cmd": "python -m sglang.launch_server --tp-size 4 --attention-backend flashinfer --chunked-prefill-size 4096 --mem-fraction-static 0.82 --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen25 --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000",
+      "reasons": [
+        "中影响 mem-fraction 轴(中点): TP4 + flashinfer + mem=0.82",
+        "在 SSM 池外余量下寻找并发上限与稳定性的平衡(§3a [0.78,0.82,0.86])"
+      ]
+    },
+    {
+      "id": "c011",
+      "params": {
+        "tp_size": 4,
+        "attention_backend": "flashinfer",
+        "chunked_prefill_size": 4096,
+        "mem_fraction_static": 0.78,
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen25"
+      },
+      "cmd": "python -m sglang.launch_server --tp-size 4 --attention-backend flashinfer --chunked-prefill-size 4096 --mem-fraction-static 0.78 --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen25 --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000",
+      "reasons": [
+        "中影响 mem-fraction 轴(下界): mem=0.78 最保守",
+        "并发上限最低但启动最稳,作为对照下界"
+      ]
+    },
+    {
+      "id": "c012",
+      "params": {
+        "tp_size": 2,
+        "attention_backend": "flashinfer",
+        "chunked_prefill_size": 4096,
+        "mem_fraction_static": 0.82,
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen25"
+      },
+      "cmd": "python -m sglang.launch_server --tp-size 2 --attention-backend flashinfer --chunked-prefill-size 4096 --mem-fraction-static 0.82 --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen25 --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000",
+      "reasons": [
+        "中影响 mem-fraction × TP2: 验证中等并行度下 mem 0.82 的并发表现"
+      ]
+    },
+    {
+      "id": "c013",
+      "params": {
+        "tp_size": 8,
+        "attention_backend": "flashinfer",
+        "chunked_prefill_size": 4096,
+        "mem_fraction_static": 0.82,
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen25"
+      },
+      "cmd": "python -m sglang.launch_server --tp-size 8 --attention-backend flashinfer --chunked-prefill-size 4096 --mem-fraction-static 0.82 --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen25 --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000",
+      "reasons": [
+        "中影响 mem-fraction × TP8: 高并行度 + 中档 mem",
+        "看能否在 SSM 池外余量内撑更高并发"
+      ]
+    },
+    {
+      "id": "c014",
+      "params": {
+        "tp_size": 4,
+        "attention_backend": "flashinfer",
+        "chunked_prefill_size": 4096,
+        "mem_fraction_static": 0.82,
+        "speculative_algorithm": "EAGLE3",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen25"
+      },
+      "cmd": "python -m sglang.launch_server --tp-size 4 --attention-backend flashinfer --chunked-prefill-size 4096 --mem-fraction-static 0.82 --speculative-algorithm EAGLE3 --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen25 --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000",
+      "reasons": [
+        "高影响交叉(投机×内存): TP4 + EAGLE3 + mem 0.82",
+        "验证投机解码在中档 mem 下的稳定性"
+      ]
+    },
+    {
+      "id": "c015",
+      "params": {
+        "tp_size": 4,
+        "attention_backend": "flashinfer",
+        "chunked_prefill_size": 8192,
+        "mem_fraction_static": 0.86,
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen25"
+      },
+      "cmd": "python -m sglang.launch_server --tp-size 4 --attention-backend flashinfer --chunked-prefill-size 8192 --mem-fraction-static 0.86 --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen25 --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000",
+      "reasons": [
+        "低影响 chunked-prefill 轴上界: 8192(§3 [4096,8192] hybrid 上界)",
+        "8k 输入 prefill 峰值激活叠加 SSM 池,是 hybrid 上界,有 capture OOM 风险故仅此一档试探"
+      ]
+    },
+    {
+      "id": "c016",
+      "params": {
+        "tp_size": 4,
+        "attention_backend": "flashinfer",
+        "chunked_prefill_size": 4096,
+        "mem_fraction_static": 0.86,
+        "kv_cache_dtype": "fp8_e4m3",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen25"
+      },
+      "cmd": "python -m sglang.launch_server --tp-size 4 --attention-backend flashinfer --chunked-prefill-size 4096 --mem-fraction-static 0.86 --kv-cache-dtype fp8_e4m3 --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen25 --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000",
+      "reasons": [
+        "低影响 kv-cache-dtype 轴: fp8_e4m3(§3 [auto, fp8_e4m3])腰斩 KV/token,提升并发上限",
+        "需配合精度验证(§3 注);TP4 锚定"
+      ]
+    }
+  ]
+}

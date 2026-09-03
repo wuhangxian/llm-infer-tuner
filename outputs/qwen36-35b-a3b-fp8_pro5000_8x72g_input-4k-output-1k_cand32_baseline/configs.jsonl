@@ -1,0 +1,811 @@
+{
+  "candidates": [
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mamba-radix-cache-strategy extra_buffer --page-size 64 --mem-fraction-static 0.8 --trust-remote-code",
+      "id": "baseline",
+      "params": {
+        "is_baseline": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mamba_radix_cache_strategy": "extra_buffer",
+        "mem_fraction_static": 0.8,
+        "trust_remote_code": true,
+        "page_size": 64
+      },
+      "reasons": [
+        "严格模式基线复现:params 仅含用户在 search.baseline 中显式写的 8 个字段,原样保留不增不改(仅加 is_baseline 标记)。",
+        "硬启动依赖例外1:模型卡 M02 default_flags 含 trust-remote-code:true,用户没写也必须补 --trust-remote-code(CLI 安全开关无法翻 true)。",
+        "硬启动依赖例外2:用户写了 mamba_radix_cache_strategy=extra_buffer 但没写 page_size,补 --page-size 64(FLA_CHUNK_SIZE(64)%page_size==0 硬约束,否则启动报错)。",
+        "严格模式不补 §4 pin / §3 搜索默认档 / §4 default_flags 的 parser 类 flag,故 cmd 不出现 --disable-radix-cache 与 attention 等搜索轴,SGLang 用内部默认;executor 运行时会统一覆盖钉死 --disable-radix-cache,此处 extra_buffer 记为 effective=inactive 仅供审计。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --ep-size 1 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c001",
+      "params": {
+        "tp_size": 4,
+        "ep_size": 1,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "锚点(预期最优):TP=4 为本模型块量化整除上限(tp_max=floor(512/128)=4,排除 TP=8),实测 tp=4 吞吐最优(knowledge §2 实例)。",
+        "MoE hybrid_mamba:钉死 --disable-radix-cache + mamba no_buffer + page_size=1(§4/§5/§7);SM120 attention 仅 flashinfer/triton(§1)。",
+        "EAGLE 投机解码取自 M02.mtp_params(supports_mtp=true,自带 MTP 权重可裸发,§5);mem-fraction 0.82 取 hybrid 覆盖档[0.78,0.82,0.86]中枢(§3a,ssm_state_gb 缺失用保守上界)。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --ep-size 1 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c002",
+      "params": {
+        "tp_size": 4,
+        "ep_size": 1,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "c001 的非投机对照(无 EAGLE),隔离投机解码对 TTFT/TPOT 的收益幅度(§6.1 高影响轴)。",
+        "TP=4 flashinfer no_buffer,其余同锚点默认档。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --ep-size 1 --attention-backend triton --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c003",
+      "params": {
+        "tp_size": 4,
+        "ep_size": 1,
+        "attention_backend": "triton",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "attention 轴对照:TP=4 triton(§1 SM120 短名单 flashinfer/triton 取交),其余同 c001。",
+        "triton 为 flashinfer 兜底后端,评估 SM120 上二者吞吐/稳定性差异(§1 影响 10-30%)。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --ep-size 1 --attention-backend triton --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c004",
+      "params": {
+        "tp_size": 4,
+        "ep_size": 1,
+        "attention_backend": "triton",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "triton 非投机对照,隔离 attention 与投机两轴交互。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 2 --ep-size 1 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c005",
+      "params": {
+        "tp_size": 2,
+        "ep_size": 1,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "TP=2 轴(块量化整除,512/2=256 是 128 整数倍),与 TP=4 对比通信开销 vs 显存余量(§2)。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 2 --ep-size 1 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c006",
+      "params": {
+        "tp_size": 2,
+        "ep_size": 1,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "TP=2 非投机对照。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 2 --ep-size 1 --attention-backend triton --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c007",
+      "params": {
+        "tp_size": 2,
+        "ep_size": 1,
+        "attention_backend": "triton",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "TP=2 triton EAGLE 组合,覆盖 TP×attention×投机 交叉空间。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 2 --ep-size 1 --attention-backend triton --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c008",
+      "params": {
+        "tp_size": 2,
+        "ep_size": 1,
+        "attention_backend": "triton",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "TP=2 triton 非投机对照。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 1 --ep-size 1 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c009",
+      "params": {
+        "tp_size": 1,
+        "ep_size": 1,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "TP=1(单卡)作为对比下限;输入 4k 非超长,TP=1 排末位仅作参照(§2 长输入规则;本 workload 输入仅 4k 影响弱)。权重 35GB/tp1=35≤72 可放下。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 1 --ep-size 1 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c010",
+      "params": {
+        "tp_size": 1,
+        "ep_size": 1,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "TP=1 非投机对照。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 1 --ep-size 1 --attention-backend triton --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c011",
+      "params": {
+        "tp_size": 1,
+        "ep_size": 1,
+        "attention_backend": "triton",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "TP=1 triton EAGLE,补全覆盖 TP×attention×投机 交叉矩阵。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 1 --ep-size 1 --attention-backend triton --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c012",
+      "params": {
+        "tp_size": 1,
+        "ep_size": 1,
+        "attention_backend": "triton",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "TP=1 triton 非投机,完成 3×2×2 高影响交叉矩阵(ep=1 默认)。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 2 --ep-size 2 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c013",
+      "params": {
+        "tp_size": 2,
+        "ep_size": 2,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "EP 轴:TP=2 下开 EP=2(256 专家 %2==0 且 2%2==0,§2 硬约束满足),测专家并行收益。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --ep-size 2 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c014",
+      "params": {
+        "tp_size": 4,
+        "ep_size": 2,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "EP 轴:TP=4 开 EP=2(4%2==0, 256%2==0),标准 EP/TP 切分,测 MoE 专家并行对吞吐影响。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --ep-size 4 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c015",
+      "params": {
+        "tp_size": 4,
+        "ep_size": 4,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "EP 轴:TP=4 EP=4(4%4==0, 256%4==0),每卡独立专家并行,测高 EP 在 8 卡上能否进一步提吞吐。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --ep-size 2 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c016",
+      "params": {
+        "tp_size": 4,
+        "ep_size": 2,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "EP=2 的无投机对照,隔离 EP 轴自身收益(不带投机干扰)。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --ep-size 4 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c017",
+      "params": {
+        "tp_size": 4,
+        "ep_size": 4,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "EP=4 无投机对照。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --ep-size 1 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mem-fraction-static 0.78 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c018",
+      "params": {
+        "tp_size": 4,
+        "ep_size": 1,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mem_fraction_static": 0.78,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "中影响轴 mem-fraction 下界 0.78(hybrid 覆盖档,§3a):SSM 状态池在池外,保守以避 capture 期崩;测低静态占比对高并发上限影响。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --ep-size 1 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mem-fraction-static 0.86 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c019",
+      "params": {
+        "tp_size": 4,
+        "ep_size": 1,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mem_fraction_static": 0.86,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "中影响轴 mem-fraction 上界 0.86(§3a hybrid 覆盖档上限,≥0.88 实测 capture 期崩);测最大静态占比撑高并发上限。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --ep-size 1 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --mem-fraction-static 0.78 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c020",
+      "params": {
+        "tp_size": 4,
+        "ep_size": 1,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "mem_fraction_static": 0.78,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "TP=4 非投机 + mem 0.78 对照,隔离 mem-fraction 在有无投机下的行为。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --ep-size 1 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --mem-fraction-static 0.86 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c021",
+      "params": {
+        "tp_size": 4,
+        "ep_size": 1,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "mem_fraction_static": 0.86,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "TP=4 非投机 + mem 0.86 对照(上界)。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --ep-size 2 --attention-backend triton --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c022",
+      "params": {
+        "tp_size": 4,
+        "ep_size": 2,
+        "attention_backend": "triton",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "triton + EP=2 + EAGLE,cross EP×attention 高影响组合。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --ep-size 4 --attention-backend triton --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c023",
+      "params": {
+        "tp_size": 4,
+        "ep_size": 4,
+        "attention_backend": "triton",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "triton + EP=4 + EAGLE,EP 与 attention 交叉上界组合。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 2 --ep-size 2 --attention-backend triton --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c024",
+      "params": {
+        "tp_size": 2,
+        "ep_size": 2,
+        "attention_backend": "triton",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "TP=2 EP=2 triton EAGLE,补齐 TP=2 下的 EP×attention 交叉。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --ep-size 2 --attention-backend triton --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c025",
+      "params": {
+        "tp_size": 4,
+        "ep_size": 2,
+        "attention_backend": "triton",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "triton + EP=2 无投机对照。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --ep-size 1 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype fp8_e4m3",
+      "id": "c026",
+      "params": {
+        "tp_size": 4,
+        "ep_size": 1,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "fp8_e4m3"
+      },
+      "reasons": [
+        "低影响轴 kv-cache-dtype=fp8_e4m3(§3 默认池 [auto,fp8_e4m3],无 SM 门槛);KV 腰斩/kv-token,测长-中输入下显存/并发提升,需配精度验证。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --ep-size 1 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mem-fraction-static 0.82 --chunked-prefill-size 4096 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c027",
+      "params": {
+        "tp_size": 4,
+        "ep_size": 1,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 4096,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "低影响轴 chunked-prefill-size=4096(hybrid 覆盖档下界[4096,8192],§3a 上界 8192 因 SSM 池叠加 16384 触发 capture OOM);测小 prefill 块对 TTFT 影响。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --ep-size 1 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 0.3 --kv-cache-dtype auto",
+      "id": "c028",
+      "params": {
+        "tp_size": 4,
+        "ep_size": 1,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 0.3,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "低影响轴 schedule-conservativeness=0.3(§3 [0.3,1.0,1.3]);token usage<0.9 且队列有积压时降档用,测对 P99 TTFT/retract 的影响。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 4 --ep-size 1 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.3 --kv-cache-dtype auto",
+      "id": "c029",
+      "params": {
+        "tp_size": 4,
+        "ep_size": 1,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1.3,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "低影响轴 schedule-conservativeness=1.3(§3);频繁 KV pool full retract 时升档用,测对稳定吞吐的影响。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 1 --ep-size 1 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mem-fraction-static 0.86 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c030",
+      "params": {
+        "tp_size": 1,
+        "ep_size": 1,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 3,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 4,
+        "mem_fraction_static": 0.86,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "单卡高静态占比 0.86 + EAGLE,测 TP=1 下能否靠高 mem-fraction 撑起并发(单卡 KV 容量受限)。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 1 --ep-size 1 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --mem-fraction-static 0.82 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c031",
+      "params": {
+        "tp_size": 1,
+        "ep_size": 1,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "mem_fraction_static": 0.82,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "单卡最小配置基线锚点(无投机、无 EP),纯推理性能下限参照。"
+      ]
+    },
+    {
+      "cmd": "python -m sglang.launch_server --model-path ${MODEL_PATH} --host 0.0.0.0 --port 30000 --tp-size 2 --ep-size 1 --attention-backend flashinfer --disable-radix-cache --reasoning-parser qwen3 --tool-call-parser qwen3_coder --trust-remote-code --mamba-radix-cache-strategy no_buffer --page-size 1 --mem-fraction-static 0.86 --chunked-prefill-size 8192 --schedule-conservativeness 1.0 --kv-cache-dtype auto",
+      "id": "c032",
+      "params": {
+        "tp_size": 2,
+        "ep_size": 1,
+        "attention_backend": "flashinfer",
+        "disable_radix_cache": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "trust_remote_code": true,
+        "mamba_radix_cache_strategy": "no_buffer",
+        "page_size": 1,
+        "mem_fraction_static": 0.86,
+        "chunked_prefill_size": 8192,
+        "schedule_conservativeness": 1,
+        "kv_cache_dtype": "auto"
+      },
+      "reasons": [
+        "TP=2 非投机 + mem 0.86,补 TP=2 高静态占比档作为中影响轴补充。"
+      ]
+    }
+  ]
+}

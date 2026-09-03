@@ -1,5 +1,4 @@
 {
-  "_comment": "这是一个示例 job 文件,展示所有字段。复制此文件并修改各字段值即可。文件名 = job_id + .json,命名规则: {model}_{gpu}_{gpu_count}x{gpu_memory}g_{workload}_cand{N}.json",
   "job_id": "qwen36-35b-a3b-fp8_pro5000_8x72g_qa-chat-3.5k-1k_cand2",
   "engine": "sglang",
   "gpu_model": "G24_pro5000",
@@ -16,6 +15,13 @@
   },
   "search": {
     "max_candidates": 2,
-    "max_runtime_minutes": 180
+    "max_runtime_minutes": 180,
+    "baseline": {
+      "tp_size": 4,
+      "attention_backend": "flashinfer",
+      "mem_fraction_static": 0.82,
+      "disable_radix_cache": true
+    },
+    "baseline_threshold_pct": 5
   }
 }

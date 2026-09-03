@@ -1,0 +1,10 @@
+{
+  "report_schema_version": 1,
+  "job_id": "qwen38-27b-fp8_pro5000_8x72g_input-4k-output-1k_cand4_baseline",
+  "task_status": "COMPLETED",
+  "ranking_status": "FINAL",
+  "interrupted": false,
+  "total_candidates": 5,
+  "completed_candidates": 5,
+  "failed_candidates": 0
+}
