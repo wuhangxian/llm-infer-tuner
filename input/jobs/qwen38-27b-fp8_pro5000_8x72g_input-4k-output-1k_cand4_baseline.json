@@ -1,5 +1,5 @@
 {
-  "job_id": "qwen38-27b-fp8_pro5000_8x72g_input-4k-output-1k_cand32",
+  "job_id": "qwen38-27b-fp8_pro5000_8x72g_input-4k-output-1k_cand4_baseline",
   "engine": "sglang",
   "gpu_model": "G24_pro5000",
   "gpu_count": 8,
@@ -14,9 +14,9 @@
     "min_success_rate": 0.99
   },
   "search": {
-    "max_candidates": 32,
+    "max_candidates": 4,
     "max_runtime_minutes": 180,
-    "baseline": {
+        "baseline": {
       "trust_remote_code": true,
       "kv_cache_dtype": "fp8_e4m3",
       "mem_fraction_static": 0.85,
@@ -30,6 +30,6 @@
       "page_size": 64,
       "tp_size": 1
     },
-    "baseline_threshold_pct": 0
+    "baseline_threshold_pct": 20
   }
 }

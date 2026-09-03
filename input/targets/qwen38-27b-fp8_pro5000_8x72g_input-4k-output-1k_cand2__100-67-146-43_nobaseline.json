@@ -1,0 +1,12 @@
+{
+  "gpu_model": "G24_pro5000",
+  "gpu_count": 8,
+  "gpu_memory_gb": 72,
+  "ssh_target": "ubuntu@100.67.146.43",
+  "ssh_password": "whx5201314@",
+  "model_host_dir": "/data/models/Qwen3.8-27B-FP8/",
+  "model_container_path": "/data/models/Qwen3.8-27B-FP8/",
+  "image_ref": "hai-beijing.tencentcloudcr.com/ai/sglang:v0.5.16-cu129",
+  "port": 30000,
+  "remote_outputs_dir": ""
+}
