@@ -18,6 +18,16 @@
 uv sync
 ```
 
+### Docker 镜像
+
+镜像已公开，国内机器优先从南京大学 GHCR 镜像源拉取：
+
+```bash
+docker pull ghcr.nju.edu.cn/wuhangxian/llm-infer-tuner:0903-dorianwu
+```
+
+如果镜像站临时不可用，可将地址中的 `ghcr.nju.edu.cn` 换回官方 `ghcr.io`。
+
 ### 1. 配置凭证
 
 ```bash
