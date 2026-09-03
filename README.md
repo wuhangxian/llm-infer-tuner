@@ -149,8 +149,8 @@ docker build -t llm-infer-tuner:0903-dorianwu .
 
 # 首次使用时登录 AI CLI(二选一或都登录；登录目录建议持久化)
 docker run -it --rm \
-  -v "$HOME/.claude:/root/.claude" \
-  -v "$HOME/.tclaude:/root/.tclaude" \
+  -v "$HOME/.claude:/home/runner/.claude" \
+  -v "$HOME/.tclaude:/home/runner/.tclaude" \
   llm-infer-tuner:0903-dorianwu \
   tclaude login
 
@@ -158,8 +158,8 @@ docker run -it --rm \
 docker run --rm \
   -v "$PWD/input:/app/input:ro" \
   -v "$PWD/outputs:/app/outputs" \
-  -v "$HOME/.claude:/root/.claude" \
-  -v "$HOME/.tclaude:/root/.tclaude" \
+  -v "$HOME/.claude:/home/runner/.claude" \
+  -v "$HOME/.tclaude:/home/runner/.tclaude" \
   llm-infer-tuner:0903-dorianwu \
   ./gen_configs.sh input/jobs/<job>.json
 
@@ -167,7 +167,7 @@ docker run --rm \
 docker run --rm \
   -v "$PWD/config.json:/app/config.json:ro" \
   -v "$PWD/outputs:/app/outputs" \
-  -v "$HOME/.ssh:/root/.ssh:ro" \
+  -v "$HOME/.ssh:/home/runner/.ssh:ro" \
   llm-infer-tuner:0903-dorianwu \
   ./run_executor.sh /app/config.json
 

@@ -46,6 +46,15 @@ COPY . /app
 RUN uv sync --frozen --no-dev \
     && chmod +x /app/*.sh
 
+# Claude CLI 禁止 root 搭配 --dangerously-skip-permissions；使用与远端
+# ubuntu 对齐的普通 UID，挂载的 input/output/登录态可直接读写。
+RUN groupadd --gid 1000 runner \
+    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash runner \
+    && mkdir -p /app/outputs /app/claude-raw-outputs \
+    && chown -R runner:runner /app/outputs /app/claude-raw-outputs
+ENV HOME=/home/runner
+USER runner
+
 # 默认进入项目目录；传入命令时直接执行，例如 run_executor.sh 或 gen_report.sh。
 ENTRYPOINT ["bash", "/app/docker/entrypoint.sh"]
 CMD ["bash"]
