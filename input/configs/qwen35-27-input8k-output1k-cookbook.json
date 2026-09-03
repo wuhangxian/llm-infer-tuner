@@ -1,0 +1,38 @@
+{
+  "_meta": {
+    "job_id": "qwen35-27b-fp8_pro5000_8x72g_input8k-output1k-cookbook",
+    "gpu_model": "G24_pro5000",
+    "gpu_count": 8,
+    "gpu_memory_gb": 72,
+    "workload": "W10_input-8k-output-1k",
+    "benchmark_method": "sglang-bench-serving",
+    "sla": {
+      "max_avg_ttft_ms": 2000,
+      "max_avg_tpot_ms": 80,
+      "min_success_rate": 0.99
+    },
+    "ssh_target": "ubuntu@100.67.146.43",
+
+    "model_host_dir": "/data/autotune/models/Qwen3.5-27B",
+    "model_container_path": "/data/autotune/models/Qwen3.5-27B",
+    "image_ref": "hai-beijing.tencentcloudcr.com/ai/sglang:v0.5.16-cu129",
+    "port": 30000,
+    "remote_outputs_dir": ""
+  },
+  "candidates": [
+    {
+      "id": "baseline",
+      "params": {
+        "tp_size": 1,
+        "attention_backend": "flashinfer",
+        "mem_fraction_static": 0.8,
+        "trust_remote_code": true,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "mamba_radix_cache_strategy": "extra_buffer"
+      },
+      "reasons": [
+      ]
+    }
+  ]
+}

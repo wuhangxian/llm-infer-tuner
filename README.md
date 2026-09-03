@@ -129,6 +129,14 @@ GEN_MAX_RETRIES=0 ./gen_configs.sh input/jobs/<job>.json
 
 SSH 到远程机器,起容器 → 起服务 → 自适应并发搜索 → 压测 → 排名 → 输出 `outputs/<job_id>/results/ranking.json`。
 
+压测完成后可单独生成一份便于人工阅读的最佳参数报告（不会重新压测，也不会修改排名文件）：
+
+```bash
+./gen_report.sh outputs/<job_id>
+```
+
+也可以直接传入 `outputs/<job_id>/results`。脚本会在传入的目录中生成 `best_config.md`，报告包含最佳候选的生效参数、启动命令、SLA 指标、与其他候选/baseline 的差异，以及候选生成时记录的配置依据。
+
 执行器直接读取 JobSpec 的 `workload` 和 `benchmark_method`,再从 `catalogs/workloads.yaml` 与 `references/benchmark_methods/*.json` 确定性拼出 `sglang.bench_serving` 命令。第二步不调用 `tclaude` 或 `claude`,也不受 AI 超时、限流或额度影响。
 
 ### 方式 B: 手写配置 + 直接压测(一步)

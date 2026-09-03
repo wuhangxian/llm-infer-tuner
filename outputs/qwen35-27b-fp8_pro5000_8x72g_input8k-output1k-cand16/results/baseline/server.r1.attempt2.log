@@ -1,0 +1,257 @@
+/sgl-workspace/sglang/python/sglang/launch_server.py:56: UserWarning: 'python -m sglang.launch_server' is still supported, but 'sglang serve' is the recommended entrypoint.
+  Example: sglang serve --model-path <model> [options]
+  warnings.warn(
+[2026-09-03 06:57:29] server_args=ServerArgs(model_path='/data/autotune/models/Qwen3.5-27B', tokenizer_path='/data/autotune/models/Qwen3.5-27B', tokenizer_mode='auto', tokenizer_backend='huggingface', tokenizer_worker_num=1, detokenizer_worker_num=1, skip_tokenizer_init=False, load_format='auto', model_loader_extra_config='{}', trust_remote_code=False, context_length=None, is_embedding=False, enable_multimodal=None, revision=None, model_impl='auto', model_config_parser='auto', json_model_override_args='{}', dtype='auto', quantization=None, quantization_param_path=None, kv_cache_dtype='auto', enable_fp32_lm_head=False, modelopt_quant=None, modelopt_checkpoint_restore_path=None, modelopt_checkpoint_save_path=None, modelopt_export_path=None, quantize_and_serve=False, rl_quant_profile=None, enable_tf32_matmul=False, mem_fraction_static=0.92, max_running_requests=None, max_queued_requests=None, max_total_tokens=None, chunked_prefill_size=8192, enable_dynamic_chunking=False, max_prefill_tokens=16384, prefill_max_requests=None, schedule_policy='fcfs', enable_priority_scheduling=False, disable_priority_preemption=False, default_priority_value=None, abort_on_priority_when_disabled=False, schedule_low_priority_values_first=False, priority_scheduling_preemption_threshold=10, retraction_policy='length', schedule_conservativeness=1.0, page_size=1, swa_full_tokens_ratio=0.8, disable_hybrid_swa_memory=False, radix_eviction_policy='lru', prefill_only_disable_kv_cache=False, disable_radix_cache=True, enable_page_major_kv_layout=False, enable_unified_memory=False, disable_chunked_prefix_cache=False, disable_overlap_schedule=False, num_continuous_decode_steps=1, scheduler_recv_interval=1, enable_mixed_chunk=False, nccl_port=None, dist_timeout=None, dist_init_addr=None, nnodes=1, node_rank=0, tp_size=1, dcp_size=1, pp_size=1, pp_max_micro_batch_size=None, pp_async_batch_depth=0, dp_size=1, load_balance_method='round_robin', attn_cp_size=1, moe_dp_size=1, enable_prefill_cp=False, cp_strategy=None, enable_dsa_cache_layer_split=False, enable_dsa_prefill_context_parallel=False, dsa_prefill_cp_mode='round-robin-split', enable_prefill_context_parallel=False, prefill_cp_mode='in-seq-split', enable_dp_attention=False, enable_dp_attention_local_control_broadcast=False, enable_dp_lm_head=False, enable_attn_tp_input_scattered=False, disable_attn_tp_gather=False, enable_p2p_check=False, device='cuda', base_gpu_id=0, gpu_id_step=1, random_seed=582506981, watchdog_timeout=300, soft_watchdog_timeout=None, sleep_on_idle=False, use_ray=False, custom_sigquit_handler=None, numa_node=None, gc_threshold=None, host='0.0.0.0', port=30000, fastapi_root_path='', smg_grpc_mode=False, grpc_mode=False, grpc_port=None, sidecar=None, sidecar_args=None, skip_server_warmup=False, warmups=None, enable_http2=False, ssl_keyfile=None, ssl_certfile=None, ssl_ca_certs=None, ssl_keyfile_password=None, enable_ssl_refresh=False, api_key=None, admin_api_key=None, served_model_name='/data/autotune/models/Qwen3.5-27B', weight_version='default', chat_template=None, hf_chat_template_name=None, completion_template=None, file_storage_path='sglang_storage', enable_cache_report=False, reasoning_parser=None, default_chat_template_kwargs=None, strip_thinking_cache=False, enable_strict_thinking=False, tool_call_parser=None, tool_server=None, sampling_defaults='model', asr_max_buffer_seconds=60, asr_max_concurrent_sessions=32, preferred_sampling_params=None, allow_auto_truncate=False, stream_interval=1, batch_notify_size=16, stream_response_default_include_usage=False, incremental_streaming_output=False, enable_streaming_session=False, enable_session_radix_cache=False, log_level='info', log_level_http=None, log_requests=False, log_requests_level=2, log_requests_format='text', log_requests_target=None, uvicorn_access_log_exclude_prefixes=[], crash_dump_folder=None, show_time_cost=False, enable_metrics=False, smg_http_sidecar_port=None, enable_mfu_metrics=False, enable_metrics_for_all_schedulers=False, load_snapshot_publish_interval=15, tokenizer_metrics_custom_labels_header='x-custom-labels', tokenizer_metrics_allowed_custom_labels=None, extra_metric_labels=None, bucket_time_to_first_token=None, bucket_inter_token_latency=None, bucket_e2e_request_latency=None, prompt_tokens_buckets=None, generation_tokens_buckets=None, gc_warning_threshold_secs=0.0, decode_log_interval=40, enable_request_time_stats_logging=False, kv_events_config=None, enable_forward_pass_metrics=False, forward_pass_metrics_worker_id='', forward_pass_metrics_ipc_name=None, enable_trace=False, trace_modules='request', otlp_traces_endpoint='localhost:4317', export_metrics_to_file=False, export_metrics_to_file_dir=None, stat_loggers=None, constrained_json_whitespace_pattern=None, constrained_json_disable_any_whitespace=False, attention_backend='flashinfer', decode_attention_backend=None, prefill_attention_backend=None, sampling_backend='flashinfer', grammar_backend='xgrammar', radix_cache_backend=None, mm_attention_backend=None, fp8_gemm_runner_backend='auto', fp4_gemm_runner_backend='auto', bf16_gemm_backend='auto', dsa_prefill_backend=None, dsa_decode_backend=None, dsa_paged_mqa_logits_backend='auto', dsa_topk_backend='sgl-kernel', disable_flashinfer_autotune=False, mamba_backend='triton', cuda_graph_config=CudaGraphConfig(decode=PhaseConfig(backend='full', max_bs=256, bs=[1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256], tc_compiler='eager', full_prefill_max_req=None), prefill=PhaseConfig(backend='breakable', max_bs=8192, bs=[4, 8, 12, 16, 20, 24, 28, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320, 352, 384, 416, 448, 480, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1280, 1536, 1792, 2048, 2304, 2560, 2816, 3072, 3328, 3584, 3840, 4096, 4608, 5120, 5632, 6144, 6656, 7168, 7680, 8192], tc_compiler='eager', full_prefill_max_req=None)), cuda_graph_backend_decode=None, cuda_graph_backend_prefill=None, cuda_graph_max_bs_decode=None, cuda_graph_max_bs_prefill=None, cuda_graph_bs_decode=None, cuda_graph_bs_prefill=None, cuda_graph_tc_compiler=None, disable_prefill_cuda_graph=False, disable_decode_cuda_graph=False, disable_cuda_graph=False, disable_cuda_graph_padding=False, enable_profile_cuda_graph=False, enable_cudagraph_gc=False, debug_cuda_graph=False, enable_layerwise_nvtx_marker=False, enable_nccl_nvls=False, enable_symm_mem=False, triton_attention_reduce_in_fp32=False, triton_attention_num_kv_splits=8, triton_attention_split_tile_size=None, flashinfer_mla_disable_ragged=False, enable_fused_qk_norm_rope=False, enable_precise_embedding_interpolation=False, enable_fused_moe_sum_all_reduce=False, enable_deepseek_v4_fp4_indexer=False, disable_custom_all_reduce=False, enable_mscclpp=False, enable_torch_symm_mem=False, enable_scattered_sconv=False, pre_warm_nccl=False, enable_quant_communications=False, enable_flashinfer_allreduce_fusion=False, enforce_disable_flashinfer_allreduce_fusion=False, flashinfer_allreduce_fusion_backend=None, enable_aiter_allreduce_fusion=False, enable_torch_compile=False, enable_torch_compile_debug_mode=False, torch_compile_max_bs=32, torchao_config='', speculative_algorithm=None, speculative_draft_model_path=None, speculative_draft_model_revision=None, speculative_draft_load_format=None, speculative_num_steps=None, speculative_eagle_topk=None, speculative_num_draft_tokens=None, speculative_dflash_block_size=None, speculative_dspark_block_size=None, speculative_dspark_sps_table_path=None, speculative_dspark_confidence_sts_path=None, speculative_dspark_align_verify_tokens_to_graph_tier=False, speculative_accept_threshold_single=1.0, speculative_accept_threshold_acc=1.0, speculative_use_rejection_sampling=False, speculative_token_map=None, speculative_attention_mode='prefill', speculative_draft_attention_backend=None, speculative_draft_window_size=None, speculative_moe_runner_backend='auto', speculative_moe_a2a_backend=None, speculative_draft_model_quantization=None, speculative_skip_dp_mlp_sync=False, enable_multi_layer_eagle=False, speculative_adaptive=False, speculative_adaptive_config=None, decoupled_spec_bind_endpoint=None, decoupled_spec_connect_endpoints=None, decoupled_spec_rank=None, decoupled_spec_role='null', spec_trace_dir=None, speculative_ngram_min_bfs_breadth=1, speculative_ngram_max_bfs_breadth=10, speculative_ngram_match_type='BFS', speculative_ngram_max_trie_depth=18, speculative_ngram_capacity=10000000, speculative_ngram_external_corpus_path=None, speculative_ngram_external_sam_budget=0, speculative_ngram_external_corpus_max_tokens=10000000, ep_size=1, moe_a2a_backend='none', moe_runner_backend='auto', flashinfer_mxfp4_moe_precision='default', deepep_mode='auto', fuseep_mode=2, deepep_dispatcher_output_dtype='auto', ep_num_redundant_experts=0, ep_dispatch_algorithm=None, init_expert_location='trivial', enable_eplb=False, eplb_algorithm='auto', eplb_rebalance_num_iterations=1000, eplb_rebalance_layers_per_chunk=None, eplb_min_rebalancing_utilization_threshold=1.0, expert_distribution_recorder_mode=None, expert_distribution_recorder_buffer_size=1000, enable_expert_distribution_metrics=False, deepep_config=None, moe_dense_tp_size=None, elastic_ep_backend=None, enable_elastic_expert_backup=False, mooncake_ib_device=None, enable_waterfill=False, ep_join_mode=None, ep_join_rank_offset=0, elastic_ep_initial_size=None, max_ep_size=None, elastic_ep_scale_timeout=600, elastic_ep_rejoin=False, disable_flashinfer_cutlass_moe_fp4_allgather=False, disable_shared_experts_fusion=False, enforce_shared_experts_fusion=False, max_mamba_cache_size=None, mamba_ssm_dtype=None, enable_mamba_cache_stochastic_rounding=False, mamba_cache_philox_rounds=0, mamba_full_memory_ratio=0.9, mamba_radix_cache_strategy='auto', uses_mamba_radix_cache=False, mamba_track_interval=256, enable_int8_mamba_checkpoint=False, int8_mamba_ckpt_size=None, linear_attn_backend='triton', linear_attn_decode_backend=None, linear_attn_prefill_backend=None, enable_linear_replayssm=False, linear_replayssm_cache_len=16, enable_gdn_replayssm_spec=False, enable_hierarchical_cache=False, hicache_ratio=2.0, hicache_size=0, hicache_write_policy='write_through', hicache_io_backend='kernel', hicache_mem_layout='page_first', hicache_storage_backend=None, hicache_storage_prefetch_policy='timeout', hicache_storage_backend_extra_config=None, enable_hisparse=False, hisparse_config=None, enable_broadcast_mm_inputs_process=False, enable_prefix_mm_cache=False, mm_enable_dp_encoder=False, mm_process_config={}, limit_mm_data_per_request=None, enable_mm_global_cache=False, disable_fast_image_processor=False, mm_feature_transport='cpu', keep_mm_feature_on_device=False, enable_lora=None, enable_lora_overlap_loading=None, max_lora_rank=None, lora_target_modules=None, lora_paths=None, max_loaded_loras=None, max_loras_per_batch=8, lora_eviction_policy='lru', lora_backend='csgmv', max_lora_chunk_size=16, experts_shared_outer_loras=None, lora_use_virtual_experts=False, lora_strict_loading=False, lora_drain_wait_threshold=0.0, enable_two_batch_overlap=False, enable_single_batch_overlap=False, tbo_token_distribution_threshold=0.48, cpu_offload_gb=0, offload_group_size=-1, offload_num_in_group=1, offload_prefetch_step=1, offload_mode='cpu', enable_lmcache=False, lmcache_config_file=None, enable_flexkv=False, flexkv_config_file=None, kt_weight_path=None, kt_method='AMXINT4', kt_cpuinfer=None, kt_threadpool_count=2, kt_num_gpu_experts=None, kt_max_deferred_experts_per_token=None, dllm_algorithm=None, dllm_algorithm_config=None, dllm_fdfo=True, disaggregation_mode='null', disaggregation_transfer_backend='mooncake', disaggregation_bootstrap_port=8998, disaggregation_ib_device=None, disaggregation_decode_enable_radix_cache=False, disaggregation_decode_enable_offload_kvcache=False, num_reserved_decode_tokens=512, disaggregation_decode_extra_slots=None, disaggregation_decode_polling_interval=1, optimistic_prefill_attempts=0, encoder_only=False, language_only=False, encoder_transfer_backend='zmq_to_scheduler', encoder_urls=[], encoder_bootstrap_port=8997, encoder_register_urls=[], enable_adaptive_dispatch_to_encoder=False, enable_pdmux=False, pdmux_config_path=None, sm_group_num=8, custom_weight_loader=[], weight_loader_disable_mmap=False, weight_loader_prefetch_checkpoints=False, weight_loader_prefetch_num_threads=4, weight_loader_drop_cache_after_load=False, remote_instance_weight_loader_seed_instance_ip=None, remote_instance_weight_loader_seed_instance_service_port=None, remote_instance_weight_loader_send_weights_group_ports=None, remote_instance_weight_loader_backend='nccl', remote_instance_weight_loader_start_seed_via_transfer_engine=False, engine_info_bootstrap_port=6789, modelexpress_config=None, download_dir=None, model_checksum=None, delete_ckpt_after_loading=False, decrypted_config_file=None, decrypted_draft_config_file=None, checkpoint_engine_wait_weights_before_ready=False, enable_prefill_delayer=False, prefill_delayer_max_delay_passes=30, prefill_delayer_token_usage_low_watermark=None, prefill_delayer_forward_passes_buckets=None, prefill_delayer_wait_seconds_buckets=None, prefill_delayer_queue_min_ratio=None, prefill_delayer_max_delay_ms=None, min_free_slots_delay=None, enable_deterministic_inference=False, rl_on_policy_target=None, kv_canary='none', kv_canary_real_data='none', kv_canary_sweep_interval=0, enable_dynamic_batch_tokenizer=False, dynamic_batch_tokenizer_batch_size=32, dynamic_batch_tokenizer_batch_timeout=0.002, enable_tokenizer_batch_encode=False, disable_tokenizer_batch_decode=False, debug_tensor_dump_output_folder=None, debug_tensor_dump_layers=None, debug_tensor_dump_input_file=None, enable_memory_saver=False, enable_weights_cpu_backup=False, enable_draft_weights_cpu_backup=False, enable_custom_logit_processor=False, enable_return_hidden_states=False, enable_return_routed_experts=False, enable_return_indexer_topk=False, disable_outlines_disk_cache=False, enable_mis=False, forward_hooks=None, msprobe_dump_config=None)
+[2026-09-03 06:57:29] User lacks permission to set NUMA affinity, skipping NUMA node configuration for GPU. If using docker, try adding --cap-add SYS_NICE to your docker run command.
+[transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+[2026-09-03 06:57:30] Using default HuggingFace chat template with detected content format: openai
+[2026-09-03 06:57:30] Auto-detected template features: reasoning_config=ReasoningToggleConfig(toggle_param='enable_thinking', default_enabled=True, special_case=None, effort_kwarg=None), reasoning_parser=qwen3, tool_call_parser=qwen3_coder
+[transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+[2026-09-03 06:57:37] Init torch distributed begin.
+[2026-09-03 06:57:37] Init torch distributed ends. elapsed=0.27 s, mem usage=0.05 GB
+[2026-09-03 06:57:37] Load weight begin. avail mem=70.67 GB
+[2026-09-03 06:57:38] Multimodal attention backend not set. Use triton_attn.
+[2026-09-03 06:57:38] Using triton_attn as multimodal attention backend.
+[2026-09-03 06:57:38] using attn output gate!
+
+Multi-thread loading shards:   0% Completed | 0/11 [00:00<?, ?it/s]
+Multi-thread loading shards:   9% Completed | 1/11 [00:00<00:03,  2.59it/s]
+Multi-thread loading shards:  18% Completed | 2/11 [00:00<00:03,  2.44it/s]
+Multi-thread loading shards:  27% Completed | 3/11 [00:01<00:03,  2.25it/s]
+Multi-thread loading shards:  36% Completed | 4/11 [00:01<00:03,  2.17it/s]
+Multi-thread loading shards:  45% Completed | 5/11 [00:02<00:02,  2.13it/s]
+Multi-thread loading shards:  55% Completed | 6/11 [00:02<00:02,  2.14it/s]
+Multi-thread loading shards:  64% Completed | 7/11 [00:03<00:01,  2.18it/s]
+Multi-thread loading shards:  73% Completed | 8/11 [00:03<00:01,  2.23it/s]
+Multi-thread loading shards:  82% Completed | 9/11 [00:04<00:00,  2.24it/s]
+Multi-thread loading shards:  91% Completed | 10/11 [00:04<00:00,  2.24it/s]
+Multi-thread loading shards: 100% Completed | 11/11 [00:04<00:00,  2.63it/s]
+Multi-thread loading shards: 100% Completed | 11/11 [00:04<00:00,  2.33it/s]
+[2026-09-03 06:57:42] Load weight end. elapsed=4.88 s, type=Qwen3_5ForConditionalGeneration, avail mem=19.62 GB, mem usage=51.05 GB.
+[2026-09-03 06:57:43] Mamba Cache is allocated. max_mamba_cache_size: 45, conv_state size: 0.13GB, ssm_state size: 6.47GB 
+[2026-09-03 06:57:43] KV Cache is allocated. dtype: torch.bfloat16, #tokens: 122317, K size: 3.73 GB, V size: 3.73 GB
+[2026-09-03 06:57:43] Memory pool end. avail mem=5.43 GB
+[2026-09-03 06:57:43] Linear attention kernel backend: decode=triton, prefill=triton
+[2026-09-03 06:57:43] Using hybrid linear attention backend for hybrid GDN models.
+[2026-09-03 06:57:43] GDN kernel dispatcher: decode=TritonGDNKernel, extend=TritonGDNKernel, verify=TritonGDNKernel packed_decode=True
+[2026-09-03 06:57:43] Capture target prefill CUDA graph begin. backend=breakable, num_tokens=[4, 8, 12, 16, 20, 24, 28, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320, 352, 384, 416, 448, 480, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1280, 1536, 1792, 2048, 2304, 2560, 2816, 3072, 3328, 3584, 3840, 4096, 4608, 5120, 5632, 6144, 6656, 7168, 7680, 8192], avail mem=4.99 GB
+
+  0%|          | 0/58 [00:00<?, ?it/s]
+Capturing num tokens (num_tokens=8192 avail_mem=4.91 GB):   0%|          | 0/58 [00:00<?, ?it/s]
+Capturing num tokens (num_tokens=8192 avail_mem=4.91 GB):   2%|▏         | 1/58 [00:05<05:34,  5.87s/it]
+Capturing num tokens (num_tokens=7680 avail_mem=0.62 GB):   2%|▏         | 1/58 [00:05<05:34,  5.87s/it]
+Capturing num tokens (num_tokens=7680 avail_mem=0.62 GB):   3%|▎         | 2/58 [00:10<04:58,  5.33s/it]
+Capturing num tokens (num_tokens=7168 avail_mem=0.62 GB):   3%|▎         | 2/58 [00:10<04:58,  5.33s/it]
+Capturing num tokens (num_tokens=7168 avail_mem=0.62 GB):   5%|▌         | 3/58 [00:15<04:25,  4.82s/it]
+Capturing num tokens (num_tokens=6656 avail_mem=0.61 GB):   5%|▌         | 3/58 [00:15<04:25,  4.82s/it]
+Capturing num tokens (num_tokens=6656 avail_mem=0.61 GB):   7%|▋         | 4/58 [00:19<04:05,  4.55s/it]
+Capturing num tokens (num_tokens=6144 avail_mem=0.60 GB):   7%|▋         | 4/58 [00:19<04:05,  4.55s/it]
+Capturing num tokens (num_tokens=6144 avail_mem=0.60 GB):   9%|▊         | 5/58 [00:22<03:39,  4.15s/it]
+Capturing num tokens (num_tokens=5632 avail_mem=0.59 GB):   9%|▊         | 5/58 [00:22<03:39,  4.15s/it]
+Capturing num tokens (num_tokens=5632 avail_mem=0.59 GB):  10%|█         | 6/58 [00:25<03:20,  3.86s/it]
+Capturing num tokens (num_tokens=5120 avail_mem=0.58 GB):  10%|█         | 6/58 [00:25<03:20,  3.86s/it]
+Capturing num tokens (num_tokens=5120 avail_mem=0.58 GB):  12%|█▏        | 7/58 [00:28<02:59,  3.51s/it]
+Capturing num tokens (num_tokens=4608 avail_mem=0.57 GB):  12%|█▏        | 7/58 [00:28<02:59,  3.51s/it]
+Capturing num tokens (num_tokens=4608 avail_mem=0.57 GB):  14%|█▍        | 8/58 [00:31<02:41,  3.22s/it]
+Capturing num tokens (num_tokens=4096 avail_mem=0.55 GB):  14%|█▍        | 8/58 [00:31<02:41,  3.22s/it]
+Capturing num tokens (num_tokens=4096 avail_mem=0.55 GB):  16%|█▌        | 9/58 [00:33<02:20,  2.87s/it]
+Capturing num tokens (num_tokens=3840 avail_mem=0.54 GB):  16%|█▌        | 9/58 [00:33<02:20,  2.87s/it]
+Capturing num tokens (num_tokens=3840 avail_mem=0.54 GB):  17%|█▋        | 10/58 [00:35<02:05,  2.62s/it]
+Capturing num tokens (num_tokens=3584 avail_mem=0.54 GB):  17%|█▋        | 10/58 [00:35<02:05,  2.62s/it]
+Capturing num tokens (num_tokens=3584 avail_mem=0.54 GB):  19%|█▉        | 11/58 [00:37<01:52,  2.39s/it]
+Capturing num tokens (num_tokens=3328 avail_mem=0.53 GB):  19%|█▉        | 11/58 [00:37<01:52,  2.39s/it]
+Capturing num tokens (num_tokens=3328 avail_mem=0.53 GB):  21%|██        | 12/58 [00:39<01:40,  2.19s/it]
+Capturing num tokens (num_tokens=3072 avail_mem=0.52 GB):  21%|██        | 12/58 [00:39<01:40,  2.19s/it]
+Capturing num tokens (num_tokens=3072 avail_mem=0.52 GB):  22%|██▏       | 13/58 [00:40<01:29,  2.00s/it]
+Capturing num tokens (num_tokens=2816 avail_mem=0.51 GB):  22%|██▏       | 13/58 [00:40<01:29,  2.00s/it]
+Capturing num tokens (num_tokens=2816 avail_mem=0.51 GB):  24%|██▍       | 14/58 [00:42<01:19,  1.82s/it]
+Capturing num tokens (num_tokens=2560 avail_mem=0.50 GB):  24%|██▍       | 14/58 [00:42<01:19,  1.82s/it]
+Capturing num tokens (num_tokens=2560 avail_mem=0.50 GB):  26%|██▌       | 15/58 [00:43<01:11,  1.65s/it]
+Capturing num tokens (num_tokens=2304 avail_mem=0.49 GB):  26%|██▌       | 15/58 [00:43<01:11,  1.65s/it]
+Capturing num tokens (num_tokens=2304 avail_mem=0.49 GB):  28%|██▊       | 16/58 [00:44<01:02,  1.50s/it]
+Capturing num tokens (num_tokens=2048 avail_mem=0.48 GB):  28%|██▊       | 16/58 [00:44<01:02,  1.50s/it]
+Capturing num tokens (num_tokens=2048 avail_mem=0.48 GB):  29%|██▉       | 17/58 [00:45<00:54,  1.34s/it]
+Capturing num tokens (num_tokens=1792 avail_mem=0.47 GB):  29%|██▉       | 17/58 [00:45<00:54,  1.34s/it]
+Capturing num tokens (num_tokens=1792 avail_mem=0.47 GB):  31%|███       | 18/58 [00:46<00:47,  1.20s/it]
+Capturing num tokens (num_tokens=1536 avail_mem=0.46 GB):  31%|███       | 18/58 [00:46<00:47,  1.20s/it]
+Capturing num tokens (num_tokens=1536 avail_mem=0.46 GB):  33%|███▎      | 19/58 [00:46<00:41,  1.06s/it]
+Capturing num tokens (num_tokens=1280 avail_mem=0.45 GB):  33%|███▎      | 19/58 [00:46<00:41,  1.06s/it]
+Capturing num tokens (num_tokens=1280 avail_mem=0.45 GB):  34%|███▍      | 20/58 [00:47<00:34,  1.09it/s]
+Capturing num tokens (num_tokens=1024 avail_mem=0.44 GB):  34%|███▍      | 20/58 [00:47<00:34,  1.09it/s]
+Capturing num tokens (num_tokens=1024 avail_mem=0.44 GB):  36%|███▌      | 21/58 [00:48<00:29,  1.26it/s]
+Capturing num tokens (num_tokens=960 avail_mem=0.43 GB):  36%|███▌      | 21/58 [00:48<00:29,  1.26it/s] 
+Capturing num tokens (num_tokens=960 avail_mem=0.43 GB):  38%|███▊      | 22/58 [00:48<00:25,  1.42it/s]
+Capturing num tokens (num_tokens=896 avail_mem=0.40 GB):  38%|███▊      | 22/58 [00:48<00:25,  1.42it/s]
+Capturing num tokens (num_tokens=896 avail_mem=0.40 GB):  40%|███▉      | 23/58 [00:49<00:22,  1.57it/s]
+Capturing num tokens (num_tokens=832 avail_mem=0.38 GB):  40%|███▉      | 23/58 [00:49<00:22,  1.57it/s]
+Capturing num tokens (num_tokens=832 avail_mem=0.38 GB):  41%|████▏     | 24/58 [00:49<00:19,  1.71it/s]
+Capturing num tokens (num_tokens=768 avail_mem=0.37 GB):  41%|████▏     | 24/58 [00:49<00:19,  1.71it/s]
+Capturing num tokens (num_tokens=768 avail_mem=0.37 GB):  43%|████▎     | 25/58 [00:49<00:17,  1.88it/s]
+Capturing num tokens (num_tokens=704 avail_mem=0.35 GB):  43%|████▎     | 25/58 [00:49<00:17,  1.88it/s]
+Capturing num tokens (num_tokens=704 avail_mem=0.35 GB):  45%|████▍     | 26/58 [00:50<00:15,  2.00it/s]
+Capturing num tokens (num_tokens=640 avail_mem=0.34 GB):  45%|████▍     | 26/58 [00:50<00:15,  2.00it/s]
+Capturing num tokens (num_tokens=640 avail_mem=0.34 GB):  47%|████▋     | 27/58 [00:50<00:14,  2.16it/s]
+Capturing num tokens (num_tokens=576 avail_mem=0.32 GB):  47%|████▋     | 27/58 [00:50<00:14,  2.16it/s]
+Capturing num tokens (num_tokens=576 avail_mem=0.32 GB):  48%|████▊     | 28/58 [00:51<00:13,  2.29it/s]
+Capturing num tokens (num_tokens=512 avail_mem=0.31 GB):  48%|████▊     | 28/58 [00:51<00:13,  2.29it/s]
+Capturing num tokens (num_tokens=512 avail_mem=0.31 GB):  50%|█████     | 29/58 [00:51<00:11,  2.51it/s]
+Capturing num tokens (num_tokens=480 avail_mem=0.29 GB):  50%|█████     | 29/58 [00:51<00:11,  2.51it/s]
+Capturing num tokens (num_tokens=480 avail_mem=0.29 GB):  52%|█████▏    | 30/58 [00:51<00:10,  2.71it/s]
+Capturing num tokens (num_tokens=448 avail_mem=0.28 GB):  52%|█████▏    | 30/58 [00:51<00:10,  2.71it/s]
+Capturing num tokens (num_tokens=448 avail_mem=0.28 GB):  53%|█████▎    | 31/58 [00:52<00:09,  2.85it/s]
+Capturing num tokens (num_tokens=416 avail_mem=0.27 GB):  53%|█████▎    | 31/58 [00:52<00:09,  2.85it/s]
+Capturing num tokens (num_tokens=416 avail_mem=0.27 GB):  55%|█████▌    | 32/58 [00:52<00:08,  2.97it/s]
+Capturing num tokens (num_tokens=384 avail_mem=0.25 GB):  55%|█████▌    | 32/58 [00:52<00:08,  2.97it/s]
+Capturing num tokens (num_tokens=384 avail_mem=0.25 GB):  57%|█████▋    | 33/58 [00:52<00:07,  3.19it/s]
+Capturing num tokens (num_tokens=352 avail_mem=0.24 GB):  57%|█████▋    | 33/58 [00:52<00:07,  3.19it/s]
+Capturing num tokens (num_tokens=352 avail_mem=0.24 GB):  59%|█████▊    | 34/58 [00:52<00:07,  3.32it/s]
+Capturing num tokens (num_tokens=320 avail_mem=0.22 GB):  59%|█████▊    | 34/58 [00:52<00:07,  3.32it/s]
+Capturing num tokens (num_tokens=320 avail_mem=0.22 GB):  60%|██████    | 35/58 [00:53<00:06,  3.46it/s]
+Capturing num tokens (num_tokens=288 avail_mem=0.21 GB):  60%|██████    | 35/58 [00:53<00:06,  3.46it/s]
+Capturing num tokens (num_tokens=288 avail_mem=0.21 GB):  62%|██████▏   | 36/58 [00:53<00:06,  3.59it/s]
+Capturing num tokens (num_tokens=256 avail_mem=0.20 GB):  62%|██████▏   | 36/58 [00:53<00:06,  3.59it/s]
+Capturing num tokens (num_tokens=256 avail_mem=0.20 GB):  64%|██████▍   | 37/58 [00:53<00:05,  3.85it/s]
+Capturing num tokens (num_tokens=240 avail_mem=0.18 GB):  64%|██████▍   | 37/58 [00:53<00:05,  3.85it/s]
+Capturing num tokens (num_tokens=240 avail_mem=0.18 GB):  66%|██████▌   | 38/58 [00:53<00:04,  4.09it/s]
+Capturing num tokens (num_tokens=224 avail_mem=0.17 GB):  66%|██████▌   | 38/58 [00:53<00:04,  4.09it/s]
+Capturing num tokens (num_tokens=224 avail_mem=0.17 GB):  67%|██████▋   | 39/58 [00:54<00:04,  4.35it/s]
+Capturing num tokens (num_tokens=208 avail_mem=0.15 GB):  67%|██████▋   | 39/58 [00:54<00:04,  4.35it/s]
+Capturing num tokens (num_tokens=208 avail_mem=0.15 GB):  69%|██████▉   | 40/58 [00:54<00:04,  4.48it/s]
+Capturing num tokens (num_tokens=192 avail_mem=0.14 GB):  69%|██████▉   | 40/58 [00:54<00:04,  4.48it/s]
+Capturing num tokens (num_tokens=192 avail_mem=0.14 GB):  71%|███████   | 41/58 [00:54<00:03,  4.47it/s]
+Capturing num tokens (num_tokens=176 avail_mem=0.12 GB):  71%|███████   | 41/58 [00:54<00:03,  4.47it/s]
+Capturing num tokens (num_tokens=176 avail_mem=0.12 GB):  72%|███████▏  | 42/58 [00:54<00:03,  4.57it/s]
+Capturing num tokens (num_tokens=160 avail_mem=0.11 GB):  72%|███████▏  | 42/58 [00:54<00:03,  4.57it/s]
+Capturing num tokens (num_tokens=160 avail_mem=0.11 GB):  74%|███████▍  | 43/58 [00:54<00:03,  4.68it/s]
+Capturing num tokens (num_tokens=144 avail_mem=0.09 GB):  74%|███████▍  | 43/58 [00:54<00:03,  4.68it/s]
+Capturing num tokens (num_tokens=144 avail_mem=0.09 GB):  76%|███████▌  | 44/58 [00:55<00:02,  4.81it/s]
+Capturing num tokens (num_tokens=128 avail_mem=0.08 GB):  76%|███████▌  | 44/58 [00:55<00:02,  4.81it/s]
+Capturing num tokens (num_tokens=128 avail_mem=0.08 GB):  78%|███████▊  | 45/58 [00:55<00:02,  4.95it/s]
+Capturing num tokens (num_tokens=112 avail_mem=0.06 GB):  78%|███████▊  | 45/58 [00:55<00:02,  4.95it/s]
+Capturing num tokens (num_tokens=112 avail_mem=0.06 GB):  79%|███████▉  | 46/58 [00:55<00:02,  5.03it/s]
+Capturing num tokens (num_tokens=96 avail_mem=0.05 GB):  79%|███████▉  | 46/58 [00:55<00:02,  5.03it/s] 
+Capturing num tokens (num_tokens=96 avail_mem=0.05 GB):  81%|████████  | 47/58 [00:55<00:02,  5.18it/s]
+Capturing num tokens (num_tokens=80 avail_mem=0.04 GB):  81%|████████  | 47/58 [00:55<00:02,  5.18it/s]
+Capturing num tokens (num_tokens=80 avail_mem=0.04 GB):  83%|████████▎ | 48/58 [00:55<00:01,  5.36it/s]
+Capturing num tokens (num_tokens=64 avail_mem=0.01 GB):  83%|████████▎ | 48/58 [00:55<00:01,  5.36it/s]
+Capturing num tokens (num_tokens=64 avail_mem=0.01 GB):  83%|████████▎ | 48/58 [00:55<00:11,  1.17s/it]
+[2026-09-03 06:58:39] AcceleratorError: CUDA error: the operation cannot be performed in the present state
+Search for `cudaErrorIllegalState' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Fail when using backend: breakable for prefill runner.
+Possible suggestions:
+1. change to tc_piecewise by --cuda-graph-backend-prefill=tc_piecewise
+2. disable the prefill CUDA graph by --cuda-graph-backend-prefill=disabled
+3. if it is an OOM problem, set --mem-fraction-static to a smaller value (e.g., 0.8 or 0.7) or set --cuda-graph-max-bs-prefill to a smaller value (e.g., 2048)
+Open an issue on GitHub https://github.com/sgl-project/sglang/issues/new/choose 
+
+[2026-09-03 06:58:40] Scheduler hit an exception: Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner_backend/breakable_cuda_graph_backend.py", line 133, in capture_one
+    out = captured_fn()
+          ^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py", line 898, in run_once
+    return self._run_forward(forward_batch, num_tokens)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py", line 500, in _run_forward
+    return self.layer_model.forward(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/qwen3_5.py", line 1320, in forward
+    hidden_states, residual = layer(
+                              ^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/qwen3_5.py", line 695, in forward
+    hidden_states = self.linear_attn(
+                    ^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/models/qwen3_5.py", line 571, in forward
+    core_attn_out = self.attn(
+                    ^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/layers/radix_linear_attention.py", line 97, in forward
+    bcg_unified_linear_attention_with_output(
+  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner_backend_utils/breakable_cuda_graph/breakable_cuda_graph.py", line 230, in wrapper
+    capture._end_current_segment()
+  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner_backend_utils/breakable_cuda_graph/breakable_cuda_graph.py", line 381, in _end_current_segment
+    graph.capture_end()
+  File "/usr/local/lib/python3.12/dist-packages/torch/cuda/graphs.py", line 126, in capture_end
+    super().capture_end()
+torch.AcceleratorError: CUDA error: out of memory
+Search for `cudaErrorMemoryAllocation' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py", line 4623, in run_scheduler_process
+    scheduler = Scheduler(
+                ^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py", line 431, in __init__
+    self.init_model_worker()
+  File "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py", line 854, in init_model_worker
+    self.init_all_cuda_graphs()
+  File "/sgl-workspace/sglang/python/sglang/srt/managers/scheduler.py", line 841, in init_all_cuda_graphs
+    self.tp_worker.init_cuda_graphs()
+  File "/sgl-workspace/sglang/python/sglang/srt/managers/tp_worker.py", line 396, in init_cuda_graphs
+    self.model_runner.init_cuda_graphs(
+  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/model_runner.py", line 839, in init_cuda_graphs
+    capture = capture_cuda_graphs(
+              ^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/model_runner_components/cuda_graph_setup.py", line 99, in capture_cuda_graphs
+    prefill_runner = capture_prefill_graph(
+                     ^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/model_runner_components/cuda_graph_setup.py", line 262, in capture_prefill_graph
+    prefill_runner = PrefillCudaGraphRunner(model_runner)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py", line 363, in __init__
+    self.capture()
+  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py", line 861, in capture
+    self._capture_one_stream()
+  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py", line 884, in _capture_one_stream
+    self.capture_one_shape(num_tokens)
+  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py", line 914, in capture_one_shape
+    self.backend.capture_one(
+  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner_backend/breakable_cuda_graph_backend.py", line 128, in capture_one
+    with BreakableCUDAGraphCapture(
+  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner_backend_utils/breakable_cuda_graph/breakable_cuda_graph.py", line 341, in __exit__
+    self._end_current_segment()
+  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner_backend_utils/breakable_cuda_graph/breakable_cuda_graph.py", line 381, in _end_current_segment
+    graph.capture_end()
+  File "/usr/local/lib/python3.12/dist-packages/torch/cuda/graphs.py", line 126, in capture_end
+    super().capture_end()
+torch.AcceleratorError: CUDA error: the operation cannot be performed in the present state
+Search for `cudaErrorIllegalState' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+
+[rank0]:[W903 06:58:40.526671507 CUDAGraph.cpp:271] Warning: CUDA warning: invalid argument (function reset)
+[2026-09-03 06:58:40] Received sigquit from a child process. It usually means the child failed.
+[2026-09-03 06:58:40] kill_process_tree called: parent_pid=4470, include_parent=True, pid=4470
