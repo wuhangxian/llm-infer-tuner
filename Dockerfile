@@ -14,6 +14,9 @@ RUN npm install --global \
 
 FROM python:3.11-slim
 
+# 让 GitHub Container Registry 自动将镜像包关联到本项目。
+LABEL org.opencontainers.image.source="https://github.com/wuhangxian/llm-infer-tuner"
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_LINK_MODE=copy \
