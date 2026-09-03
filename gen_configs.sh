@@ -368,6 +368,22 @@ if [ "$GEN_STREAM" != "0" ]; then
       #   2) 又用 💭 把同一段话前 140 字再回显一遍 → 每句出现两次、还被截断错行。
       # 两者叠加就是「乱码」观感。用户只想知道「生成到哪一步」,工具动作行(读了
       # 哪个库、写没写文件、有没有产出候选)本身就是步骤,故只留这些;思考文字全删。
+      def result_is_error:
+        if .is_error == true then true
+        elif (.is_error | type) == "string" then (.is_error | ascii_downcase) == "true"
+        else false end;
+      def error_detail:
+        [
+          (.result // empty),
+          (.error // empty),
+          (.terminal_reason // empty),
+          (if .api_error_status == null then empty else ("api_error_status=" + (.api_error_status | tostring)) end),
+          ((.errors // [])[]? | tostring)
+        ]
+        | map(select(. != null and . != ""))
+        | map(tostring | if length > 600 then .[0:600] + "…" else . end)
+        | unique
+        | join("; ");
       (fromjson? // empty) as $e | $e |
       if .type=="assistant" then
         ( .message.content[]? |
@@ -382,7 +398,10 @@ if [ "$GEN_STREAM" != "0" ]; then
               else "🔧 " + $n end ) + "\n"
           else empty end )
       elif .type=="result" then
-        ( if .is_error then "\n❌ 出错: " + (.subtype // "unknown") + "\n"
+        ( if result_is_error then
+            (error_detail) as $detail |
+            "\n❌ tclaude 返回错误: " + ((.subtype // "unknown") | tostring)
+            + (if $detail == "" then "" else " — " + $detail end) + "\n"
           else "\n✅ 生成完毕\n" end )
       else empty end
     ' >&2
@@ -471,8 +490,28 @@ if [ "$GEN_STREAM" != "0" ]; then
   fi
   set +e
   jq -R -e '
+    def result_is_error:
+      if .is_error == true then true
+      elif (.is_error | type) == "string" then (.is_error | ascii_downcase) == "true"
+      else false end;
+    def error_detail:
+      [
+        (.result // empty),
+        (.error // empty),
+        (.terminal_reason // empty),
+        (if .api_error_status == null then empty else ("api_error_status=" + (.api_error_status | tostring)) end),
+        ((.errors // [])[]? | tostring)
+      ]
+      | map(select(. != null and . != ""))
+      | map(tostring | if length > 600 then .[0:600] + "…" else . end)
+      | unique
+      | join("; ");
     [ inputs | fromjson? // empty | select(.type=="result") ] | last
-    | if (.is_error == true) then error("tclaude 返回 is_error: \(.subtype)") else . end
+    | if result_is_error then
+        (error_detail) as $detail
+        | error("tclaude 返回错误: " + ((.subtype // "unknown") | tostring)
+            + (if $detail == "" then "" else " — " + $detail end))
+      else . end
     | ( .structured_output // (.result | if type=="string" then fromjson else . end) )
     | {candidates: .candidates}
   ' "$RAW_FILE" > "$OUT_TMP"
