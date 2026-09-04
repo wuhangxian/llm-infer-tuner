@@ -22,6 +22,71 @@ job.json
         → outputs/<job_id>/best_config.md
 ```
 
+## 先照着跑：容器快速开始
+
+不需要下载源码，也不需要在宿主机安装 Python 或 Node.js。下面的命令只在宿主机执行一次，创建好容器后，后续操作都在容器里完成。
+
+公开镜像地址：`ghcr.nju.edu.cn/wuhangxian/llm-infer-tuner:0903-dorianwu`。镜像内已经包含运行环境、两个 AI CLI、脚本、两文件版 skill，以及 `input/` 下的 job、target、config 示例；不包含模型权重、SSH 私钥或登录 token。
+
+```bash
+# 1. 准备工作目录并拉取公开镜像
+mkdir -p ~/llm-tuner-work/{input,outputs,claude-raw-outputs}
+mkdir -p "$HOME/.tclaude" "$HOME/.claude"
+cd ~/llm-tuner-work
+docker pull ghcr.nju.edu.cn/wuhangxian/llm-infer-tuner:0903-dorianwu
+
+# 2. 创建一个长期使用的容器（只需执行一次）
+docker run -dit --name llm-infer-tuner --restart unless-stopped \
+  -v "$PWD/input:/app/input" \
+  -v "$PWD/outputs:/app/outputs" \
+  -v "$PWD/claude-raw-outputs:/app/claude-raw-outputs" \
+  -v "$HOME/.tclaude:/home/runner/.tclaude" \
+  -v "$HOME/.claude:/home/runner/.claude" \
+  -v "$HOME/.ssh:/home/runner/.ssh:ro" \
+  ghcr.nju.edu.cn/wuhangxian/llm-infer-tuner:0903-dorianwu bash
+
+# 3. 进入容器
+docker exec -it llm-infer-tuner bash
+```
+
+如果宿主机之前用 root 创建过输出目录，执行一次：
+
+```bash
+sudo chown -R 1000:1000 ~/llm-tuner-work/outputs ~/llm-tuner-work/claude-raw-outputs
+```
+
+进入容器后，镜像会自动把这 6 个示例补到 `input/`（不会覆盖同名文件）：
+
+```text
+input/jobs/0_EXAMPLE.json
+input/jobs/qwen35-27-input8k-output1k-cand16.json
+input/targets/0_EXAMPLE.json
+input/targets/qwen35-27-input8k-output1k-cand16-100-67-146-43.json
+input/configs/0_EXAMPLE.json
+input/configs/qwen35-27-input8k-output1k-cookbook.json
+```
+
+然后只需要按顺序执行下面几行：
+
+```bash
+tclaude login                                      # tclaude 首次执行一次；已有登录态可跳过
+# 如果使用公开 Claude，则改用：claude login
+./gen_configs.sh input/jobs/qwen35-27-input8k-output1k-cand16.json
+./run_executor.sh input/jobs/qwen35-27-input8k-output1k-cand16.json input/targets/qwen35-27-input8k-output1k-cand16-100-67-146-43.json
+./gen_report.sh outputs/qwen35-27b-fp8_pro5000_8x72g_input4k-output1k-cand16
+```
+
+其中 `gen_configs.sh` 生成候选，`run_executor.sh` 连接真实 GPU 机器压测，`gen_report.sh` 生成报告。若使用公开 Claude，把 `tclaude login` 改成 `claude login`，并把生成命令改成 `./gen_configs.sh --agent claude input/jobs/qwen35-27-input8k-output1k-cand16.json`。若只想测试已有配置，可先复制并修改 `input/configs/0_EXAMPLE.json` 中的机器、模型和镜像信息，再运行 `./run_executor.sh input/configs/your-config.json`。报告在 `outputs/<job_id>/best_config.md`，宿主机对应目录也能直接看到。
+
+容器停止后再次使用：
+
+```bash
+docker start llm-infer-tuner
+docker exec -it llm-infer-tuner bash
+```
+
+如果镜像标签更新过，已有容器不会自动更新，需要先 `docker pull`，再删除并按上面的第 2 步重新创建容器。
+
 | 命令 | 作用 | AI 登录 | 目标 GPU 机 |
 | --- | --- | --- | --- |
 | `./gen_configs.sh` | 生成候选配置 | 需要 | 不需要 |
@@ -48,124 +113,6 @@ job.json
 - Mamba/GDN 模型只使用与 radix off 兼容的 `no_buffer`，不会生成依赖 radix cache 的 `extra_buffer`。
 - 投机解码是否生成由模型卡片的 `mtp_params` 决定。自带 MTP 权重的 EAGLE/NEXTN 类方案可以候选；需要外挂 draft 模型的算法必须提供 `speculative_draft_model_path`。
 - 不会根据 workload 人为写紧 `--context-length`，服务上下文长度由模型和 SGLang 配置决定。
-
-## 最简单的 Docker 用法
-
-推荐方式不是每执行一步都重新 `docker run`，而是：**容器创建一次，以后进入容器像普通目录一样直接运行脚本。**
-
-镜像地址：
-
-```text
-ghcr.nju.edu.cn/wuhangxian/llm-infer-tuner:0903-dorianwu
-```
-
-这是公开镜像，国内机器优先使用南京大学 GHCR 镜像源；如果该镜像站临时不可用，也可以把地址中的 `ghcr.nju.edu.cn` 换回 `ghcr.io`。
-
-镜像包含 Python/uv、Node.js、`tclaude`、公开 `claude`、Git、nano、jq、SSH、sshpass，以及可直接修改的 `input/jobs`、`input/targets`、`input/configs` 示例。镜像内的 `/app/README.md` 就是本说明。
-
-### 1. 第一次只做一次：拉镜像并创建容器
-
-```bash
-docker pull ghcr.nju.edu.cn/wuhangxian/llm-infer-tuner:0903-dorianwu
-
-mkdir -p ~/llm-tuner-work/{input/jobs,input/targets,input/configs,outputs,claude-raw-outputs}
-mkdir -p "$HOME/.tclaude" "$HOME/.claude"
-cd ~/llm-tuner-work
-
-docker run -dit \
-  --name llm-infer-tuner \
-  --restart unless-stopped \
-  -v "$PWD/input:/app/input" \
-  -v "$PWD/outputs:/app/outputs" \
-  -v "$PWD/claude-raw-outputs:/app/claude-raw-outputs" \
-  -v "$HOME/.tclaude:/home/runner/.tclaude" \
-  -v "$HOME/.claude:/home/runner/.claude" \
-  -v "$HOME/.ssh:/home/runner/.ssh:ro" \
-  ghcr.nju.edu.cn/wuhangxian/llm-infer-tuner:0903-dorianwu \
-  bash
-```
-
-这条命令虽然长，但只执行一次。它把输入、输出、AI 登录态和 SSH key 固定挂载好；以后不需要再写这些 `-v` 参数。
-
-容器第一次启动时会把镜像内置示例补到挂载的 `input/` 目录；只补缺失文件，不会覆盖你已经修改过的文件。
-
-如果宿主机之前用 root 创建过输出目录，先修复一次权限：
-
-```bash
-sudo chown -R 1000:1000 ~/llm-tuner-work/outputs ~/llm-tuner-work/claude-raw-outputs
-```
-
-### 2. 进入容器
-
-```bash
-docker exec -it llm-infer-tuner bash
-```
-
-进入后默认就在 `/app`。现在可以像普通项目一样工作：
-
-```bash
-nano input/jobs/my-job.json
-nano input/targets/my-target.json
-```
-
-### 3. 首次登录一次
-
-腾讯内网账号：
-
-```bash
-tclaude login
-```
-
-公开 Claude 账号：
-
-```bash
-claude login
-```
-
-终端如果没有自动打开浏览器，复制它打印的 URL 到浏览器完成登录。登录态已经挂载到宿主机，停止或重启容器后仍然保留。
-
-### 4. 以后每一步都是一行
-
-生成候选：
-
-```bash
-./gen_configs.sh input/jobs/my-job.json
-```
-
-使用公开 Claude：
-
-```bash
-./gen_configs.sh --agent claude input/jobs/my-job.json
-```
-
-指定模型：
-
-```bash
-./gen_configs.sh --model claude-opus-4-8 input/jobs/my-job.json
-```
-
-远程压测和排名：
-
-```bash
-./run_executor.sh input/jobs/my-job.json input/targets/my-target.json
-```
-
-生成报告：
-
-```bash
-./gen_report.sh outputs/<job_id>
-```
-
-就这三条主命令。结果会同时出现在容器 `/app/outputs` 和宿主机 `~/llm-tuner-work/outputs`。
-
-### 5. 容器停了以后
-
-```bash
-docker start llm-infer-tuner
-docker exec -it llm-infer-tuner bash
-```
-
-输入、输出和登录态都在宿主机，不会因为容器停止而丢失。
 
 ## 输入文件
 
