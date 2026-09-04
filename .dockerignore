@@ -7,8 +7,7 @@ __pycache__
 .mypy_cache
 .ruff_cache
 
-# 运行时数据通过 volume 挂载，不打进镜像。
-input
+# 输出与登录原始日志是运行时数据，不打进镜像；input 示例需要随镜像发布。
 outputs
 claude-raw-outputs
 

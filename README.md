@@ -2,7 +2,7 @@
 
 给定模型、GPU、SGLang 镜像、输入/输出长度和 SLA，自动生成候选启动参数，在真实 GPU 机器上压测并找出最优配置，最后生成可复现的部署报告。
 
-核心思路是：**AI 根据可追溯规则决定测试哪些候选，执行器负责真实启动、压测和排名。** 规则用于指导和解释，不会在生成阶段把实验性候选提前拦掉；能否启动和性能好坏以目标机器实测为准。
+核心思路是：**AI 决定测试哪些候选，确定性执行器负责校验、实测和排名。**
 
 ## 工作流
 
@@ -10,7 +10,7 @@
 job.json
    │
    ├─ ./gen_configs.sh
-   │    tclaude/claude 读取规则库和 catalogs
+   │    tclaude/claude 读取知识库和 catalogs
    │    → outputs/<job_id>/configs.jsonl
    │
    ├─ ./run_executor.sh
@@ -31,9 +31,9 @@ job.json
 ## 主要功能
 
 - 支持腾讯内网 `tclaude` 和公开 `claude` CLI，可用 `--agent`、`--model` 切换。
-- AI 读取 `SKILL.md`、`knowledge.md`、主题规则 YAML 和 GPU/模型/负载/镜像 catalogs，生成带理由的结构化候选。
+- AI 读取 `SKILL.md`、`knowledge.md` 和 GPU/模型/负载/镜像 catalogs，生成带理由的结构化候选。
 - 搜索 TP/EP、attention 后端、显存比例、KV cache、chunked prefill、调度策略和投机解码等参数。
-- 把 GPU、CUDA、模型结构和 SGLang 镜像事实写入候选理由；实验性组合也可以交给执行器实测，不在生成阶段硬拦。
+- 按 GPU、CUDA、模型结构和 SGLang 镜像参数白名单过滤必然无法启动的组合。
 - 通过 SSH 在目标机启动独立 Docker 容器，自动检查硬件、模型、镜像、端口和 `/health`。
 - 支持启动超时与重试、NUMA 感知 GPU 分配、多候选并行和整机满载实测。
 - 先预热，再按两轮策略搜索满足 SLA 的最大并发度。
@@ -46,7 +46,7 @@ job.json
 
 - 所有候选最终都会强制带且只带一个 `--disable-radix-cache`，避免固定请求命中前缀缓存后污染对比。
 - Mamba/GDN 模型只使用与 radix off 兼容的 `no_buffer`，不会生成依赖 radix cache 的 `extra_buffer`。
-- 投机解码由“模型能力/参数”与“镜像内置算法”取交集决定：模型卡优先读取 `speculative_options`，兼容旧的 `mtp_params`；镜像卡读取 `speculative_algorithms`。`NONE` 始终作为对照，EAGLE 不是唯一方案；需要外挂 draft 模型的算法必须提供 `speculative_draft_model_path`。
+- 投机解码是否生成由模型卡片的 `mtp_params` 决定。自带 MTP 权重的 EAGLE/NEXTN 类方案可以候选；需要外挂 draft 模型的算法必须提供 `speculative_draft_model_path`。
 - 不会根据 workload 人为写紧 `--context-length`，服务上下文长度由模型和 SGLang 配置决定。
 
 ## 最简单的 Docker 用法
@@ -61,7 +61,7 @@ ghcr.nju.edu.cn/wuhangxian/llm-infer-tuner:0903-dorianwu
 
 这是公开镜像，国内机器优先使用南京大学 GHCR 镜像源；如果该镜像站临时不可用，也可以把地址中的 `ghcr.nju.edu.cn` 换回 `ghcr.io`。
 
-镜像包含 Python/uv、Node.js、`tclaude`、公开 `claude`、Git、nano、jq、SSH 和 sshpass。镜像内的 `/app/README.md` 就是本说明。
+镜像包含 Python/uv、Node.js、`tclaude`、公开 `claude`、Git、nano、jq、SSH、sshpass，以及可直接修改的 `input/jobs`、`input/targets`、`input/configs` 示例。镜像内的 `/app/README.md` 就是本说明。
 
 ### 1. 第一次只做一次：拉镜像并创建容器
 
@@ -86,6 +86,8 @@ docker run -dit \
 ```
 
 这条命令虽然长，但只执行一次。它把输入、输出、AI 登录态和 SSH key 固定挂载好；以后不需要再写这些 `-v` 参数。
+
+容器第一次启动时会把镜像内置示例补到挂载的 `input/` 目录；只补缺失文件，不会覆盖你已经修改过的文件。
 
 如果宿主机之前用 root 创建过输出目录，先修复一次权限：
 
@@ -281,30 +283,6 @@ TargetSpec 描述“去哪里测试”：
 ```
 
 `params` 的下划线会自动转换为 SGLang 的连字符参数，布尔 `true` 会变成裸 flag；模型路径、host、port 和强制的 radix off 由执行器补齐或校正。
-
-## 可扩展规则库
-
-`knowledge.md` 现在只是入口索引，具体规则按主题拆开，便于一条一条追加：
-
-```text
-.claude/skills/sglang-server-config-gen/
-├── knowledge.md                 # 读取顺序和规则入口
-└── references/rules/
-    ├── attention.yaml           # attention 后端
-    ├── parallelism.yaml         # TP/PP/EP
-    ├── memory.yaml              # 显存、KV、混合架构
-    ├── speculative.yaml         # 投机解码
-    ├── scheduling.yaml          # 调度和搜索轴
-    └── fairness.yaml            # 公平性和报告口径
-```
-
-新增经验时，只需在对应 YAML 的 `rules` 数组末尾追加一条，写清 `id`、适用条件、指导意见和证据；不需要修改生成器代码。新增主题也会被自动发现。提交前可运行：
-
-```bash
-uv run python scripts/validate_knowledge.py
-```
-
-这个校验只检查规则文件格式、重复 ID 和证据完整性，不检查或拦截 AI 生成的候选命令。
 
 ## 常用高级开关
 
