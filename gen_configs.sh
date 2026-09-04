@@ -147,18 +147,9 @@ command -v python3 >/dev/null || { echo "❌ 需要 python3" >&2; exit 1; }
 
 SKILL_DIR=".claude/skills/sglang-server-config-gen"
 [ -f "$SKILL_DIR/SKILL.md" ] || { echo "❌ 找不到 skill: $SKILL_DIR/SKILL.md(请在 repo 根运行)" >&2; exit 1; }
-RULES_DIR="$SKILL_DIR/references/rules"
 command -v "$AGENT" >/dev/null || { echo "❌ $AGENT 不在 PATH" >&2; exit 1; }
 TCLAUDE_GUARD="runners/tclaude_guard.py"
 [ -f "$TCLAUDE_GUARD" ] || { echo "❌ 找不到 guard: $TCLAUDE_GUARD" >&2; exit 1; }
-
-# 只校验知识库格式，不把实验候选提前拦掉；是否能启动以目标 GPU 实测为准。
-if [ -f scripts/validate_knowledge.py ]; then
-  python3 scripts/validate_knowledge.py >/dev/null || {
-    echo "❌ 规则库校验失败，请先修复 references/rules/*.yaml" >&2
-    exit 1
-  }
-fi
 
 # 模型路径恒为占位符 —— 第一步机器无关,不绑死任何机器的物理路径。
 MODEL_PATH='${MODEL_PATH}'
@@ -197,10 +188,11 @@ mkdir -p "$(dirname "$OUT")"
 #      — 每条候选含 id + params + cmd + reasons 四个字段
 #      — 第 5 步 jq 再拆成一行一候选的 JSONL
 #
-# prompt 里还告诉 agent 按顺序读入口、规则索引、主题规则和 catalogs:
-#   ① SKILL.md → ② knowledge.md + references/rules/README.md
-#   ③ 按 JobSpec 读取相关 references/rules/*.yaml
-#   ④ catalogs/ 下按 ID 查 GPU/model/workload/image 事实
+# prompt 里还告诉 tclaude 该按顺序读 4 个知识库文件:
+#   ① SKILL.md     — 流程入口:该读什么、推导步骤、输出契约
+#   ② knowledge.md — 全部调优经验(§0-§9)
+#   ③ catalogs/    — gpu.yaml + models.yaml + workloads.yaml(按 job 里的 ID 查表)
+#   ④ catalogs/sglang-images.yaml  — 镜像信息(CUDA 版本、支持的 attention 后端)
 #
 # --model-path 在这里写死为 ${MODEL_PATH} 占位符,不绑定任何机器路径,
 # 第二步由 targets.json 填入实际路径。
@@ -243,19 +235,14 @@ ${JOB_JSON}
 
 ## 执行方式
 
-请按 \`${SKILL_DIR}/SKILL.md\` 的流程执行:先读 knowledge.md 和
-references/rules/README.md，再按 JobSpec 读取 attention/parallelism/memory/speculative/
-scheduling/fairness 相关 YAML，最后读取 catalogs/*.yaml(含 sglang-images.yaml)。
-投机解码必须把模型卡的 speculative_options/mtp_params 与镜像卡的
-speculative_algorithms 取交集，NONE 保留为对照，不能只写死 EAGLE。
-所有普通调优判据和输出格式都在 SKILL.md、规则文件和 catalogs 里，这里不重复。
-规则是决策依据和风险说明，不是生成阶段的候选硬闸；experimental 或资料不完整的候选
-可以生成并交给执行器实测。
+请按 \`${SKILL_DIR}/SKILL.md\` 的流程执行:读 knowledge.md + catalogs/*.yaml(含 sglang-images.yaml),
+按其中的约束和推导步骤生成候选配置。所有调优判据、硬约束、输出格式
+都在 SKILL.md 和 knowledge.md 里,这里不重复。
 
 ## 探索边界(必须遵守,直接影响耗时)
 
 - **输出格式的唯一权威是本 prompt 末尾的 JSON Schema 和 SKILL.md**。禁止为"对齐格式"去读 \`outputs/\`、\`claude-raw-outputs/\` 里任何历史生成结果(configs.json/configs.jsonl/ranking.json/*.jsonl raw)。那些是过往产物、可能过时或来自不同 job,不是格式标准,参照它们只会拖慢并引入不一致。
-- **只读你推导所必需的输入**:SKILL.md、knowledge.md、references/rules/*.yaml、catalogs/*.yaml(按 job 里的 ID 查表)。不要浏览 sibling job、不要翻别的 job 的 job.json/结果、不要 git log。本 job 的 JobSpec 已在上文给全。
+- **只读你推导所必需的输入**:SKILL.md、knowledge.md、catalogs/*.yaml(按 job 里的 ID 查表)。不要浏览 sibling job、不要翻别的 job 的 job.json/结果、不要 git log。本 job 的 JobSpec 已在上文给全。
 - **不要参考任何"之前跑过的类似 job"的候选或压测排名来做本次决策**。每个 job 独立按知识库推导;历史结果不构成本次判据。
 - 拿到查表所需事实后**尽快进入推导与产出**,不要做超出上述范围的探索性文件浏览。
 

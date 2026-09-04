@@ -48,6 +48,11 @@ RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 WORKDIR /app
 COPY . /app
 
+# 保留一份镜像内置 input 示例。即使用户把空宿主机目录挂载到 /app/input，
+# entrypoint 也能把缺失的示例补进去，且不会覆盖用户已有文件。
+RUN mkdir -p /opt/llm-infer-tuner-input \
+    && cp -a /app/input/. /opt/llm-infer-tuner-input/
+
 # 安装运行时依赖；开发依赖和宿主机的 .venv 不进入镜像。
 RUN uv sync --frozen --no-dev \
     && chmod +x /app/*.sh
@@ -57,7 +62,7 @@ RUN uv sync --frozen --no-dev \
 RUN groupadd --gid 1000 runner \
     && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash runner \
     && mkdir -p /app/outputs /app/claude-raw-outputs \
-    && chown -R runner:runner /app/outputs /app/claude-raw-outputs
+    && chown -R runner:runner /app/input /app/outputs /app/claude-raw-outputs
 ENV HOME=/home/runner
 USER runner
 

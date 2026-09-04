@@ -31,7 +31,7 @@ job.json
 ## 主要功能
 
 - 支持腾讯内网 `tclaude` 和公开 `claude` CLI，可用 `--agent`、`--model` 切换。
-- AI 读取 `SKILL.md`、`knowledge.md`、按主题拆分的 `references/rules/*.yaml` 和 GPU/模型/负载/镜像 catalogs，生成带理由的结构化候选。
+- AI 读取 `SKILL.md`、`knowledge.md` 和 GPU/模型/负载/镜像 catalogs，生成带理由的结构化候选。
 - 搜索 TP/EP、attention 后端、显存比例、KV cache、chunked prefill、调度策略和投机解码等参数。
 - 按 GPU、CUDA、模型结构和 SGLang 镜像参数白名单过滤必然无法启动的组合。
 - 通过 SSH 在目标机启动独立 Docker 容器，自动检查硬件、模型、镜像、端口和 `/health`。
@@ -41,8 +41,6 @@ job.json
 - 按 `goodput_per_host` 排名，并保留每个候选的参数、日志、并发点和失败原因。
 - 从已有结果生成 `best_config.md`，不会重新启动服务或重复压测。
 - 自动同步 SGLang 参数、attention 后端、模型架构、量化、MoE、MTP 和 workload 知识。
-
-知识库按 `attention.yaml`、`parallelism.yaml`、`memory.yaml`、`speculative.yaml`、`scheduling.yaml`、`fairness.yaml` 分主题维护；以后新增规则只需在对应 YAML 的 `rules` 数组追加一条，并运行 `uv run python scripts/validate_knowledge.py` 检查格式。
 
 ### 公平性约束
 
@@ -63,7 +61,7 @@ ghcr.nju.edu.cn/wuhangxian/llm-infer-tuner:0903-dorianwu
 
 镜像已公开，拉取时不需要 `docker login`。如果该镜像站临时不可用，可将地址中的 `ghcr.nju.edu.cn` 换成官方 `ghcr.io`。
 
-镜像包含 Python/uv、Node.js、`tclaude`、公开 `claude`、Git、nano、jq、SSH 和 sshpass。镜像内的 `/app/README.md` 就是本说明。
+镜像包含 Python/uv、Node.js、`tclaude`、公开 `claude`、Git、nano、jq、SSH、sshpass，以及可直接修改的 `input/jobs`、`input/targets`、`input/configs` 示例。镜像内的 `/app/README.md` 就是本说明。
 
 ### 1. 第一次只做一次：拉镜像并创建容器
 
@@ -88,6 +86,8 @@ docker run -dit \
 ```
 
 这条命令虽然长，但只执行一次。它把输入、输出、AI 登录态和 SSH key 固定挂载好；以后不需要再写这些 `-v` 参数。
+
+容器第一次启动时会把镜像内置示例补到挂载的 `input/` 目录；只补缺失文件，不会覆盖你已经修改过的文件。
 
 如果宿主机之前用 root 创建过输出目录，先修复一次权限：
 
